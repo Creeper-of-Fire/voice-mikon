@@ -1,0 +1,27 @@
+# 运行时产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 本地环境
+.venv/
+venv/
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+
+# Claude 本地配置(与其它子项目一致)
+.claude/
+
+# 运行期生成(portable 约定,见仓库根目录 AGENTS.md)
+# 配置、日志、缓存都放这里 —— 跟着项目走,不写 %APPDATA% 等系统位置
+data/
+
+# 日志
+*.log
+
+# 旧版本遗留(已迁移到 data/,留着只是防止误提交)
+*.log.legacy

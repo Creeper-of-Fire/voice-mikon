@@ -1,0 +1,32 @@
+[project]
+name = "qwen3-voice"
+version = "0.1.0"
+description = "基于本地 Qwen3-ASR 的全局语音输入 —— 按热键说话,文字直接打进光标处"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "numpy>=1.26",
+    "sounddevice>=0.4.6",
+    "pystray>=0.19",
+    "pillow>=10.0",
+    "torch>=2.6",
+    "transformers==4.57.6",
+    "qwen-asr==0.0.6",
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+qwen3-voice = "qwen3_voice.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qwen3_voice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

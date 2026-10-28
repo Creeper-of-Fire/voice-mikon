@@ -1,0 +1,24 @@
+{
+  "hotkey": "ctrl+alt+space",
+  "model": "0.6B",
+  "model_root": "D:\\Dev\\Environments\\models",
+  "input_device": null,
+  "device_name_hints": [
+    "USB PnP Audio",
+    "USB Audio",
+    "Realtek HD Audio Mic"
+  ],
+  "sample_rate": 16000,
+  "min_duration": 0.3,
+  "max_duration": 120.0,
+  "silence_rms": 0.002,
+  "language": null,
+  "hotwords": [],
+  "restore_clipboard": true,
+  "trailing_space": true,
+  "panel_geometry": "",
+  "panel_visible": true,
+  "show_tray": true,
+  "log_file": "",
+  "log_level": "INFO"
+}

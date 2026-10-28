@@ -102,39 +102,53 @@ class HotkeyListener:
         self._stop = threading.Event()
         self._registered = False
         self._thread_id: int | None = None
+        # 注册结果回传:线程里的异常必须带回 start(),否则会被
+        # threading 默认吞掉(pythonw 连 stderr 都没有) —— 那样
+        # 注册失败无声无息,热键死了都不知道(实测踩过)。
+        self._ready = threading.Event()
+        self._error: HotkeyError | None = None
 
     @property
     def registered(self) -> bool:
         return self._registered
 
     def start(self) -> None:
+        """注册并开始监听。
+
+        注册失败(组合被占用等)会**同步抛 HotkeyError** —— 即使
+        实际注册发生在线程里。
+        """
         if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._run, name="hotkey", daemon=True)
         self._thread.start()
-        # 等线程里注册完成或失败
-        self._stop.wait(0.05)
-        for _ in range(100):
-            if self._registered or not self._thread.is_alive():
-                break
-            self._stop.wait(0.05)
+        # 等注册完成/失败(限时,防卡死)
+        if not self._ready.wait(timeout=10.0):
+            raise HotkeyError("热键线程 10 秒内没有完成注册(异常)")
+        if self._error is not None:
+            raise self._error
 
     def _run(self) -> None:
         try:
             modifiers, vk = parse_hotkey(self.spec)
         except ValueError as e:
+            self._error = HotkeyError(str(e))
+            self._ready.set()
             self._stop.set()
-            raise HotkeyError(str(e)) from e
+            return
 
         if not user32.RegisterHotKey(None, self.hotkey_id, modifiers, vk):
             err = ctypes.get_last_error()
-            self._stop.set()
-            raise HotkeyError(
+            self._error = HotkeyError(
                 f"热键 {self.spec!r} 注册失败(err={err}),可能已被其它程序占用"
             )
+            self._ready.set()
+            self._stop.set()
+            return
 
         self._registered = True
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self._ready.set()
 
         msg = wt.MSG()
         try:

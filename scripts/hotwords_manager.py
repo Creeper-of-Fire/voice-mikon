@@ -25,9 +25,9 @@
     -15  纯版本号/纯数字
     -20  URL/路径/包名/文件名形态
 
-中文 n-gram(2~4 字):
+中文(jieba 分词,以词为单位):
     base = 出现次数
-    -999 停用词(的了是在……)
+    停用词(的了是在……)不进候选
     其余原样 —— 你反复用的表达(如"固有")频次自然高。
 
 你的编辑叠加在分数上:
@@ -40,15 +40,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# 路径
+# 路径(portable:跟项目走,尊重 QWEN3_VOICE_HOME,不写死绝对路径)
 
-DATA_DIR = Path(r"D:\Dev\Workspace\small-tools\qwen3-voice\data")
+_SCRIPT_DIR = Path(__file__).resolve().parent          # <项目>/scripts
+_PROJECT_DIR = _SCRIPT_DIR.parent                       # <项目>
+
+def _data_dir() -> Path:
+    override = os.environ.get("QWEN3_VOICE_HOME")
+    return Path(override).expanduser() if override else _PROJECT_DIR / "data"
+
+DATA_DIR = _data_dir()
 CANDIDATES = DATA_DIR / "hotwords_candidates.tsv"
 USER_EDITS = DATA_DIR / "hotwords_user.tsv"
 OUTPUT = DATA_DIR / "hotwords.txt"

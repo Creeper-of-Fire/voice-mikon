@@ -14,8 +14,14 @@ from qwen3_voice.asr.engine import ASREngine
 
 
 @pytest.fixture
-def engine():
-    e = ASREngine(model_root="dummy", hotwords=[])
+def engine(tmp_path):
+    """隔离的 engine:词表文件指向测试目录(不存在 → 只用传入列表)。
+
+    不隔离的话会读到真实的 data/hotwords.txt(那里有真词表),
+    context 断言就会跟着用户数据漂移。
+    """
+    e = ASREngine(model_root="dummy", hotwords=[],
+                  hotwords_file=tmp_path / "no_hotwords.txt")
     return e
 
 
@@ -87,13 +93,68 @@ def test_build_context_empty(engine):
     assert engine._build_context() == ""
 
 
-def test_build_context_official_format():
+def test_build_context_official_format(tmp_path):
     """热词按官方格式拼: 'Vocabulary: a, b, c.'"""
-    e = ASREngine(model_root="dummy", hotwords=["Qwen3-ASR", "PlasmaService"])
+    e = ASREngine(model_root="dummy", hotwords=["Qwen3-ASR", "PlasmaService"],
+                  hotwords_file=tmp_path / "no_hotwords.txt")
     assert e._build_context() == "Vocabulary: Qwen3-ASR, PlasmaService."
 
 
-def test_build_context_skips_blanks():
+def test_build_context_skips_blanks(tmp_path):
     """空词/空白词要跳过。"""
-    e = ASREngine(model_root="dummy", hotwords=["", "  ", "A", " B "])
+    e = ASREngine(model_root="dummy", hotwords=["", "  ", "A", " B "],
+                  hotwords_file=tmp_path / "no_hotwords.txt")
     assert e._build_context() == "Vocabulary: A, B."
+
+
+# ---------------- 词表文件热加载 ----------------
+# data/hotwords.txt 由 scripts/hotwords_manager.py 产出,
+# engine 每次识别时检查 mtime —— 改完文件立即生效,不用重启。
+
+def test_hotwords_file_loaded(tmp_path):
+    """词表文件里的词会并入 context。"""
+    f = tmp_path / "hotwords.txt"
+    f.write_text("Qwen3-ASR\n玉藻前\n", encoding="utf-8")
+    e = ASREngine(model_root="dummy", hotwords=["PlasmaService"], hotwords_file=f)
+    ctx = e._build_context()
+    assert ctx == "Vocabulary: PlasmaService, Qwen3-ASR, 玉藻前."
+
+
+def test_hotwords_file_dedupes_with_list(tmp_path):
+    """列表和文件里的重复词只出现一次。"""
+    f = tmp_path / "hotwords.txt"
+    f.write_text("A\nB\n", encoding="utf-8")
+    e = ASREngine(model_root="dummy", hotwords=["A", "C"], hotwords_file=f)
+    assert e._build_context() == "Vocabulary: A, C, B."
+
+
+def test_hotwords_file_reload_on_change(tmp_path):
+    """文件改了(mtime 变)之后,下一次识别用新词表 —— 不用重建 engine。"""
+    import os
+
+    f = tmp_path / "hotwords.txt"
+    f.write_text("旧词\n", encoding="utf-8")
+    os.utime(f, (1000, 1000))   # 显式设定,不依赖文件系统时间戳精度
+    e = ASREngine(model_root="dummy", hotwords_file=f)
+    assert "旧词" in e._build_context()
+
+    f.write_text("新词\n", encoding="utf-8")
+    os.utime(f, (2000, 2000))
+    ctx = e._build_context()
+    assert "新词" in ctx
+    assert "旧词" not in ctx
+
+
+def test_hotwords_file_missing_is_fine(tmp_path):
+    """文件不存在 → 只用传入的列表,不报错。"""
+    e = ASREngine(model_root="dummy", hotwords=["X"],
+                  hotwords_file=tmp_path / "nope.txt")
+    assert e._build_context() == "Vocabulary: X."
+
+
+def test_hotwords_file_comments_ignored(tmp_path):
+    """词表文件里的注释行和空行不算词。"""
+    f = tmp_path / "hotwords.txt"
+    f.write_text("# 注释\n\nA\n# 又一条\n", encoding="utf-8")
+    e = ASREngine(model_root="dummy", hotwords_file=f)
+    assert e._build_context() == "Vocabulary: A."

@@ -142,8 +142,8 @@ def load_config(path: Path | None = None) -> Config:
 
     优先级:显式参数 > 环境变量 > data/config.json > config.example.json > 默认值
 
-    术语表另有一份 ``data/hotwords.txt``,它会**并入** ``hotwords`` 字段
-    (配置里已有的词在前,文件里的词追加在后,去重)。
+    术语表文件 ``data/hotwords.txt`` 不在这里读 —— 由
+    ``asr/engine.py`` 在每次识别时实时读取(改完立即生效)。
     """
     ensure_dirs()
 
@@ -166,18 +166,9 @@ def load_config(path: Path | None = None) -> Config:
     else:
         cfg = Config()
 
-    # 术语表文件并入
-    file_words = load_hotwords_file()
-    if file_words:
-        merged = list(cfg.hotwords)
-        have = {w.strip() for w in merged}
-        for w in file_words:
-            if w not in have:
-                merged.append(w)
-                have.add(w)
-        cfg.hotwords = merged
-        log.info("已并入术语表文件 %s(%d 词,合计 %d)",
-                 hotwords_path(), len(file_words), len(merged))
+    # 注意:hotwords.txt 文件**不在这里并入** ——
+    # 词表由 asr/engine.py 在每次识别时实时读取(改完立即生效)。
+    # 这里只管 config.json 里的静态 hotwords 字段。
 
     # 补全派生字段
     if not cfg.log_file:

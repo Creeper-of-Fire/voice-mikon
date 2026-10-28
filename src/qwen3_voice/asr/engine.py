@@ -12,7 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
+from ..config import load_hotwords_file
 from ..logging_setup import get_logger
+from ..paths import hotwords_path
 
 log = get_logger("asr")
 
@@ -22,17 +24,29 @@ class ASRError(Exception):
 
 
 class ASREngine:
-    """封装 Qwen3ASRModel,支持热切换模型规格。"""
+    """封装 Qwen3ASRModel,支持热切换模型规格。
+
+    热词有**两个来源**,识别时合并(去重):
+      1. 构造时传入的列表(来自 config.json 的 ``hotwords`` 字段)
+      2. ``data/hotwords.txt`` 文件 —— **每次识别时实时读取**(mtime 缓存),
+         所以改完词表文件立刻生效,不用重启。
+         产出这个文件用独立程序 ``scripts/hotwords_manager.py``。
+    """
 
     def __init__(self, model_root: str | Path, model_tag: str = "0.6B",
                  language: str | None = None,
-                 hotwords: list[str] | None = None):
+                 hotwords: list[str] | None = None,
+                 hotwords_file: Path | None = None):
         self.model_root = Path(model_root)
         self.model_tag = model_tag
         self.language = language
         self.hotwords = list(hotwords or [])
         self._model = None
         self._lock = threading.Lock()
+        # 词表文件热加载(mtime 缓存,文件变了才重读)
+        self._hotwords_file = Path(hotwords_file) if hotwords_file else hotwords_path()
+        self._hw_file_mtime: float | None = None
+        self._hw_file_words: list[str] = []
 
     # ---------- 模型 ----------
 
@@ -85,6 +99,32 @@ class ASREngine:
 
     # ---------- 推理 ----------
 
+    def _effective_hotwords(self) -> list[str]:
+        """合并两个来源的热词:构造时传入的 + 词表文件的。
+
+        词表文件**每次识别时**检查 mtime —— 文件变了就重读,
+        所以 ``data/hotwords.txt`` 改完立即生效,不用重启程序。
+        文件不存在/读不了是正常情况(只用传入的列表),不报错。
+        """
+        words = [w.strip() for w in self.hotwords if w and w.strip()]
+        try:
+            mtime = self._hotwords_file.stat().st_mtime
+            if mtime != self._hw_file_mtime:
+                self._hw_file_words = load_hotwords_file(self._hotwords_file)
+                self._hw_file_mtime = mtime
+                if self._hw_file_words:
+                    log.info("词表文件已(重)加载:%s(%d 词)",
+                             self._hotwords_file, len(self._hw_file_words))
+        except OSError:
+            # 文件不存在或不可访问 —— 不是错误
+            pass
+        seen = set(words)
+        for w in self._hw_file_words:
+            if w not in seen:
+                seen.add(w)
+                words.append(w)
+        return words
+
     def _build_context(self) -> str:
         """把热词拼成识别提示(context biasing)。
 
@@ -96,7 +136,7 @@ class ASREngine:
         模型在 SFT 阶段就是用这种格式训练上下文偏置的,
         格式对上了才吃得到那份偏置,自己编一句提示效果会打折。
         """
-        words = [w.strip() for w in self.hotwords if w and w.strip()]
+        words = self._effective_hotwords()
         if not words:
             return ""
         return "Vocabulary: " + ", ".join(words) + "."

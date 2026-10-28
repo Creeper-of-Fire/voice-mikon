@@ -121,30 +121,48 @@ Qwen3-ASR 内置一个叫 **Context Biasing** 的能力:可以传任意文本
 
 所以术语表值得认真维护。
 
-#### 从聊天记录自动提取候选
+#### 术语表管理器(打分器工作流)
 
-术语表最难的是「维护」—— 哪些词值得收录?项目里有个工具从
-**MiniMax Code 的聊天记录**里提取候选(带频次):
+术语表最难的是「哪些词值得收录」—— 这个判断不该由代码或 agent 代劳,
+所以提供的是**打分器**而不是筛选器:全量候选公开给你,你来定夺。
 
 ```bash
-python scripts/build_hotwords.py              # 输出到 stdout
-python scripts/build_hotwords.py -o 候选.txt   # 输出到文件
+python scripts/hotwords_manager.py scan     # 聊天记录 → 全量候选(带分数)
+python scripts/hotwords_manager.py build    # 候选 + 你的编辑 → 最终词表
+python scripts/hotwords_manager.py show     # 查看最终词表
 ```
 
-它只取 `role == "user"` 的正文(用户手打的内容才是术语的真实形态),
-剥掉 harness 注入的 `<system-reminder>` 等块,只保留**紧邻汉字**的
-token(这一刀过滤掉大部分代码标识符和 PowerShell cmdlet),
-再排除路径、URL、包名、扩展名等噪音,最后按频次排序。
+三个文件,一条流水线(全部在 `data/` 下):
 
-**输出是候选,必须人工过一遍** —— 里面会混进 `Get-ChildItem`、
-`worker_session` 这类用户口述时根本不会说的东西。
+| 文件 | 谁写 | 作用 |
+|---|---|---|
+| `hotwords_candidates.tsv` | scan 产出 | **全量候选,零筛选**:分数/频次/类型/示例上下文 |
+| `hotwords_user.tsv` | **你** | 手动编辑,永不被覆盖:`=` 强制收录 / `!` 拉黑 / `+N` 加分 |
+| `hotwords.txt` | build 产出 | 最终词表,**每次识别时实时读取**(mtime 缓存),改完立即生效 |
 
-术语表放 `data/hotwords.txt`(一行一词,`#` 是注释),程序启动时自动读取,
-与 `config.json` 里的 `hotwords` 合并。仓库里有模板:`hotwords.example.txt`。
+scan 的中文部分用 **jieba 分词**(需要 `pip install jieba`),不是 n-gram ——
+n-gram 会产生"我还/不知/道怎"这类跨词碎片,分词以词为单位,
+"固有/歧义/采样率"都是完整词。试过把 Qwen tokenizer 词表喂给 jieba
+做增强,负收益(专业术语在 BPE 里本来就是拆开的,词表里全是通用组合),放弃。
+
+只取 `role == "user"` 的正文(用户手打的内容才是术语的真实形态),
+拉丁 token 按「紧邻汉字(+15)/cmdlet 形态(-10)/文件名(-20)」等规则打分;
+分数只是排序建议,**不替你做决定**。
+
+你的编辑示例(`data/hotwords_user.tsv`,Tab 分隔):
+
+```
+玉藻前	=	老师
+固有	+40	常用表达
+Monte Carlo	!	太通用
+```
 
 **词条要克制** —— 词越多偏置越强,但也越容易把没说的话写出来。
-建议 60~120 条,优先收录「读音和写法差别大」的词(Queen/Qwen、三ASR/ASR),
+build 默认取分数前 120(`--top` 可调),强制收录不受限。
+优先收录「读音和写法差别大」的词(Queen/Qwen、三ASR/ASR),
 拼写本来就对得上的(`API`、`PDF`)帮助不大。
+
+仓库里有编辑文件模板:`hotwords_user.example.tsv`。
 
 ---
 

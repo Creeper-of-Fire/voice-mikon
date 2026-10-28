@@ -18,6 +18,11 @@ dependencies = [
     "soundfile>=0.12",
 ]
 
+[project.optional-dependencies]
+# 术语表管理器(scripts/hotwords_manager.py scan)需要分词器
+# pip install -e ".[hotwords]"
+hotwords = ["jieba>=0.42"]
+
 [project.scripts]
 qwen3-voice = "qwen3_voice.__main__:main"
 

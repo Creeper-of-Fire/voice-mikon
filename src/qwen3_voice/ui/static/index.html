@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音输入</title>
+<!-- 本地样式，无任何外链资源，离线可用 -->
+<link rel="stylesheet" href="panel.css">
+</head>
+<!-- st-* 是状态类，由 panel.js 依据 window.__qwen.setState 切换 -->
+<body class="st-idle">
+  <div class="panel">
+    <!-- 标题栏：可拖动区域 -->
+    <header class="titlebar" id="titlebar">
+      <span class="dot" id="stateDot" data-state="idle" title="状态"></span>
+      <span class="title">语音输入</span>
+      <!-- 关闭按钮只是隐藏面板，不退出程序 -->
+      <button class="icon-btn" id="closeBtn" type="button" title="隐藏面板" aria-label="隐藏面板">✕</button>
+    </header>
+
+    <main class="content">
+      <!-- 主按钮：待机 / 录音中 / 识别中 三态 -->
+      <button class="main-btn" id="mainBtn" type="button">● 开始录音</button>
+
+      <!-- 电平条卡片（Canvas 绘制，独立于按钮的轻量视觉） -->
+      <section class="card card-level" id="levelCard">
+        <canvas id="levelCanvas"></canvas>
+      </section>
+
+      <!-- 状态行：左状态文字 + 右等宽计时 -->
+      <div class="status-row">
+        <span class="status-text tone-dim" id="statusText">待机</span>
+        <span class="timer" id="timer">0.0s</span>
+      </div>
+
+      <!-- 模型切换 -->
+      <div class="model-row">
+        <span class="row-label">模型</span>
+        <div class="seg" id="modelSeg" role="group" aria-label="模型切换">
+          <button class="seg-item is-active" type="button" data-model="0.6B">0.6B</button>
+          <button class="seg-item" type="button" data-model="1.7B">1.7B</button>
+        </div>
+      </div>
+
+      <!-- 识别结果预览：可换行、左对齐、超长内部滚动 -->
+      <section class="card card-result is-empty" id="resultCard">
+        <div class="result-text" id="resultText"></div>
+        <div class="result-empty" id="resultEmpty">识别结果将显示在这里</div>
+      </section>
+
+      <footer class="footer">
+        <span class="hotkey" id="hotkeyLabel">热键 Ctrl+Alt+V</span>
+        <button class="link-btn" id="quitBtn" type="button" title="退出程序">退出</button>
+      </footer>
+    </main>
+  </div>
+
+  <!-- 本地脚本，无任何外链资源 -->
+  <script src="panel.js"></script>
+</body>
+</html>

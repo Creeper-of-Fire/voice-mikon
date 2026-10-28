@@ -25,10 +25,12 @@ class ASREngine:
     """封装 Qwen3ASRModel,支持热切换模型规格。"""
 
     def __init__(self, model_root: str | Path, model_tag: str = "0.6B",
-                 language: str | None = None):
+                 language: str | None = None,
+                 hotwords: list[str] | None = None):
         self.model_root = Path(model_root)
         self.model_tag = model_tag
         self.language = language
+        self.hotwords = list(hotwords or [])
         self._model = None
         self._lock = threading.Lock()
 
@@ -83,6 +85,18 @@ class ASREngine:
 
     # ---------- 推理 ----------
 
+    def _build_context(self) -> str:
+        """把热词拼成识别提示。
+
+        qwen_asr 的 ``context`` 会作为 system role 喂给模型 ——
+        也就是在**识别阶段**就提示它这些词会出现,而不是识别完再改写。
+        这比"识别完用 LLM 润色"稳得多:不会凭空猜错别字,不会改掉原意。
+        """
+        words = [w.strip() for w in self.hotwords if w and w.strip()]
+        if not words:
+            return ""
+        return "以下是可能出现的专有名词,请准确转写:" + "、".join(words)
+
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000,
                    language: str | None = None) -> str:
         """识别音频,返回文本。
@@ -96,9 +110,11 @@ class ASREngine:
             return ""
 
         lang = language if language is not None else self.language
+        context = self._build_context()
         t0 = time.time()
         try:
-            results = self._model.transcribe(audio=(audio, sample_rate), language=lang)
+            results = self._model.transcribe(audio=(audio, sample_rate),
+                                              language=lang, context=context)
         except Exception as e:
             raise ASRError(f"识别失败: {e}") from e
 
@@ -111,8 +127,10 @@ class ASREngine:
         """识别音频文件。"""
         if self._model is None:
             raise ASRError("模型尚未加载")
+        context = self._build_context()
         t0 = time.time()
-        results = self._model.transcribe(audio=str(path), language=language)
+        results = self._model.transcribe(audio=str(path), language=language,
+                                         context=context)
         text = results[0].text if results else ""
         log.info("识别完成 %s / %.1fs 耗时: %s", path, time.time() - t0, text)
         return text

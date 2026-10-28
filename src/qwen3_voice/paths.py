@@ -43,9 +43,20 @@ def log_path() -> Path:
     return data_dir() / "voice_input.log"
 
 
+def webview_dir() -> Path:
+    """WebView2 运行时数据目录。
+
+    WebView2 默认把用户数据(Cookies、缓存、LocalStorage)写到
+    %LOCALAPPDATA%,那违反 portable 约定 —— 项目目录之外的东西
+    git status 看不到、删项目也删不掉。所以显式指到项目内的 data/。
+    """
+    return data_dir() / "webview"
+
+
 def ensure_dirs() -> None:
     """确保数据目录存在。"""
-    try:
-        data_dir().mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    for d in (data_dir(), webview_dir()):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass

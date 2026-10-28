@@ -1,14 +1,15 @@
 """应用入口。
 
 线程分工:
-  主线程      tkinter 面板的 mainloop(所有 UI 操作必须在这里)
+  主线程      面板的 mainloop(WebView2 GUI 消息循环)
   hotkey 线程 RegisterHotKey + GetMessage 循环(Win32 消息队列是线程局部的)
   tray 线程   pystray 自己的消息循环
   model/mic   后台初始化
   asr 线程    识别与注入
+  ui-push     面板的推送线程,把控制器事件转成前端调用
 
-热键线程触发时不能直接碰 tkinter,所以统一走控制器的订阅机制,
-由面板的主线程轮询事件队列。
+热键线程触发时不能直接碰 UI,所以统一走控制器的订阅机制,
+由面板的推送线程接力。
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     except HotkeyError as e:
         logger.error("%s", e)
         logger.error("请在配置里换一个不冲突的组合键")
-        panel._set_status("热键注册失败", "#e5484d")
+        panel.set_status("热键注册失败", "err")
         panel.show()
 
     logger.info("已就绪。按 %s 开始录音,再按一次结束。", config.hotkey)

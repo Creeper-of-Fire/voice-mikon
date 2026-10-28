@@ -9,6 +9,7 @@
 ## 特点
 
 - **常驻控制面板**:小窗一直开着,大按钮直接开始/停止录音,不用记热键
+- **真实电平反馈**:录音时能看到音量条随你说话的响度起伏,知道它确实在录
 - **全局热键**:`Ctrl+Alt+Space` 随处可用,系统级注册,不需要管理员权限
 - **完全本地**:模型跑在本机 GPU,音频不出本机,断网可用
 - **模型常驻**:0.6B / 1.7B 随时切换,切换后热键零等待
@@ -21,6 +22,7 @@
 ## 安装
 
 需要 Python 3.12+ 和一块 NVIDIA 显卡(8GB 显存足够)。
+面板基于 WebView2 渲染,Windows 10/11 一般都自带这个运行时,一般不用额外装。
 
 ```powershell
 # 1. 建环境
@@ -48,9 +50,9 @@ python -m qwen3_voice
 
 1. 面板出现在屏幕右下角,可拖动,位置会被记住
 2. 点面板上的 **「● 开始录音」** 或按 **Ctrl+Alt+Space**
-3. 说话,面板上会显示实时波形和计时
+3. 说话,面板上会显示实时电平和计时
 4. 再点一次 **「■ 停止录音」** 或再按一次热键
-5. 文字自动出现在你原来光标所在的位置
+5. 文字自动出现在你原来光标所在的位置,面板上也会留一份预览
 
 托盘图标:灰=待机,黄=加载中,红=录音中。
 
@@ -72,7 +74,7 @@ python -m qwen3_voice
 | `input_device` | `null` | 固定麦克风编号;`null` = 自动挑选 |
 | `device_name_hints` | USB 优先 | 优先匹配这些名称的麦克风 |
 | `language` | `null` | `null` = 自动检测语种 |
-| `hotwords` | `[]` | 热词,提升专有名词准确率 |
+| `hotwords` | `[]` | 热词,提升专有名词准确率(在**识别阶段**提示模型,不是事后改写) |
 | `restore_clipboard` | `true` | 粘贴后恢复原剪贴板 |
 | `trailing_space` | `true` | 末尾自动补空格 |
 | `silence_rms` | `0.002` | 低于此电平视为静音 |
@@ -109,9 +111,17 @@ src/qwen3_voice/
 │   ├── clipboard.py     剪贴板读写
 │   └── inject.py        文本注入(剪贴板 + Ctrl+V)
 └── ui/
-    ├── panel.py         tkinter 常驻面板
+    ├── panel.py         pywebview 宿主:建窗、事件推送、前端桥接
+    ├── static/
+    │   ├── index.html   面板结构
+    │   ├── panel.css    配色与布局(CSS 变量统一管理)
+    │   └── panel.js     电平条绘制、状态机、拖动
     └── tray.py          托盘图标
 ```
+
+前端是**纯静态 HTML/CSS/JS**,零 npm、零框架、零 CDN —— 项目定位是绿色软件,
+`git clone` + `pip install -e .` 就能跑,不该有 node_modules。Python 与前端之间
+是双向桥接,方法名两边严格对齐(契约见 `ui/static/` 旁的说明)。
 
 **分层原则**:UI 层不直接碰热键,热键不直接碰 UI,都通过 `core.controller`
 的订阅机制通信。想换 UI 实现或换触发方式,只动对应那一层。
@@ -124,7 +134,8 @@ src/qwen3_voice/
 
 | 线程 | 职责 | 为什么 |
 |---|---|---|
-| 主线程 | tkinter mainloop | 所有 tkinter 操作必须在创建它的线程 |
+| 主线程 | `webview.start()` 的 GUI 循环 | pywebview 要求在主线程启动 |
+| ui-push 线程 | 控制器事件 + 30fps 电平 → `evaluate_js` | `evaluate_js` 是阻塞的,放主线程会卡住窗口 |
 | hotkey 线程 | RegisterHotKey + GetMessage | Win32 消息队列是线程局部的 |
 | tray 线程 | pystray 消息循环 | pystray 自带循环 |
 | model / mic 线程 | 后台初始化 | 不阻塞启动 |
@@ -156,17 +167,37 @@ EDIFIER W800BT Plus 这类蓝牙耳机,在 WASAPI 共享模式下会被 Steam / 
 `TypeError: Unsupported audio input type`。
 
 **高分屏必须声明 DPI 感知**
-本机 175% 缩放。不声明的话 tkinter 不知道真实缩放,控件和布局全乱。
-而且即使声明了,tkinter 也只放大字体(`scaling`),**固定像素不会跟着放大** ——
-所以 padding、控件宽高这些常量都要自己乘一遍缩放系数,否则挤成一团。
+本机 175% 缩放。声明之后,`GetDeviceCaps(GetDC(0), LOGPIXELSX)` 就**不可靠了** ——
+进程是 Per-Monitor V2 感知时,这个值取决于调用线程的 DPI 上下文,不同线程拿到的
+结果不一样(实测主线程 96、探测线程 168),拿它算位置会把窗口甩到屏幕外。
+改用 `GetDpiForSystem()`(主显示器 DPI,与线程无关)和 `GetDpiForWindow(hwnd)`
+(窗口所在显示器)。
 
-**grid 在固定尺寸窗口里会重叠**
-无边框 + 固定尺寸的窗口里,grid 的行高分配经常算不准,控件互相叠在一起。
-改用 pack 顺序放置,行为可预测。
+**pywebview 给的初始窗口尺寸会被 WinForms 再缩一次**
+请求 300x260 逻辑像素,实际客户区只有 286x224 —— 底部几个像素的内容被裁掉了。
+根因是 WinForms 的 `AutoScaleMode.Dpi`。但 `window.resize()` 走的是另一条路径,
+尺寸是准的(实测 `resize(300,320)` 得到的正好是 320 逻辑像素)。
+所以面板的做法是:**显示后自己量一次 `document.body.scrollHeight`,再 resize 到刚好**,
+而不是相信建窗时给的尺寸。
 
-**Radiobutton 创建时会触发 command**
-tkinter 的 Radiobutton 在创建时会把绑定的 variable 设成自己的值,连带触发
-command —— 面板初始化时会误触发一次模型切换。用一个初始化标志守卫。
+**canvas 的 flex-basis:auto 会被它自己的默认尺寸撑大**
+`<canvas>` 没有 CSS 尺寸时,默认属性尺寸是 300x150。在 flex 容器里
+`flex-basis: auto` 取的就是这个属性高度 —— 电平条卡片会被撑到 162px,
+把结果卡片挤成 0 高度,文字直接看不见。
+必须给 canvas 一个确定的 flex-basis(`flex: 1 1 44px`)。
+
+**WebView2 的用户数据目录要显式指定**
+WebView2 默认把 Cookies / 缓存 / LocalStorage 写到 `%LOCALAPPDATA%`,
+那违反 portable 约定。而且只设 `WEBVIEW2_USER_DATA_FOLDER` 环境变量**不够** ——
+pywebview 会在 `start()` 里显式设置 `UserDataFolder` 把它覆盖掉,
+所以两个都要给:环境变量 + `webview.start(private_mode=False, storage_path=...)`。
+
+**电平必须推绝对值**
+电平条如果按「窗口内最大值」归一化,波形永远看起来是满的,
+用户就没法从条的高低看出「我说话声音大不大」—— 那条电平条就只剩装饰作用了。
+所以 Python 侧把 RMS 映射成 dBFS(下限 -70 dB,上限 0 dB)再推给前端,
+前端不做任何窗口归一化。下限定在 -60 也不行:实测安静房间的底噪就有 -62 dBFS,
+会被压成 0,电平条看着像死了。
 
 **模型路径拼接别搞错**
 `model_root / repo` 和 `model_root / model_tag` 是两个不同的路径。

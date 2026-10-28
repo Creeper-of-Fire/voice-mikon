@@ -86,6 +86,7 @@ class VoiceController:
             model_root=config.model_root,
             model_tag=config.model,
             language=config.language,
+            hotwords=config.hotwords,
         )
         # 注入器可替换 —— 测试用假实现,避免真的改剪贴板/模拟按键
         self._injector = injector or _default_injector

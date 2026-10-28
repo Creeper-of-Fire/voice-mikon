@@ -110,6 +110,42 @@ Qwen3-ASR 内置一个叫 **Context Biasing** 的能力:可以传任意文本
 **这是识别阶段的偏置,不是识别完再改写** —— 所以不会凭空猜错别字,
 也不会改掉原意,和你不想要的「LLM 润色」是两回事。
 
+#### 效果(实测)
+
+同一段音频,专有名词 `Qwen3-ASR`:
+
+| context | 识别结果 |
+|---|---|
+| 空 | `请帮我查一下服务器上那份叫做"Queen三ASR"的模型权重文件。` ❌ |
+| `Vocabulary: Qwen3-ASR, Qwen3, ASR.` | `请帮我查一下服务器上那份叫做 Qwen3-ASR 的模型权重文件。` ✅ |
+
+所以术语表值得认真维护。
+
+#### 从聊天记录自动提取候选
+
+术语表最难的是「维护」—— 哪些词值得收录?项目里有个工具从
+**MiniMax Code 的聊天记录**里提取候选(带频次):
+
+```bash
+python scripts/build_hotwords.py              # 输出到 stdout
+python scripts/build_hotwords.py -o 候选.txt   # 输出到文件
+```
+
+它只取 `role == "user"` 的正文(用户手打的内容才是术语的真实形态),
+剥掉 harness 注入的 `<system-reminder>` 等块,只保留**紧邻汉字**的
+token(这一刀过滤掉大部分代码标识符和 PowerShell cmdlet),
+再排除路径、URL、包名、扩展名等噪音,最后按频次排序。
+
+**输出是候选,必须人工过一遍** —— 里面会混进 `Get-ChildItem`、
+`worker_session` 这类用户口述时根本不会说的东西。
+
+术语表放 `data/hotwords.txt`(一行一词,`#` 是注释),程序启动时自动读取,
+与 `config.json` 里的 `hotwords` 合并。仓库里有模板:`hotwords.example.txt`。
+
+**词条要克制** —— 词越多偏置越强,但也越容易把没说的话写出来。
+建议 60~120 条,优先收录「读音和写法差别大」的词(Queen/Qwen、三ASR/ASR),
+拼写本来就对得上的(`API`、`PDF`)帮助不大。
+
 ---
 
 ## 架构
@@ -140,7 +176,13 @@ src/qwen3_voice/
     │   ├── panel.css    配色与布局(CSS 变量统一管理)
     │   └── panel.js     电平条绘制、状态机、拖动
     └── tray.py          托盘图标
+
+scripts/
+└── build_hotwords.py    从聊天记录提取术语表候选(只读)
 ```
+
+运行时数据都在项目内的 `data/`(portable,见 AGENTS.md):
+`config.json`、`hotwords.txt`、`voice_input.log`、`webview/`。
 
 前端是**纯静态 HTML/CSS/JS**,零 npm、零框架、零 CDN —— 项目定位是绿色软件,
 `git clone` + `pip install -e .` 就能跑,不该有 node_modules。Python 与前端之间

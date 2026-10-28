@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any
 
-from .paths import PROJECT_DIR, config_path, ensure_dirs, log_path
+from .paths import PROJECT_DIR, config_path, ensure_dirs, hotwords_path, log_path
 
 log = logging.getLogger("qwen3_voice.config")
 
@@ -111,10 +111,39 @@ class Config:
                 setattr(self, k, v)
 
 
+def load_hotwords_file(path: Path | None = None) -> list[str]:
+    """读术语表文件(一行一词,``#`` 开头是注释,空行忽略)。
+
+    文件不存在是正常情况 —— 没有术语而已,不算错误。
+    """
+    target = path or hotwords_path()
+    if not target.is_file():
+        return []
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("术语表 %s 读取失败: %s", target, e)
+        return []
+
+    words: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        w = line.strip()
+        if not w or w.startswith("#"):
+            continue
+        if w not in seen:
+            seen.add(w)
+            words.append(w)
+    return words
+
+
 def load_config(path: Path | None = None) -> Config:
     """加载配置。
 
     优先级:显式参数 > 环境变量 > data/config.json > config.example.json > 默认值
+
+    术语表另有一份 ``data/hotwords.txt``,它会**并入** ``hotwords`` 字段
+    (配置里已有的词在前,文件里的词追加在后,去重)。
     """
     ensure_dirs()
 
@@ -136,6 +165,19 @@ def load_config(path: Path | None = None) -> Config:
                 continue
     else:
         cfg = Config()
+
+    # 术语表文件并入
+    file_words = load_hotwords_file()
+    if file_words:
+        merged = list(cfg.hotwords)
+        have = {w.strip() for w in merged}
+        for w in file_words:
+            if w not in have:
+                merged.append(w)
+                have.add(w)
+        cfg.hotwords = merged
+        log.info("已并入术语表文件 %s(%d 词,合计 %d)",
+                 hotwords_path(), len(file_words), len(merged))
 
     # 补全派生字段
     if not cfg.log_file:

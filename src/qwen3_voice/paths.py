@@ -43,6 +43,15 @@ def log_path() -> Path:
     return data_dir() / "voice_input.log"
 
 
+def hotwords_path() -> Path:
+    """术语表文件(一行一词,``#`` 开头是注释)。
+
+    独立于 config.json —— 术语表经常要增删,放单独文件方便编辑,
+    也不用每次改都去动配置。文件不存在是正常情况(没有术语)。
+    """
+    return data_dir() / "hotwords.txt"
+
+
 def webview_dir() -> Path:
     """WebView2 运行时数据目录。
 

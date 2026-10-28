@@ -12,7 +12,6 @@
   --surface: #ffffff;
   --border: #e7e9ee;
   --border-soft: #f0f2f6;
-  --baseline: rgba(22, 28, 45, 0.10);
 
   /* 文字 */
   --text: #171a20;
@@ -29,14 +28,9 @@
   --err: #e5484d;
   --processing: #3b6ef5;
 
-  /* 电平条渐变（不同状态取不同的两根） */
-  --level-idle-a: #7fe7d7;
-  --level-idle-b: #14b8a6;
-  --level-rec-a: #fda4af;
-  --level-rec-b: #e11d48;
-  --level-proc-a: #a9c4ff;
-  --level-proc-b: #3b6ef5;
-  --level-peak: #f59e0b;
+  /* 电平条颜色（录音中用状态色；静音条用灰色） */
+  --level-rec: #e11d48;
+  --level-silent: #cfd5df;
 
   /* 尺寸与圆角 */
   --radius: 10px;
@@ -176,15 +170,15 @@ body.dragging .titlebar {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 7px 10px 7px;
+  gap: 4px;
+  padding: 5px 10px;
 }
 
 /* 主按钮 */
 
 .main-btn {
   flex: 0 0 auto;
-  min-height: 32px;
+  min-height: 30px;
   border: 0;
   border-radius: var(--radius);
   background: linear-gradient(180deg, #4a7bff, var(--accent) 58%, var(--accent-2));
@@ -236,15 +230,15 @@ body.dragging .titlebar {
 /* 电平条卡片
    用 min-height 而不是 height：Python 侧会按内容高度 resize 窗口，
    视口高度会变，写死 height 会让内容溢出被裁掉。
-   flex 允许它在视口变矮时略微压缩，但不让它把结果区挤没。 */
+   flex 允许它在视口变矮时略微压缩，但不让它把结果区挤没。
+   padding 2px + 上下边框 2px + 电平区 28px = 34px，正好等于 min-height。 */
 
 .card-level {
   position: relative;
   flex: 0 1 auto;
-  min-height: 36px;
-  padding: 6px 8px;
+  min-height: 34px;
+  padding: 2px 8px;
   overflow: hidden;
-  /* 画布用 flex 撑开，避免 height:100% 在 min-height 容器里出现循环依赖 */
   display: flex;
   flex-direction: column;
   transition: border-color 0.25s ease, box-shadow 0.25s ease;
@@ -255,14 +249,100 @@ body.dragging .titlebar {
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 6px 16px rgba(229, 72, 77, 0.10);
 }
 
-#levelCanvas {
-  display: block;
-  width: 100%;
-  /* 固定 flex-basis：卡片高度由画布内容决定（44 + 上下 padding = 56），
-     视口变矮时画布可以压缩，但不会像 flex-basis:auto 那样被画布自己的
-     后备缓冲尺寸（属性值）反向撑大 */
-  flex: 1 1 44px;
-  min-height: 0;
+/* 电平舞台：滚动电平条与提示文字共用这 28px，靠 opacity 互斥显示，
+   状态切换时整体淡入淡出。 */
+.wave-stage {
+  position: relative;
+  flex: 0 0 auto;
+  height: 28px;
+}
+
+/* 条的视口：22 根条 × 步进 6px = 132px，在卡片内水平居中，
+   溢出直接裁掉（滑出左边的条子不再显示）。 */
+.wave-viewport {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 132px;
+  height: 28px;
+  transform: translateX(-50%);
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 180ms ease, visibility 0s linear 180ms;
+}
+
+/* 条容器：右对齐，颜色用 currentColor 传给每根条 */
+.wave-bars {
+  position: absolute;
+  inset: 0;
+  color: var(--level-rec);
+}
+
+/* 一根条：固定 3px 宽，底对齐（从底部往上长），
+   位置靠 transform 平移（向左滚动），高度靠 style.height 改。
+   transform 过渡 80ms = 推进周期，高度过渡 75ms 略短，避免拖尾。 */
+.wave-bars i {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 3px;
+  height: 2px;
+  border-radius: 3px;
+  background: currentColor;
+  transition: transform 80ms linear, height 75ms ease-out;
+}
+
+/* 静音条（level ≤ 0.04）：灰色，而不是主色 */
+.wave-bars i.is-silent {
+  color: var(--level-silent);
+}
+
+/* 左侧渐变遮罩：从卡片底色渐变到透明，让条子"从虚无中浮现" */
+.wave-mask {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  pointer-events: none;
+  background: linear-gradient(90deg, var(--surface) 0%, rgba(255, 255, 255, 0) 100%);
+}
+
+/* 待机 / 识别中的提示文字（灰色，不动） */
+.wave-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 180ms ease, visibility 0s linear 180ms;
+}
+
+/* 只有录音中才显示电平条；其余状态只显示提示文字 */
+body.st-recording .wave-viewport {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 180ms ease, visibility 0s linear 0s;
+}
+
+body.st-idle .wave-hint,
+body.st-starting .wave-hint,
+body.st-processing .wave-hint,
+body.st-error .wave-hint {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 180ms ease, visibility 0s linear 0s;
 }
 
 /* 识别中：卡片上扫过一道高光，表现"不确定"的状态 */
@@ -383,7 +463,7 @@ body.dragging .titlebar {
 .card-result {
   position: relative;
   flex: 1 1 auto;
-  min-height: 34px;
+  min-height: 32px;
   display: flex;
   padding: 6px 10px;
   overflow: hidden;

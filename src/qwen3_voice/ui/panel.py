@@ -40,6 +40,7 @@ from typing import Any
 
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
+from ..win32.api import make_tool_window, set_tool_window_style
 
 log = get_logger("ui.panel")
 
@@ -50,15 +51,20 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 BASE_W = 300
 BASE_H = 260
 
-# 电平映射区间:dBFS -> 0..1
-# 下限取 -70 而不是 -60:实测这个房间的底噪就有 -62 dBFS,
-# 下限卡在 -60 会把底噪和"完全无声"混成同一个 0,电平条看着像死了。
-# 实际人声大概在 -35 ~ -15 dBFS,映射到 0.5 ~ 0.9,和底噪拉得开。
-DB_FLOOR = -70.0
-DB_CEIL = 0.0
-
 # 推送频率
 PUSH_INTERVAL = 1.0 / 30.0
+
+# 电平映射区间:dBFS -> 0..1
+#
+# 用对数域而不是直接用线性 RMS:MiniMax Code 那边靠浏览器的 AGC
+# 把 RMS 稳在 0.15 附近,我们没有 AGC,线性映射会因麦克风增益不同
+# 而时高时低。对数映射只关心"比底噪高多少",对增益不敏感。
+#
+# 下限取 -70:实测这个房间的底噪就有 -62 dBFS,下限卡在 -60 会把底噪
+# 和"完全无声"混成同一个 0,电平条看着像死了。实际人声约 -35 ~ -20 dBFS,
+# 映射到 0.5 ~ 0.71,和底噪拉得开。
+DB_FLOOR = -70.0
+DB_CEIL = 0.0
 
 # 控制器状态 -> 前端状态字符串
 _STATE_NAMES = {
@@ -102,14 +108,18 @@ def system_scale() -> float:
     return 1.0
 
 
-def dbfs_to_unit(rms: float) -> float:
+def dbfs_to_unit(rms: float, floor_rms: float = 0.0) -> float:
     """把线性 RMS 映射到 0..1(对数域)。
 
     DB_FLOOR dBFS 映射到 0,0 dBFS 映射到 1,中间线性插值。
     对数域而不是线性域,是因为人耳对 loudness 的感知接近对数,
     线性映射会让正常说话的音量全部挤在 0.05 以下。
+
+    `floor_rms` 是**噪声门**:低于它的直接判 0。不加这个门的话,
+    安静房间的底噪(-62 dBFS 实测)映射出来还有 0.11,会被前端当成
+    "有声音",电平条一直显示 7px 高度,看着像一直在响。
     """
-    if rms <= 1e-6:
+    if rms <= floor_rms or rms <= 1e-6:
         return 0.0
     db = 20.0 * math.log10(rms)
     if db <= DB_FLOOR:
@@ -216,6 +226,7 @@ class VoicePanel:
             resizable=False,
             background_color="#ffffff",
         )
+        self._window.events.before_show += self._on_before_show
         self._window.events.shown += self._on_window_shown
 
         controller.subscribe(self._on_event)
@@ -410,6 +421,12 @@ class VoicePanel:
             self._stop.wait(0.005)
 
     def _push_levels(self) -> None:
+        """把最近的音量序列推给前端。
+
+        推的是**绝对电平**(dBFS 映射后的 0..1)。前端绝不能按窗口内
+        最大值归一化 —— 那会让电平条永远看起来是满的,用户就没法从
+        条的高低看出"我说话声音大不大"了。
+        """
         if self._state != State.RECORDING:
             return
         recorder = getattr(self.controller, "recorder", None)
@@ -420,9 +437,10 @@ class VoicePanel:
             self._elapsed = recorder.elapsed
         except Exception:
             return
-        # 绝对电平:前端不做窗口归一化,这里就已经是最终值
-        mapped = [dbfs_to_unit(v) for v in raw]
-        self._call_js_pair("setLevels", json.dumps(mapped), "setElapsed", self._elapsed)
+        mapped = [dbfs_to_unit(v, self.controller.config.silence_rms)
+                  for v in raw]
+        self._call_js_pair("setLevels", json.dumps(mapped),
+                           "setElapsed", self._elapsed)
 
     def _apply_pending_visibility(self) -> None:
         """GUI 就绪后把期望的可见性真正应用上。
@@ -552,8 +570,34 @@ class VoicePanel:
 
     # ---------- 生命周期 ----------
 
+    def _native_handle(self) -> int:
+        """底层 Win32 窗口句柄(0 = 还没建好)。"""
+        try:
+            native = getattr(self._window, "native", None)
+            if native is None:
+                return 0
+            return int(native.Handle.ToInt64())
+        except Exception:
+            return 0
+
+    def _on_before_show(self) -> None:
+        """窗口即将显示:抢先改扩展样式,别让它在任务栏上露脸。"""
+        hwnd = self._native_handle()
+        if hwnd:
+            set_tool_window_style(hwnd)
+
     def _on_window_shown(self) -> None:
-        """GUI 建好了。"""
+        """窗口已创建:改成纯悬浮窗。
+
+        顺序很重要:
+          先隐藏再改样式 —— 任务栏只在窗口显示时重新评估可见性,
+          顺序反了会先冒出一个任务栏按钮再消失;
+          改完才放行 ``_gui_ready`` —— 免得推送线程抢先 show,
+          把窗口显示成还带任务栏按钮的样子。
+        """
+        hwnd = self._native_handle()
+        if hwnd:
+            make_tool_window(hwnd)
         self._gui_ready.set()
 
     def show(self) -> None:

@@ -13,30 +13,43 @@
 
   /* ==================== 常量 ==================== */
 
-  // 与契约一致的固定对称包络：5 根条，中间那根最高，两边对称递减。
-  // 注意：契约里那组 [0.45, 0.6, 0.78, 0.92, 1] 是 9 根条的包络，
-  // 靠镜像索引才是对称的；我们只有 5 根，必须自己取对称的那一半：
-  // ENV[0], ENV[2], ENV[4], ENV[2], ENV[0]。
-  var ENV = [0.45, 0.78, 1.0, 0.78, 0.45];
+  /* ---- 滚动电平条（对齐 MiniMax Code 的 asr-volume-bars）---- */
 
-  // 条高比例的上下限（契约规定 clamp 到 0.12 ~ 1.0）
-  var MIN_FRAC = 0.12;
-  var MAX_FRAC = 1.0;
+  // 同时显示的条数：22 根（MCode 那个小条是 13 根，我们的面板更宽）
+  var BAR_COUNT = 22;
 
-  // 待机呼吸幅度（电平域 0.06 ~ 0.12），让待机时的电平条保持"活着"而不是一条死线
-  var IDLE_BREATH_MIN = 0.06;
-  var IDLE_BREATH_MAX = 0.12;
+  // 条宽 / 条间距（px）：步进 = 宽 + 间距 = 6px，与 panel.css 保持一致
+  var BAR_WIDTH = 3;
+  var BAR_GAP = 3;
+  var BAR_STEP = BAR_WIDTH + BAR_GAP;
 
-  // 待机时条阵的基准电平。
-  // 注意：不能直接把 0.06~0.12 喂给契约公式——公式的下限 clamp 是 0.12，
-  // 五根条会被压成一样高的一条死线；所以待机另走"基准 + 呼吸"的合成幅度。
-  var IDLE_BASE_AMP = 0.32;
+  // 每推进一根条的周期（ms）
+  var BAR_TICK_MS = 80;
 
-  // 峰值保持：每 1/30 秒下降 0.8 dB（等价 24 dB/s）
-  var PEAK_FALL_DB_PER_SEC = 0.8 * 30;
+  // 元素池 = 可见条数 + 1：多出来的那根已经滑出视口左侧，
+  // 用来"回收"（复用同一个 DOM 节点当新条），省得新条横穿屏幕飞进来
+  var POOL_SIZE = BAR_COUNT + 1;
 
-  // 录音脉冲动效周期（秒）
-  var PULSE_PERIOD = 1.6;
+  // 静音死区：响度 <= 0.04 视为底噪
+  var DEAD_ZONE = 0.04;
+
+  // 条高上下限（px）：静音 2px，最响 20px
+  var SILENT_HEIGHT = 2;
+  var MAX_HEIGHT = 20;
+
+  // 4px 正好是 level = 0.04 对应的高度（MCode 的死区上界）；
+  // 不高于它就算静音条，画灰色
+  var SILENT_MAX_PX = 4;
+
+  // 待机 / 识别中不显示条形，只显示这行提示文字（idle 按当前热键动态生成）
+  var HINT_TEXT = {
+    starting: '准备中 …',
+    processing: '正在识别 …',
+    error: '出错了，请重试'
+  };
+
+  // Python 还没推热键时的兜底文案
+  var DEFAULT_HOTKEY = 'Ctrl+Alt+Space';
 
   // 契约定义的状态集合
   var STATES = ['starting', 'idle', 'recording', 'processing', 'error'];
@@ -49,19 +62,22 @@
   var ui = {
     state: 'idle',          // 当前状态机
     model: '0.6B',          // 当前模型
-    amp: 0,                 // 最近一帧的绝对电平（0..1，Python 推来）
-    hasSignal: false,       // 是否已经收到过真实电平
+    level: 0,               // 当前（平滑后）的响度 0..1
     elapsed: 0,             // 录音计时（秒）
     result: '',             // 识别结果全文
-    // 每个条位各自的峰值高度（比例），按 24 dB/s 回落
-    peakFrac: [0, 0, 0, 0, 0],
-    fractions: [MIN_FRAC, MIN_FRAC, MIN_FRAC, MIN_FRAC, MIN_FRAC]  // 当前渲染中的条高比例（做平滑用）
+    hotkey: ''              // 当前热键（原始字符串，不含"热键"前缀）
   };
 
   var el = {};             // DOM 缓存
-  var ctx = null;          // Canvas 2D 上下文
-  var lastFrame = 0;       // 上一帧时间戳，用于计算 dt
-  var cssVars = {};        // 从 CSS 变量读取的配色缓存
+
+  // 电平条的运行状态
+  var pool = [];           // 条的 DOM 节点：pool[0] 最新，pool[末位] 最老
+  var ages = [];           // 每根条的"年龄"：0 = 最新，越大越老
+  var slotIndex = 0;       // 三槽轮转指针
+  var lastBarHeight = 0;   // 上一根条的像素高度（做过渡插值用）
+  var smoother = { current: 0 };  // 电平滑器当前值
+  var barTimer = 0;        // 推进条的定时器
+  var clearTimer = 0;      // 离开录音后清空条的延时
 
   /* ==================== 小工具 ==================== */
 
@@ -71,62 +87,6 @@
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : (v > hi ? hi : v);
-  }
-
-  function now() {
-    return (window.performance && window.performance.now) ? window.performance.now() : Date.now();
-  }
-
-  // 读取 CSS 变量（统一配色来源），并解析成 rgba 字符串
-  function cssColor(name, fallback) {
-    var raw = cssVars[name];
-    if (!raw) {
-      return fallback;
-    }
-    return hexToRgba(raw, 1);
-  }
-
-  function hexToRgba(hex, alpha) {
-    var s = String(hex).trim();
-    if (s.charAt(0) === '#') {
-      s = s.slice(1);
-    }
-    if (s.length === 3) {
-      s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
-    }
-    if (s.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(s)) {
-      return 'rgba(59, 110, 245, ' + alpha + ')';
-    }
-    var r = parseInt(s.slice(0, 2), 16);
-    var g = parseInt(s.slice(2, 4), 16);
-    var b = parseInt(s.slice(4, 6), 16);
-    return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
-  }
-
-  function refreshCssVars() {
-    var names = [
-      '--baseline', '--level-idle-a', '--level-idle-b',
-      '--level-rec-a', '--level-rec-b',
-      '--level-proc-a', '--level-proc-b',
-      '--level-peak'
-    ];
-    var style = window.getComputedStyle ? window.getComputedStyle(document.documentElement) : null;
-    for (var i = 0; i < names.length; i++) {
-      var v = style ? style.getPropertyValue(names[i]) : '';
-      cssVars[names[i]] = v ? String(v).trim() : '';
-    }
-  }
-
-  // 圆角矩形路径（不依赖 ctx.roundRect，兼容性更稳）
-  function roundRectPath(c, x, y, w, h, r) {
-    var rr = Math.min(r, w / 2, h / 2);
-    c.beginPath();
-    c.moveTo(x + rr, y);
-    c.arcTo(x + w, y, x + w, y + h, rr);
-    c.arcTo(x + w, y + h, x, y + h, rr);
-    c.arcTo(x, y + h, x, y, rr);
-    c.arcTo(x, y, x + w, y, rr);
-    c.closePath();
   }
 
   /* ==================== 与 Python 的桥接 ==================== */
@@ -191,6 +151,7 @@
     if (STATES.indexOf(state) < 0) {
       state = 'idle';
     }
+    var prevState = ui.state;
     ui.state = state;
 
     // body 上的状态类
@@ -239,13 +200,24 @@
       el.resultCard.classList.toggle('is-processing', state === 'processing');
     }
 
+    // 录音中才滚动电平条；其它状态一条都不显示（不画任何假动画）
+    if (state === 'recording') {
+      if (prevState !== 'recording') {
+        resetLevelBars();
+      }
+    } else if (prevState === 'recording') {
+      stopBars();
+      scheduleClearBars();
+    }
+
+    // 频谱区的提示文字（待机 / 识别中显示，录音中清空）
+    updateWaveHint();
+
     // 状态行默认文案（Python 随后会用 setStatus 覆盖）
     if (el.statusText) {
       el.statusText.textContent = STATE_TEXT[state] || state;
       el.statusText.className = 'status-text ' + toneClass(STATE_TONE[state]);
     }
-
-    refreshCssVars();
   }
 
   function toneClass(tone) {
@@ -300,22 +272,25 @@
 
   function applyHotkey(text) {
     ensureDom();
-    if (!el.hotkey) {
-      return;
-    }
     var s = text == null ? '' : String(text).trim();
+    // 原始热键（去掉"热键 "前缀），供待机提示语使用
+    ui.hotkey = s.replace(/^热键\s*/, '').trim();
     if (!s) {
       s = '热键 未设置';
     } else if (s.indexOf('热键') !== 0) {
-      // Python 可能只推 "Ctrl+Alt+V"，这里补上前缀
+      // Python 可能只推 "Ctrl+Alt+Space"，这里补上前缀
       s = '热键 ' + s;
     }
-    el.hotkey.textContent = s;
+    if (el.hotkey) {
+      el.hotkey.textContent = s;
+    }
+    updateWaveHint();
   }
 
   /* ==================== 电平数据 ==================== */
 
-  // payload 是 JSON 字符串，形如 "[0.012,0.31,0.44]"，元素是 0..1 的绝对电平
+  // payload 是 JSON 字符串，内容是**最近若干帧的音量序列**（0..1，
+  // dBFS 对数域映射后的值）。**数组最后一个元素是最新值。**
   function parseLevels(payload) {
     var arr = payload;
     if (typeof arr === 'string') {
@@ -334,212 +309,228 @@
     var vals = [];
     for (var i = 0; i < arr.length; i++) {
       var v = Number(arr[i]);
-      if (isFinite(v)) {
-        vals.push(clamp(v, 0, 1));
-      }
+      vals.push(isFinite(v) ? clamp(v, 0, 1) : 0);
     }
-    if (!vals.length) {
-      return null;
-    }
-    var sum = 0;
-    for (var j = 0; j < vals.length; j++) {
-      sum += vals[j] * vals[j];
-    }
-    // amp = 这一帧样本的均方根电平（绝对值，不是按窗口最大值归一化的结果）
-    return { rms: Math.sqrt(sum / vals.length) };
+    return vals;
   }
 
   function setLevels(payload) {
-    var parsed = parseLevels(payload);
-    if (!parsed) {
+    var vals = parseLevels(payload);
+    if (!vals || !vals.length) {
+      // 空序列：这一帧没有新样本，不动平滑器
       return;
     }
-    ui.amp = parsed.rms;
-    ui.hasSignal = true;
-    // 峰值保持不在这里维护：条高每帧都会重算，由 updatePeakFractions 统一处理
+    // Python 侧 30fps 推一串滑动窗口，而条子 80ms 才出一根，
+    // 所以只取最新的一个值（数组末尾）喂给平滑器，
+    // 不做窗口内归一化 —— 归一化之后条子永远看起来是满的。
+    ui.level = smoothLevel(vals[vals.length - 1]);
   }
 
-  /* ==================== 电平条渲染 ==================== */
+  /* ==================== 高度映射 ==================== */
 
-  // 生成镜像对称的抖动系数：[r0, r1, r2, r1, r0]
-  // 左右成对共用同一个随机数，5 根条的高度才会严格对称（最左=最右、次外=次内）
-  function mirroredJitter() {
-    var r0 = 0.25 + Math.random() * 0.75;
-    var r1 = 0.25 + Math.random() * 0.75;
-    var r2 = 0.25 + Math.random() * 0.75;
-    return [r0, r1, r2, r1, r0];
+  // 响度(0..1) → 条高(px)。4 段非线性，这是"对比度明显"的来源：
+  //   0 ~ 0.04 : 固定 2px（死区 / 底噪）
+  //   0.04 ~ 0.2: 4 → 12px（斜率 50，最灵敏）
+  //   0.2  ~ 0.5: 12 → 18px（斜率 20）
+  //   0.5  ~ 1  : 18 → 20px（斜率 4，压缩）
+  function mapHeight(level) {
+    if (level <= DEAD_ZONE) {
+      return SILENT_HEIGHT;
+    }
+    if (level <= 0.2) {
+      return 4 + (level - DEAD_ZONE) / 0.16 * 8;
+    }
+    if (level <= 0.5) {
+      return 12 + (level - 0.2) / 0.3 * 6;
+    }
+    return Math.min(MAX_HEIGHT, 18 + (level - 0.5) / 0.5 * 2);
   }
 
-  // 计算本帧 5 根条的目标高度比例
-  function computeFractions(t) {
-    var fr = [0, 0, 0, 0, 0];
-    var i;
+  /* ==================== 电平滑 ==================== */
 
-    if (ui.state === 'recording' && ui.hasSignal) {
-      // 录音中：直接使用 Python 推来的绝对电平，绝不在前端做窗口归一化
-      var amp = ui.amp;
-      var jit = mirroredJitter();
-      for (i = 0; i < 5; i++) {
-        fr[i] = clamp(ENV[i] * amp * jit[i], MIN_FRAC, MAX_FRAC);
-      }
-      return fr;
-    }
-
-    // 待机 / 识别中 / 出错：低幅度呼吸动画，不要画成一条死线
-    var breath = IDLE_BREATH_MIN + (IDLE_BREATH_MAX - IDLE_BREATH_MIN) *
-      (0.5 + 0.5 * Math.sin(t / 1400));
-    var idleAmp = IDLE_BASE_AMP + breath;
-    var jitIdle = mirroredJitter();
-    for (i = 0; i < 5; i++) {
-      fr[i] = clamp(ENV[i] * idleAmp * jitIdle[i], MIN_FRAC, MAX_FRAC);
-    }
-    return fr;
+  // 升快降慢（上升 0.7、下降 0.5），再叠一层自适应增益：
+  // 电平越低增益越大，底噪附近的小起伏也能看出来
+  function smoothLevel(target) {
+    var t = smoother.current;
+    var r = t + (target - t) * (target > t ? 0.7 : 0.5);
+    smoother.current = r;
+    var out = r + (target - r) * (0.3 + 0.5 * r);
+    return clamp(out, 0, 1);
   }
 
-  // 当前状态下的条形配色
-  function levelColors() {
-    if (ui.state === 'recording') {
-      return [cssVars['--level-rec-a'] || '#fda4af', cssVars['--level-rec-b'] || '#e11d48'];
-    }
-    if (ui.state === 'processing') {
-      return [cssVars['--level-proc-a'] || '#a9c4ff', cssVars['--level-proc-b'] || '#3b6ef5'];
-    }
-    return [cssVars['--level-idle-a'] || '#7fe7d7', cssVars['--level-idle-b'] || '#14b8a6'];
+  /* ==================== 三槽轮转 ==================== */
+
+  // 每次算出三个高度（过渡 / 当前 / 衰减）轮流用，
+  // 相邻条因此天然错开，不会是一排单调的长短 —— "流动感"的来源。
+  //
+  // MCode 那边 r / decay 是"响度"（j() 的结果），这里直接保留像素高度：
+  // I() 与 j() 互为反函数，往返一次结果不变，省一层换算。
+  function nextBarHeight(curPx, level) {
+    var prev = lastBarHeight;
+    // 过渡条：与上一根做 65% 插值 → 缓升 / 缓降
+    var trans = prev + (curPx - prev) * 0.65;
+    // 衰减条：回声感，越响掉得越多
+    var decay = curPx <= SILENT_MAX_PX
+      ? curPx
+      : Math.max(SILENT_MAX_PX, curPx - (0.75 + 3.75 * level));
+    var slots = [trans, curPx, decay];
+    var h = slots[slotIndex % 3];
+    slotIndex++;
+    lastBarHeight = h;
+    // 死区下界：静音条恒为 2px
+    return clamp(h, SILENT_HEIGHT, MAX_HEIGHT);
   }
 
-  // 同步画布的后备缓冲与布局尺寸，并重置变换。
-  // 每帧都要做：Python 侧会异步 resize 窗口，布局尺寸变了而后备缓冲还没跟上时，
-  // 绘制用的坐标系和画布实际显示的盒子就不是一回事，条形会整体偏移。
-  function syncCanvas() {
-    if (!ctx || !el.canvas) {
-      return null;
-    }
-    var dpr = window.devicePixelRatio || 1;
-    var rect = el.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      return null;
-    }
-    var w = Math.max(1, Math.round(rect.width * dpr));
-    var h = Math.max(1, Math.round(rect.height * dpr));
-    if (el.canvas.width !== w || el.canvas.height !== h) {
-      el.canvas.width = w;
-      el.canvas.height = h;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { w: rect.width, h: rect.height };
+  /* ==================== 滚动电平条 ==================== */
+
+  // 新建一根条
+  function createBar() {
+    var bar = document.createElement('i');
+    bar.style.height = SILENT_HEIGHT + 'px';
+    bar.style.transform = 'translateX(0px)';
+    bar.classList.add('is-silent');
+    return bar;
   }
 
-  function draw(t, dt) {
-    var size = syncCanvas();
-    if (!size) {
+  // 推进一根新条：新条从右侧进，旧的从左侧出（滑出视口即被裁掉）
+  function advanceBar() {
+    if (!el.waveBars) {
       return;
     }
-    var W = size.w;
-    var H = size.h;
+    var level = ui.level;
+    var curPx = mapHeight(level);
+    var height = nextBarHeight(curPx, level);
 
-    ctx.clearRect(0, 0, W, H);
-
-    var baseline = H / 2;
-    // 条形的最大半高：留 3px 余量，视口变矮（画布只有 20 多像素）时条形也还有空间
-    var maxHalf = Math.max(4, baseline - 3);
-
-    // 目标值 + 峰值保持 + 轻微平滑
-    var target = computeFractions(t);
-    updatePeakFractions(target, dt);
-    for (var i = 0; i < 5; i++) {
-      ui.fractions[i] += (ui.peakFrac[i] - ui.fractions[i]) * 0.4;
+    var recycled;
+    if (pool.length < POOL_SIZE) {
+      // 池子还没满（正常情况下一进录音就填满了，这里只是兜底）
+      recycled = createBar();
+      el.waveBars.appendChild(recycled);
+    } else {
+      // 条够了：回收最老的一根（它已经在视口左侧外，回收时不会被人看见）
+      recycled = pool.pop();
+      ages.pop();
+    }
+    pool.unshift(recycled);
+    ages.unshift(0);
+    // 其余各根年龄 +1（也就是整体向左滑一个步距）
+    for (var i = 1; i < ages.length; i++) {
+      ages[i] += 1;
     }
 
-    // 基线
-    ctx.save();
-    ctx.strokeStyle = cssVars['--baseline'] || 'rgba(22, 28, 45, 0.10)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, Math.round(baseline) + 0.5);
-    ctx.lineTo(W, Math.round(baseline) + 0.5);
-    ctx.stroke();
-    ctx.restore();
-
-    // 5 根竖条作为一组，在画布内水平居中（整组居中，不是第一根对齐左边）
-    var n = ENV.length;
-    var gap = 8;
-    var bw = Math.max(5, Math.min(20, (W - gap * (n - 1)) / n));
-    var groupW = bw * n + gap * (n - 1);
-    var x0 = Math.round((W - groupW) / 2);
-    var radius = Math.min(bw / 2, 4);
-
-    var colors = levelColors();
-    var grad = ctx.createLinearGradient(0, baseline - maxHalf, 0, baseline + maxHalf);
-    grad.addColorStop(0, hexToRgba(colors[0], 1));
-    grad.addColorStop(1, hexToRgba(colors[1], 1));
-
-    // 录音中：轻微脉冲动效（辉光强度随节拍起伏）
-    var pulse = 0;
-    if (ui.state === 'recording') {
-      pulse = 0.5 + 0.5 * Math.sin((t / 1000) * (2 * Math.PI / PULSE_PERIOD));
+    // 写位置：年龄 a 的条平移 -a × 步距
+    // 回收的那根要"瞬移"到最右边：先关掉它的过渡，
+    // 否则它会从屏幕左边一路飞过来
+    recycled.style.transition = 'none';
+    recycled.style.height = SILENT_HEIGHT + 'px';
+    for (var j = 0; j < pool.length; j++) {
+      pool[j].style.transform = 'translateX(' + (-ages[j] * BAR_STEP) + 'px)';
     }
 
-    ctx.save();
-    ctx.fillStyle = grad;
-    if (pulse > 0) {
-      ctx.shadowColor = hexToRgba(colors[1], 0.55);
-      ctx.shadowBlur = 3 + 9 * pulse;
+    // 强制回流，让浏览器认下"瞬时"的位置（后面再放开过渡）
+    void el.waveBars.offsetWidth;
+
+    // 颜色：静音条画灰色；高度下一帧再给，触发 75ms 的高度过渡
+    var silent = height <= SILENT_MAX_PX;
+    recycled.classList.toggle('is-silent', silent);
+    var target = height.toFixed(2) + 'px';
+    window.requestAnimationFrame(function () {
+      recycled.style.transition = '';
+      recycled.style.height = target;
+    });
+  }
+
+  // 清空所有条（离开录音时用）
+  function clearBars() {
+    stopBars();
+    pool = [];
+    ages = [];
+    if (el.waveBars) {
+      el.waveBars.textContent = '';
     }
-    var tallest = 0;
-    for (var j = 0; j < n; j++) {
-      var half = Math.max(1.5, ui.fractions[j] * maxHalf);
-      var x = x0 + j * (bw + gap);
-      roundRectPath(ctx, x, baseline - half, bw, half * 2, radius);
-      ctx.fill();
-      if (ui.fractions[j] > ui.fractions[tallest]) {
-        tallest = j;
+  }
+
+  // 进入录音：重来一遍，不保留上一次的残留高度
+  function resetLevelBars() {
+    if (clearTimer) {
+      window.clearTimeout(clearTimer);
+      clearTimer = 0;
+    }
+    stopBars();
+    pool = [];
+    ages = [];
+    slotIndex = 0;
+    lastBarHeight = 0;
+    smoother.current = 0;
+    ui.level = 0;
+    if (el.waveBars) {
+      el.waveBars.textContent = '';
+      // 预填满 22 根（外加 1 根屏外的回收位）：
+      // 组宽一开始就是满的，和 MCode 那个定宽小条一致；
+      // 初始都是 2px 的静音基线，等真实音量来了再长起来
+      for (var i = 0; i < POOL_SIZE; i++) {
+        var bar = createBar();
+        bar.style.transform = 'translateX(' + (-i * BAR_STEP) + 'px)';
+        el.waveBars.appendChild(bar);
+        pool.push(bar);
+        ages.push(i);
       }
     }
-    ctx.restore();
-
-    // 峰值刻度：只画在最高的那根条上，一小段横向刻线，不贯穿全宽
-    var tickHalf = Math.max(1.5, ui.fractions[tallest] * maxHalf);
-    drawPeakTick(ctx, x0 + tallest * (bw + gap), bw, tickHalf, baseline);
+    startBars();
   }
 
-  // 在最高的那根条顶端画一小段峰值刻线
-  function drawPeakTick(c, x, bw, half, baseline) {
-    var color = cssVars['--level-peak'] || '#f59e0b';
-    c.save();
-    c.strokeStyle = hexToRgba(color, 0.5);
-    c.lineWidth = 1.5;
-    c.beginPath();
-    c.moveTo(x - 1, baseline - half);
-    c.lineTo(x + bw + 1, baseline - half);
-    c.stroke();
-    c.restore();
+  function startBars() {
+    stopBars();
+    barTimer = window.setInterval(advanceBar, BAR_TICK_MS);
   }
 
-  // 峰值保持：每个条位记住自己最近达到过的高度，按 24 dB/s 缓慢回落到当前高度
-  function updatePeakFractions(target, dt) {
-    // 每 1/30 秒下降 0.8 dB，换算成线性衰减系数（与帧率无关）
-    var k = Math.pow(10, -(PEAK_FALL_DB_PER_SEC * dt) / 20);
-    for (var i = 0; i < 5; i++) {
-      var p = ui.peakFrac[i] * k;
-      // 回落到当前高度为止：当前更高就直接抬上去，更低则继续缓慢下落
-      ui.peakFrac[i] = p > target[i] ? p : target[i];
+  function stopBars() {
+    if (barTimer) {
+      window.clearInterval(barTimer);
+      barTimer = 0;
     }
   }
 
-  // 主循环
-  function tick(t) {
-    var dt = lastFrame ? Math.min(0.1, (t - lastFrame) / 1000) : 0.016;
-    lastFrame = t;
-
-    draw(t, dt);
-    window.requestAnimationFrame(tick);
+  // 离开录音后，等淡出动画走完再把条清掉
+  function scheduleClearBars() {
+    if (clearTimer) {
+      window.clearTimeout(clearTimer);
+    }
+    clearTimer = window.setTimeout(function () {
+      clearTimer = 0;
+      clearBars();
+    }, 200);
   }
 
-  /* ==================== 画布尺寸 ==================== */
+  /* ==================== 电平区提示文字 ==================== */
 
-  // 窗口尺寸变化时同步画布（draw 每帧也会自行同步一次，这里只是提前做掉）
-  function resizeCanvas() {
-    syncCanvas();
+  // "ctrl+alt+space" -> "Ctrl+Alt+Space"
+  function prettyHotkey(raw) {
+    var parts = String(raw || '').split('+');
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].trim();
+      out.push(p ? p.charAt(0).toUpperCase() + p.slice(1) : p);
+    }
+    return out.join('+');
+  }
+
+  // 待机 / 准备中 / 识别中 / 出错：显示提示文字；录音中不显示
+  function waveHintText() {
+    if (ui.state === 'recording') {
+      return '';
+    }
+    if (ui.state === 'idle') {
+      return '按 ' + (prettyHotkey(ui.hotkey) || DEFAULT_HOTKEY) + ' 开始说话';
+    }
+    return HINT_TEXT[ui.state] || '';
+  }
+
+  function updateWaveHint() {
+    if (!el.waveHint) {
+      return;
+    }
+    el.waveHint.textContent = waveHintText();
   }
 
   /* ==================== 拖动 ==================== */
@@ -637,13 +628,6 @@
     if (el.titlebar) {
       el.titlebar.addEventListener('mousedown', onDragStart, false);
     }
-
-    // 画布尺寸跟随布局
-    window.addEventListener('resize', resizeCanvas, false);
-    if (window.ResizeObserver) {
-      var ro = new ResizeObserver(resizeCanvas);
-      ro.observe(el.canvas);
-    }
   }
 
   /* ==================== 对外接口 ==================== */
@@ -683,7 +667,9 @@
     el.quitBtn = $('quitBtn');
     el.mainBtn = $('mainBtn');
     el.levelCard = $('levelCard');
-    el.canvas = $('levelCanvas');
+    el.waveViewport = $('waveViewport');
+    el.waveBars = $('waveBars');
+    el.waveHint = $('waveHint');
     el.statusText = $('statusText');
     el.timer = $('timer');
     el.modelSeg = $('modelSeg');
@@ -691,15 +677,11 @@
     el.resultText = $('resultText');
     el.resultEmpty = $('resultEmpty');
     el.hotkey = $('hotkeyLabel');
-
-    if (el.canvas && el.canvas.getContext && !ctx) {
-      ctx = el.canvas.getContext('2d');
-    }
   }
 
   // Python 可能在 DOMContentLoaded 之前就推状态，这里做惰性绑定兜底
   function ensureDom() {
-    if (!el.canvas) {
+    if (!el.waveBars) {
       bindDom();
     }
   }
@@ -707,7 +689,6 @@
   function init() {
     bindDom();
 
-    refreshCssVars();
     applyState('idle');
     applyModel('0.6B');
     applyResult('');
@@ -715,8 +696,6 @@
     applyHotkey('热键 Ctrl+Alt+V');
 
     bindEvents();
-    resizeCanvas();
-    window.requestAnimationFrame(tick);
 
     // DOM 就绪后通知 Python，Python 收到后立即推一次全量状态
     notifyReady(0);

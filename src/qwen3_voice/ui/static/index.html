@@ -22,9 +22,19 @@
       <!-- 主按钮：待机 / 录音中 / 识别中 三态 -->
       <button class="main-btn" id="mainBtn" type="button">● 开始录音</button>
 
-      <!-- 电平条卡片（Canvas 绘制，独立于按钮的轻量视觉） -->
+      <!-- 滚动电平条卡片（对齐 MiniMax Code 的 asr-volume-bars）
+           22 根条从右往左滚动：JS 只改每根条的 transform（位置）和 height（高度），
+           高度由真实音量序列经非线性映射得到，不画任何假动画。
+           待机 / 识别中不显示条形，只显示一行居中提示文字 -->
       <section class="card card-level" id="levelCard">
-        <canvas id="levelCanvas"></canvas>
+        <div class="wave-stage">
+          <div class="wave-viewport" id="waveViewport">
+            <div class="wave-bars" id="waveBars"></div>
+            <!-- 左侧渐变遮罩：让条子"从虚无中浮现" -->
+            <div class="wave-mask"></div>
+          </div>
+          <div class="wave-hint" id="waveHint">按 Ctrl+Alt+Space 开始说话</div>
+        </div>
       </section>
 
       <!-- 状态行：左状态文字 + 右等宽计时 -->

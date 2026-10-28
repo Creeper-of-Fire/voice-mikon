@@ -81,6 +81,22 @@ user32.IsWindowVisible.restype = wt.BOOL
 user32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
 user32.FindWindowW.restype = wt.HWND
+user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wt.BOOL
+
+# ---------------- 纯悬浮窗的扩展样式 ----------------
+# 做法照 cmd-dock 的路子(src/win32.rs):把窗口从"普通应用窗口"改成
+# "工具窗口",于是它不进任务栏、也不进 Alt+Tab,点击还不抢焦点。
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080      # 不在任务栏、不在 Alt+Tab
+WS_EX_APPWINDOW = 0x00040000       # 一旦置上,上面那条就失效
+WS_EX_NOACTIVATE = 0x08000000      # 点击不抢焦点
+SW_HIDE = 0
+
+user32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
 
 # 剪贴板
 user32.OpenClipboard.argtypes = [wt.HWND]
@@ -239,3 +255,38 @@ def modifiers_held() -> bool:
     塞一个莫名其妙的东西。
     """
     return any(key_is_down(vk) for vk in (VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN))
+
+
+def set_tool_window_style(hwnd: int) -> bool:
+    """把窗口改成"工具窗口":不进任务栏、不进 Alt+Tab、点击不抢焦点。
+
+    三个扩展样式各司其职:
+      WS_EX_TOOLWINDOW  不在任务栏、也不在 Alt+Tab 列表
+      去掉 WS_EX_APPWINDOW  否则上面那条会被抵消(它是"按应用窗口处理")
+      WS_EX_NOACTIVATE  点击它不抢焦点 —— 点面板按钮时,底下正在编辑的
+                        窗口不会失焦,识别结果也就不会贴错地方
+    """
+    if not hwnd:
+        return False
+    try:
+        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        new_ex = (ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW
+        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex)
+        return True
+    except Exception:
+        return False
+
+
+def make_tool_window(hwnd: int) -> bool:
+    """同上,但**先隐藏再改样式**。
+
+    任务栏只在窗口显示时重新评估可见性,顺序反了的话会先冒出一个
+    任务栏按钮、然后才消失(能看到它闪一下)。cmd-dock 也是这个顺序。
+    """
+    if not hwnd:
+        return False
+    try:
+        user32.ShowWindow(hwnd, SW_HIDE)
+    except Exception:
+        pass
+    return set_tool_window_style(hwnd)

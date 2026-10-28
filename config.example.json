@@ -13,7 +13,11 @@
   "max_duration": 120.0,
   "silence_rms": 0.002,
   "language": null,
-  "hotwords": [],
+  "hotwords": [
+    "Qwen3-ASR",
+    "GitHub",
+    "API"
+  ],
   "restore_clipboard": true,
   "trailing_space": true,
   "panel_geometry": "",

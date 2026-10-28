@@ -86,20 +86,28 @@ class ASREngine:
     # ---------- 推理 ----------
 
     def _build_context(self) -> str:
-        """把热词拼成识别提示。
+        """把热词拼成识别提示(context biasing)。
 
-        qwen_asr 的 ``context`` 会作为 system role 喂给模型 ——
-        也就是在**识别阶段**就提示它这些词会出现,而不是识别完再改写。
-        这比"识别完用 LLM 润色"稳得多:不会凭空猜错别字,不会改掉原意。
+        官方把这个通道叫 **Context Biasing**:可以传任意文本
+        (API 上限 10000 token),让模型在**音频模糊时优先选这些词** ——
+        公司名、产品代号、医疗术语、领域黑话都靠它校准。
+
+        格式用官方 HF 版的写法 ``"Vocabulary: a, b, c."``:
+        模型在 SFT 阶段就是用这种格式训练上下文偏置的,
+        格式对上了才吃得到那份偏置,自己编一句提示效果会打折。
         """
         words = [w.strip() for w in self.hotwords if w and w.strip()]
         if not words:
             return ""
-        return "以下是可能出现的专有名词,请准确转写:" + "、".join(words)
+        return "Vocabulary: " + ", ".join(words) + "."
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000,
                    language: str | None = None) -> str:
         """识别音频,返回文本。
+
+        ``sample_rate`` 是**传入音频的实际采样率**(设备原生率,通常是 48 kHz)。
+        重采样到 16 kHz 由 ``qwen_asr`` 内部用 librosa 完成 —— 与官方评测
+        路径完全一致,不要在外面自己降采样(线性插值没有抗混叠滤波)。
 
         注意 qwen_asr 的音频输入必须是 (np.ndarray, sr) 元组或文件路径,
         传裸 ndarray 会报 Unsupported audio input type。

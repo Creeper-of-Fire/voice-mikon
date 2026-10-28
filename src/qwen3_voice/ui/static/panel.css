@@ -1,48 +1,77 @@
 /* qwen3-voice 语音输入面板样式
  *
- * 纯手写 CSS：无框架、无构建、无 CDN、无外部字体/图标请求，离线完全可用。
- * 配色统一收敛到 :root 的 CSS 变量，方便一处调整全局观感。
+ * 视觉实现**移植自 OpenType** 的 ``src/renderer/app.css``
+ * (AGPL-3.0,https://github.com/ct-jyjntc/opentype-public)。
+ * 本项目整体按 AGPL-3.0-or-later 发布(见仓库根目录 LICENSE)。
+ * (录音胶囊那边是同一套设计语言的另一处移植,见 capsule.css。)
  *
- * 面板瘦身后是"配置窗口"：只有标题栏、模型切换、页脚。
- * 录音过程的视觉(文字条 / 波形胶囊)在 capsule.css 里,那边是另一套文件。
- * 窗口本身是矩形（WebView2 做不到真透明圆角），所以 body 背景 = 卡片底色，
- * 视觉上融为一体，层次靠描边撑起来。
+ * 移植了什么:
+ *   - 设计 token 整段搬过来:颜色、圆角、阴影、字体栈。
+ *     浅色用它的 ``:root`` 那套,深色用它的 ``:root[data-theme='dark']`` 那套。
+ *   - 按钮语言:底色 card、描边 line、圆角 10px(通用 button)/
+ *     9px(icon-button、tabs 项)、hover 走 hover 色、
+ *     focus 走 accent 描边(它的 ``button`` / ``button.primary`` 规则)。
+ *   - 分段控件沿用它的 ``.tabs`` 写法:轨道是 nav 底色,
+ *     选中项是 card 底色 + 一层 shadow(见 app.css 的 .tabs)。
+ *   - 热键沿用它的 ``kbd`` 写法:描边 + 底部一条同色投影 + 圆角 7px。
+ *   - 状态点沿用它 answer-card 标题栏的写法:实心点 + 一圈 soft 色光晕。
+ *
+ * 两处本地适配(不是原样照抄):
+ *   1. 深色主题走 ``prefers-color-scheme`` 媒体查询 —— OpenType 用
+ *      ``:root[data-theme='dark']``(theme.ts 里由 JS 切 attribute),
+ *      本项目没有主题开关,直接跟 Windows 的应用主题即可。
+ *      (panel.py 的 ``system_prefers_dark()`` 只管建窗瞬间的底色。)
+ *   2. 字号整体压小一档(正文 13px / 辅助 12px):面板只有 260px 宽,
+ *      OpenType 的 14px/16px 在这里太挤。
+ *
+ * 布局保持"标题栏 + 模型行 + 页脚"的紧凑结构,不加装饰性元素。
+ *
+ * 面板窗口**不是透明窗口**(background_color 是实色),所以可以用阴影 ——
+ * 胶囊那边不行:透明窗口上 box-shadow 会渲染成一条灰带(见 capsule.css)。
  */
 
 :root {
-  /* 表面与描边 */
-  --bg: #ffffff;
-  --surface: #ffffff;
-  --border-soft: #f0f2f6;
+  color-scheme: light;
 
-  /* 文字 */
-  --text: #171a20;
-  --text-2: #565e6d;
-  --muted: #8b93a1;
+  /* ---- OpenType app.css :root(浅色)----
+     只搬了面板用得到的那些(--panel / --dot / --inverse / --soft /
+     --k-dict* 那些是它首页/弹窗才用的,面板用不上,没搬)。 */
+  --bg: #fff;
+  --card: #fff;
+  --nav: #f4f4f5;
+  --hover: #ececee;
+  --text: #111113;
+  --text2: #3f3f46;
+  --muted: #8b8b93;
+  --line: #ececee;
+  --accent: #111113;
+  --danger: #e5484d;
+  --danger-soft: #fdeeee;
+  --warn: #b7791f;
+  --warn-soft: #fdf5e6;
+  --k-ask: #e8f7ee;
+  --k-ask-b: #1d7a45;
+  --k-trans: #eaf0ff;
+  --k-trans-b: #2b4fbf;
+  --shadow: 0 1px 2px rgba(17, 17, 19, 0.04), 0 6px 24px rgba(17, 17, 19, 0.06);
+  /* 它还有一套 --shadow-lift(0 14px 34px),这里没搬:那是它给"可 hover
+     的大卡片"用的,面板卡片离窗口边只有 6px,34px 的模糊会被窗口边框切掉,
+     反而糊成一条脏边。面板用 --shadow 就够。 */
 
-  /* 状态色 */
-  --accent: #3b6ef5;
-  --ok: #16a34a;
-  --warn: #d97706;
-  --err: #e5484d;
-  --rec: #e5484d;
-  --processing: #3b6ef5;
+  /* 状态点的光晕底色:直接引用上面的 soft 系 token,
+     深色主题换了 token,这里自动跟着换。 */
+  --halo-ok: var(--k-ask);
+  --halo-warn: var(--warn-soft);
+  --halo-rec: var(--danger-soft);
+  --halo-processing: var(--k-trans);
 
-  /* 状态点周围的光晕:浅色底上要很淡,深色底上要更亮才看得见 */
-  --halo-ok: rgba(22, 163, 74, 0.12);
-  --halo-warn: rgba(217, 119, 6, 0.14);
-  --halo-rec: rgba(229, 72, 77, 0.16);
-  --halo-processing: rgba(59, 110, 245, 0.14);
-
-  /* 选中态的投影 */
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.10);
-
-  /* 尺寸与圆角 */
-  --radius-sm: 7px;
-
-  /* 字体全部使用系统自带，不请求任何外部字体文件 */
-  --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  /* 字体栈:OpenType 的那套,补上 Windows 上真能命中的中文字体。
+     胶囊那边用的是 system-ui 开头,在 Windows 上同样落到 Segoe UI,
+     两个窗口放在一起字形一致。 */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
+               "Liberation Mono", monospace;
 }
 
 /* ---------------- 日夜模式 ---------------- */
@@ -51,33 +80,28 @@
    WebView2 的 prefers-color-scheme 直接跟随 Windows 的应用主题,
    所以这里只要用媒体查询换掉变量值,不用 JS、也不用监听切换事件。
 
-   配色思路(深色 UI 的常规做法):
-     - 底色压暗,但**不是纯黑**(纯黑配纯白字对比过冲,久看刺眼)
-     - 凸起面(--surface)比底色**亮**,深色下"凸起"靠亮度而不是阴影
-     - 状态色整体提亮,否则深底上不够醒目 */
+   深色值就是 OpenType 的 ``:root[data-theme='dark']`` 那段,原样搬过来。 */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16171a;
-    --surface: #2a2c31;
-    --border-soft: #23252a;
-
-    --text: #e7e8ea;
-    --text-2: #a9adb6;
-    --muted: #7d828c;
-
-    --accent: #6f9bff;
-    --ok: #3ecf8e;
-    --warn: #e0a23c;
-    --err: #f2686c;
-    --rec: #f2686c;
-    --processing: #6f9bff;
-
-    --halo-ok: rgba(62, 207, 142, 0.20);
-    --halo-warn: rgba(224, 162, 60, 0.22);
-    --halo-rec: rgba(242, 104, 108, 0.22);
-    --halo-processing: rgba(111, 155, 255, 0.22);
-
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+    color-scheme: dark;
+    --bg: #0f0f11;
+    --card: #1a1a1d;
+    --nav: #18181b;
+    --hover: #27272b;
+    --text: #f4f4f5;
+    --text2: #d4d4d8;
+    --muted: #8b8b93;
+    --line: #2a2a2f;
+    --accent: #f4f4f5;
+    --danger: #ff7b7f;
+    --danger-soft: #3a1c1e;
+    --warn: #e3b25e;
+    --warn-soft: #33281a;
+    --k-ask: #15291e;
+    --k-ask-b: #5fd08f;
+    --k-trans: #1b2440;
+    --k-trans-b: #8aa6ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.3);
   }
 }
 
@@ -103,33 +127,46 @@ body {
   -webkit-user-select: none;
 }
 
+/* 面板本体 = 一张卡片。
+   窗口是矩形(WebView2 做不到真透明圆角),所以外圈留白是窗口底色
+   (--bg,和 panel.py 建窗时给的 background_color 一致),
+   卡片自己带圆角 + 描边 + 阴影 —— 这样窗口边角不会显得"切掉了一块"。
+   高度用 min-height 而不是 height:内容真的装不下时卡片会长高,
+   panel.py 的 _fit_window 量到 scrollHeight 会把窗口跟着放大。 */
 .panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: calc(100% - 12px);
+  margin: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 /* ---------------- 标题栏 ---------------- */
 
 .titlebar {
   flex: 0 0 auto;
-  min-height: 30px;
+  height: 32px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 6px 0 10px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--line);
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
 }
 
+/* 状态点:OpenType answer-card 标题栏那套 —— 实心点 + 一圈 soft 色光晕 */
 .dot {
   flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--ok);
+  background: var(--k-ask-b);
   box-shadow: 0 0 0 3px var(--halo-ok);
 }
 
@@ -140,19 +177,19 @@ body {
 }
 
 .dot[data-state="recording"] {
-  background: var(--rec);
+  background: var(--danger);
   box-shadow: 0 0 0 3px var(--halo-rec);
   animation: dot-pulse 1s ease-in-out infinite;
 }
 
 .dot[data-state="processing"] {
-  background: var(--processing);
+  background: var(--k-trans-b);
   box-shadow: 0 0 0 3px var(--halo-processing);
   animation: dot-pulse 1.4s ease-in-out infinite;
 }
 
 .dot[data-state="error"] {
-  background: var(--err);
+  background: var(--danger);
   box-shadow: 0 0 0 3px var(--halo-rec);
 }
 
@@ -169,31 +206,31 @@ body {
 }
 
 .title {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
 }
 
+/* 关闭按钮 = OpenType 的 .icon-button:无描边、圆形背景、hover 才出底色 */
 .icon-btn {
   margin-left: auto;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 9px;
   background: transparent;
-  color: var(--muted);
-  font-size: 13px;
+  color: var(--text2);
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.14s ease, color 0.14s ease;
+  transition: background 0.15s, color 0.15s;
 }
 
 .icon-btn:hover {
-  background: var(--border-soft);
+  background: var(--hover);
   color: var(--text);
 }
 
@@ -204,15 +241,15 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 6px 10px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 10px;
 }
 
 /* 模型切换 */
 
 .model-row {
   flex: 0 0 auto;
-  min-height: 22px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -223,44 +260,50 @@ body {
   color: var(--muted);
 }
 
+/* 分段控件 = OpenType 的 .tabs:
+   轨道 nav 底色,选中项 card 底色 + shadow。 */
 .seg {
   margin-left: auto;
   display: inline-flex;
   gap: 2px;
-  padding: 2px;
-  background: var(--border-soft);
-  border-radius: 8px;
+  padding: 3px;
+  background: var(--nav);
+  border-radius: 11px;
 }
 
 .seg-item {
+  min-height: 26px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
   border: 0;
-  padding: 2px 11px;
-  border-radius: 6px;
+  border-radius: 9px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text2);
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
-  transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
 .seg-item:hover {
+  background: var(--hover);
   color: var(--text);
 }
 
 .seg-item.is-active {
-  background: var(--surface);
-  color: var(--accent);
+  background: var(--card);
+  color: var(--text);
   font-weight: 600;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow);
 }
 
 /* 底部：热键提示 + 退出 */
 
 .footer {
   flex: 0 0 auto;
-  min-height: 15px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -268,25 +311,62 @@ body {
 }
 
 .hotkey {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
   color: var(--muted);
+}
+
+/* 热键本体 = OpenType 的 kbd:描边 + 底部同色投影 */
+.hotkey kbd {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 2px 0 var(--line);
+  background: var(--card);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 退出 = OpenType 的 .text-button:无框、无底色,hover 才变深 */
 .link-btn {
   flex: 0 0 auto;
-  padding: 0;
+  padding: 4px 0;
   border: 0;
-  background: transparent;
-  color: var(--muted);
+  background: none;
+  color: var(--text2);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
+  transition: color 0.15s;
 }
 
 .link-btn:hover {
-  color: var(--text-2);
-  text-decoration: underline;
+  color: var(--text);
+}
+
+/* ---------------- 焦点态 ---------------- */
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* ---------------- 动效降级 ---------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
 }

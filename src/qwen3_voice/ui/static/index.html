@@ -32,7 +32,8 @@
       </div>
 
       <footer class="footer">
-        <span class="hotkey" id="hotkeyLabel">热键 Ctrl+Alt+V</span>
+        <!-- "热键" 是静态标签,按键组合由 panel.js 写进 kbd(OpenType 的键帽样式) -->
+        <span class="hotkey"><span class="hotkey-label">热键</span><kbd id="hotkeyLabel">Ctrl+Alt+V</kbd></span>
         <button class="link-btn" id="quitBtn" type="button" title="退出程序">退出</button>
       </footer>
     </main>

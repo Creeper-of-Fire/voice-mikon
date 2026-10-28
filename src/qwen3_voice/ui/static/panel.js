@@ -127,16 +127,11 @@
   function applyHotkey(text) {
     ensureDom();
     var s = text == null ? '' : String(text).trim();
-    // 原始热键（去掉"热键 "前缀）
+    // 原始热键(去掉"热键 "前缀)
     ui.hotkey = s.replace(/^热键\s*/, '').trim();
-    if (!s) {
-      s = '热键 未设置';
-    } else if (s.indexOf('热键') !== 0) {
-      // Python 可能只推 "Ctrl+Alt+Space"，这里补上前缀
-      s = '热键 ' + s;
-    }
     if (el.hotkey) {
-      el.hotkey.textContent = s;
+      // 只把按键组合写进 <kbd>:"热键"两个字是 HTML 里的静态标签
+      el.hotkey.textContent = ui.hotkey || '未设置';
     }
   }
 

@@ -63,13 +63,21 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # 设计基准(逻辑像素 = CSS 像素)
 # 面板瘦身后只剩标题栏 + 模型行 + 页脚,高度按内容自适应,
 # 这里给的是"内容刚好装下"的下限,不准就在 _fit_window 里量。
-BASE_W = 240
-BASE_H = 88
+#
+# 尺寸跟 panel.css 的排版对上了:
+#   卡片外边距 6+6 + 卡片描边 1+1 + 标题栏 32+1 + 内容区 8+10
+#   + 模型行 32 + 行距 8 + 页脚 25 = 132
+# (内容再高一点也装得下 —— .panel 是 min-height,装不下时会长高,
+#  _fit_window 量到 scrollHeight 会把窗口跟着放大。)
+BASE_W = 260
+BASE_H = 132
 
 # 页面加载完成前的窗口底色(占位):跟系统主题走,免得深色系统下闪一下白。
 # 真正的配色由 CSS 的 prefers-color-scheme 媒体查询决定,这里只管"开场"。
+# 这两个值必须和 panel.css 里 :root 的 --bg 一致(浅色 #fff / 深色 #0f0f11),
+# 不然开场那一下会闪出两种底色。
 WINDOW_BG_LIGHT = "#ffffff"
-WINDOW_BG_DARK = "#16171a"
+WINDOW_BG_DARK = "#0f0f11"
 
 # 推送频率
 PUSH_INTERVAL = 1.0 / 30.0

@@ -30,6 +30,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__qwen.setElapsed(seconds)` | number | 录音中 30fps |
 | `__qwen.setStatus(text, tone)` | `text` string,`tone` ∈ `"dim"` \| `"ok"` \| `"warn"` \| `"err"` | 状态行文字与颜色 |
 | `__qwen.setResult(text)` | `text` string | 识别结果全文;空串表示清空 |
+| `__qwen.setPreview(text)` | `text` string | **实时预览文字**:录音过程中已识别出的文字,空串表示清空 |
 | `__qwen.setModel(tag)` | `tag` ∈ `"0.6B"` \| `"1.7B"` | 当前模型 |
 | `__qwen.setHotkey(text)` | `text` string | 热键显示文本,启动时推一次 |
 
@@ -47,6 +48,25 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 
 前端在 DOM 就绪后调用 `window.pywebview.api.ready()`;Python 收到 `ready()`
 后立即推一次**全量状态**(state / levels / elapsed / status / result / model / hotkey)。
+
+### preview 与 result 的关系
+
+- 录音过程中,后端把**累积到目前的全部音频**重新喂给模型识别一次,
+  模型每次都**重新生成完整文本**,所以推给前端的 `setPreview` 是
+  **整体替换**的 —— 不存在拼接、去重、切句
+  (做法与官方 `qwen_asr` 的 `streaming_transcribe` 一致)
+- `setPreview("")` 表示清空(录音开始时、以及最终结果到来时)
+- `setResult(text)` 是停止录音后的最终文本,前端收到它时应当清掉 preview
+- 两者**不同时显示**:有 preview 就不显示 final,final 来了就替换 preview
+
+### preview 是怎么算出来的
+
+- 每隔一段时间(约 1.5 秒)取一次录音器的**当前快照**(不消费音频,
+  录音继续),重采样到 16 kHz 后整段送模型识别
+- 停止录音时,用**整段音频**再识别一次作为最终结果 —— 最终结果的
+  质量与预览无关,预览只是提前给用户看
+- 因此预览文字在录音过程中可能"变来变去"(后一次整体替换前一次),
+  这是预期行为,不是 bug
 
 ---
 

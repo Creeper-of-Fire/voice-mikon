@@ -8,7 +8,7 @@ Python 与前端之间是双向桥接,方法名两边必须严格对齐
 (完整契约见同目录的 ``BRIDGE.md``):
 
   Python → JS   window.__qwen.setState / setLevels / setElapsed / setStatus
-                        / setResult / setModel / setHotkey
+                        / setResult / setPreview / setModel / setHotkey
   JS → Python   window.pywebview.api.ready / toggle_recording / switch_model
                         / get_snapshot / move_window / close_panel / quit_app
 
@@ -327,6 +327,21 @@ class VoicePanel:
             log.debug("调用前端 %s/%s 失败: %s", m1, m2, e)
             return False
 
+    def _push_preview(self, text: str) -> None:
+        """推送实时预览文字。"""
+        if not self._gui_ready.is_set():
+            return
+        payload = json.dumps(text, ensure_ascii=False)
+        script = (
+            "(function(){try{var q=window.__qwen;if(!q)return false;"
+            f"if(typeof q.setPreview==='function'){{q.setPreview({payload});return true;}}"
+            "return false;}catch(e){return false;}})()"
+        )
+        try:
+            self._window.evaluate_js(script)
+        except Exception as e:
+            log.debug("调用前端 setPreview 失败: %s", e)
+
     def _on_frontend_ready(self) -> None:
         """前端就绪,推一次全量状态。"""
         self._call_js("setState", self._state_name())
@@ -378,6 +393,9 @@ class VoicePanel:
             self._call_js("setStatus", self._status_text, self._status_tone)
             # 结果文字可能让内容变高,重新量一次窗口(别挡着推送线程)
             threading.Thread(target=self._fit_window, daemon=True).start()
+        elif event.kind == "preview":
+            # 实时预览文字(录音过程中已识别出的内容)
+            self._push_preview(event.text)
         elif event.kind == "error":
             self._status_text, self._status_tone = event.text, "err"
             self._call_js("setStatus", event.text, "err")

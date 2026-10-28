@@ -4,7 +4,7 @@
  *
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
  *   Python → JS : window.__qwen.setState / setLevels / setElapsed / setStatus
- *                 / setResult / setModel / setHotkey
+ *                 / setResult / setPreview / setModel / setHotkey
  *   JS → Python : window.pywebview.api.ready / toggle_recording / switch_model
  *                 / get_snapshot / move_window / close_panel / quit_app
  */
@@ -64,7 +64,8 @@
     model: '0.6B',          // 当前模型
     level: 0,               // 当前（平滑后）的响度 0..1
     elapsed: 0,             // 录音计时（秒）
-    result: '',             // 识别结果全文
+    result: '',             // 最终识别结果全文
+    partial: '',            // 实时部分结果（录音过程中已识别出的文字）
     hotkey: ''              // 当前热键（原始字符串，不含"热键"前缀）
   };
 
@@ -218,6 +219,15 @@
       el.statusText.textContent = STATE_TEXT[state] || state;
       el.statusText.className = 'status-text ' + toneClass(STATE_TONE[state]);
     }
+
+    // 新一轮录音开始：清掉上一轮的最终结果，
+    // 结果区回到"正在听 …"，随后由 partial 接管
+    if (state === 'recording' && prevState !== 'recording') {
+      ui.result = '';
+    }
+
+    // 结果区的状态提示文案跟着状态走
+    renderResultArea();
   }
 
   function toneClass(tone) {
@@ -237,16 +247,68 @@
     }
   }
 
+  // 结果区的占位 / 状态提示文案（既没有 partial 也没有 final 时显示）
+  var RESULT_HINT = {
+    idle: '识别结果将显示在这里',
+    starting: '准备中 …',
+    recording: '正在听 …',
+    processing: '正在识别 …',
+    error: '出错了，请重试'
+  };
+
+  // 渲染结果区：partial（灰色，临时）优先于 final（正常色），
+  // 两者都没有时显示状态提示。
+  // 三段内容**各自只有一份 DOM**，靠 class 切换显示，不做累积。
+  function renderResultArea() {
+    if (!el.resultCard) {
+      return;
+    }
+    var hasPartial = ui.partial.trim().length > 0;
+    var hasFinal = ui.result.length > 0;
+
+    // 内容没变就不重写，避免打断滚动位置
+    if (el.resultPartial && el.resultPartial.textContent !== ui.partial) {
+      el.resultPartial.textContent = ui.partial;
+    }
+    if (el.resultText && el.resultText.textContent !== ui.result) {
+      el.resultText.textContent = ui.result;
+    }
+
+    el.resultCard.classList.toggle('is-empty', !hasPartial && !hasFinal);
+    // 有 partial 就不显示 final；有 final 就不显示 partial
+    el.resultCard.classList.toggle('has-partial', hasPartial);
+    el.resultCard.classList.toggle('has-final', !hasPartial && hasFinal);
+
+    // 状态提示文案跟着状态走
+    if (el.resultEmpty) {
+      el.resultEmpty.textContent = RESULT_HINT[ui.state] || RESULT_HINT.idle;
+    }
+  }
+
+  // 实时预览：录音过程中后端不断推来的已识别文字，空串表示清空。
+  // 每次都是**整体替换**（不是追加）—— 后端每次重新识别全部音频。
+  function applyPreview(text) {
+    ensureDom();
+    var s = text == null ? '' : String(text);
+    // 只含空白视为没有内容
+    ui.partial = s.trim() ? s : '';
+    renderResultArea();
+    // 内容变化时把滚动位置拉回顶部（与最终结果一致）
+    if (el.resultPartial) {
+      el.resultPartial.scrollTop = 0;
+    }
+  }
+
   function applyResult(text) {
     ensureDom();
     ui.result = text == null ? '' : String(text);
-    if (!el.resultCard || !el.resultText) {
-      return;
-    }
-    el.resultText.textContent = ui.result;
-    el.resultCard.classList.toggle('is-empty', ui.result.length === 0);
+    // 最终结果到来时清掉 partial（两者不同时显示）
+    ui.partial = '';
+    renderResultArea();
     // 结果变化时把滚动位置拉回顶部
-    el.resultText.scrollTop = 0;
+    if (el.resultText) {
+      el.resultText.scrollTop = 0;
+    }
   }
 
   function applyElapsed(seconds) {
@@ -649,6 +711,9 @@
     setResult: function (text) {
       applyResult(text);
     },
+    setPreview: function (text) {
+      applyPreview(text);
+    },
     setModel: function (tag) {
       applyModel(tag);
     },
@@ -674,6 +739,8 @@
     el.timer = $('timer');
     el.modelSeg = $('modelSeg');
     el.resultCard = $('resultCard');
+    el.resultStack = $('resultStack');
+    el.resultPartial = $('resultPartial');
     el.resultText = $('resultText');
     el.resultEmpty = $('resultEmpty');
     el.hotkey = $('hotkeyLabel');

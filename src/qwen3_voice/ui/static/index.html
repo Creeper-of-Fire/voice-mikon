@@ -52,9 +52,17 @@
         </div>
       </div>
 
-      <!-- 识别结果预览：可换行、左对齐、超长内部滚动 -->
+      <!-- 识别结果预览：可换行、左对齐、超长内部滚动
+           栈内上下两段：上半是录音过程中的实时部分结果（灰色、临时），
+           下半是停止录音后的最终结果（正常色）；两者不同时显示 -->
       <section class="card card-result is-empty" id="resultCard">
-        <div class="result-text" id="resultText"></div>
+        <div class="result-stack" id="resultStack">
+          <!-- 实时部分结果：灰色 + 左侧竖线，暗示"这是临时的" -->
+          <div class="result-partial" id="resultPartial"></div>
+          <!-- 最终识别结果 -->
+          <div class="result-text" id="resultText"></div>
+        </div>
+        <!-- 占位 / 状态提示：待机、录音中（还没有 partial）、识别中 -->
         <div class="result-empty" id="resultEmpty">识别结果将显示在这里</div>
       </section>
 

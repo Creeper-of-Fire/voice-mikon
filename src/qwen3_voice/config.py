@@ -43,7 +43,7 @@ class Config:
     device_name_hints: list[str] = field(default_factory=lambda: [
         "USB PnP Audio", "USB Audio", "Realtek HD Audio Mic",
     ])
-    sample_rate: int = 16000                  # ASR 模型要求的输入采样率
+    sample_rate: int = 16000                  # ASR 模型要求的采样率;重采样由 qwen_asr 内部完成
     min_duration: float = 0.3
     max_duration: float = 120.0
     silence_rms: float = 0.002                # 低于此电平视为静音

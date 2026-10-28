@@ -118,6 +118,8 @@ def probe(index: int, duration: float = _PROBE_DURATION) -> tuple[int, float, fl
 
     arr = np.concatenate(frames, axis=0)
     if arr.ndim > 1:
+        # mean 会把 int16 提升成 float64 —— 这里只用来算 RMS,
+        # 不涉及刻度还原,但保持与 recorder.frames_to_int16 一致的做法。
         arr = arr.mean(axis=1)
     dur = len(arr) / rate
     rms = float(np.sqrt(np.mean((arr.astype(np.float32) / 32768.0) ** 2)))

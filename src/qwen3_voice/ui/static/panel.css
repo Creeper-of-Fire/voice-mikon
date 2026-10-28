@@ -469,6 +469,40 @@ body.st-error .wave-hint {
   overflow: hidden;
 }
 
+/* 结果栈：partial 在上、final 在下，纵向排列。
+   单独套一层是为了不改卡片原本的 flex 布局。 */
+.result-stack {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 实时部分结果（录音过程中已识别出的文字）
+   灰色 + 左侧竖线 + 淡背景，暗示"这是临时的"。
+   不用斜体（中文斜体难看），也不做任何闪烁/抖动动画。 */
+.result-partial {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 1px 6px;
+  border-left: 2px solid rgba(139, 147, 161, 0.45);
+  border-radius: 0 3px 3px 0;
+  background: var(--border-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  /* 换行与滚动行为和最终结果保持一致 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  text-align: left;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .result-text {
   flex: 1 1 auto;
   min-height: 0;
@@ -494,11 +528,21 @@ body.st-error .wave-hint {
   color: var(--muted);
 }
 
-.card-result.is-empty .result-text {
+/* 空态：既没有 partial 也没有 final 时，只显示占位 / 状态提示 */
+.card-result.is-empty .result-stack {
   display: none;
 }
 
 .card-result:not(.is-empty) .result-empty {
+  display: none;
+}
+
+/* partial 与 final 不同时显示：partial 优先 */
+.card-result.has-partial .result-text {
+  display: none;
+}
+
+.card-result.has-final .result-partial {
   display: none;
 }
 

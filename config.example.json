@@ -21,7 +21,7 @@
   "restore_clipboard": true,
   "trailing_space": true,
   "panel_geometry": "",
-  "panel_visible": true,
+  "panel_visible": false,
   "show_tray": true,
   "log_file": "",
   "log_level": "INFO"

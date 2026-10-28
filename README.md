@@ -6,12 +6,23 @@
 
 ---
 
+> **许可证:AGPL-3.0-or-later**。录音胶囊的样式与波形算法移植自
+> [OpenType](https://github.com/ct-jyjntc/opentype-public)(同为 AGPL-3.0),
+> 见 [`LICENSE`](LICENSE)。
+
 ## 特点
 
-- **常驻控制面板**:小窗一直开着,大按钮直接开始/停止录音,不用记热键
-- **真实电平反馈**:录音时显示**滚动式电平条**——真实音量数据驱动,
-  新条从右进旧条从左出,跟着声音流动。高度用非线性映射,小声也看得见;
+- **录音胶囊悬浮窗**:按热键后屏幕底部弹出一颗胶囊 —— 上方是实时识别文字,
+  下方是真实电平驱动的波形条和计时。识别完停留片刻自动隐藏,全程不抢焦点
+- **真实电平反馈**:波形条由**真实音量数据**驱动,新条从右进旧条从左出,
+  跟着声音流动。高度用非线性映射,小声也看得见;
   安静时就是安静的,不做假的抖动动画
+- **随时可以反悔**:胶囊左边一颗 ✕,点了就丢弃这一轮 —— 不识别、不注入,
+  一个字都不会贴出去
+- **轻量配置面板**:面板只管状态、切换模型、退出,默认不常驻(托盘打开),
+  需要时再点出来
+- **跟随系统深浅色**:面板自动切深色/浅色主题(不用手动设置),
+  胶囊固定深色 —— 它是压在别人窗口上的浮层,深底在任何背景上都读得清
 - **全局热键**:`Ctrl+Alt+Space` 随处可用,系统级注册,不需要管理员权限
 - **完全本地**:模型跑在本机 GPU,音频不出本机,断网可用
 - **模型常驻**:0.6B / 1.7B 随时切换,切换后热键零等待
@@ -51,13 +62,18 @@ python -m qwen3_voice
 
 启动后:
 
-1. 面板出现在屏幕右下角,可拖动,位置会被记住
-2. 点面板上的 **「● 开始录音」** 或按 **Ctrl+Alt+Space**
-3. 说话,面板上会显示实时电平和计时
-4. 再点一次 **「■ 停止录音」** 或再按一次热键
-5. 文字自动出现在你原来光标所在的位置,面板上也会留一份预览
+1. 托盘图标出现在右下角(灰=待机,黄=加载中,红=录音中)
+2. 按 **Ctrl+Alt+Space**,屏幕底部弹出一颗录音胶囊:
+   上方是实时识别文字,下方是波形条和计时
+3. 说话。再按一次热键(或点胶囊右边的 ✓)结束,文字自动出现在你原来
+   光标所在的位置,胶囊定格一下「已输入」然后自动隐藏
+4. 想放弃这一轮,点胶囊左边的 ✕ —— 不识别、不注入
+5. 需要切模型或退出,点托盘图标打开面板(面板默认不常驻)
 
-托盘图标:灰=待机,黄=加载中,红=录音中。
+出错了(录音太短、没检测到声音、识别失败、注入失败)时,胶囊上的文字条
+会变成暗红底并显示原因,停 4.5 秒再自动隐藏。
+
+> 面板位置会被记住;胶囊固定在屏幕底部居中,不能拖。
 
 ---
 
@@ -83,6 +99,7 @@ python -m qwen3_voice
 | `silence_rms` | `0.002` | 低于此电平视为静音 |
 | `max_duration` | `120` | 单次最长录音秒数 |
 | `panel_geometry` | `""` | 面板位置,自动保存(逻辑像素) |
+| `panel_visible` | `false` | 面板启动时是否常驻(`true` = 启动就显示,默认靠托盘打开) |
 
 环境变量:
 
@@ -188,15 +205,19 @@ src/qwen3_voice/
 │   ├── clipboard.py     剪贴板读写(+ 变更序号)
 │   └── inject.py        文本注入(剪贴板 + Ctrl+V,带归属守卫)
 └── ui/
-    ├── panel.py         pywebview 宿主:建窗、事件推送、前端桥接
+    ├── panel.py         pywebview 宿主:建窗、推送线程(多窗口共用一条)、前端桥接
+    ├── capsule.py       录音胶囊宿主:透明悬浮窗、不抢焦点、固定尺寸、显隐控制
     ├── static/
     │   ├── index.html   面板结构
-    │   ├── panel.css    配色与布局(CSS 变量统一管理)
-    │   └── panel.js     电平条绘制、状态机、拖动
+    │   ├── panel.css    面板配色与布局(CSS 变量统一管理)
+    │   ├── panel.js     面板状态、模型切换、拖动
+    │   ├── capsule.html 胶囊结构(文字条 + 胶囊)
+    │   ├── capsule.css  胶囊配色与布局(深底 + 半透明描边)
+    │   └── capsule.js   胶囊状态机、波形条绘制
     └── tray.py          托盘图标
 
 scripts/
-└── build_hotwords.py    从聊天记录提取术语表候选(只读)
+└── hotwords_manager.py 从聊天记录提取术语表候选(只读)
 ```
 
 运行时数据都在项目内的 `data/`(portable,见 AGENTS.md):
@@ -218,7 +239,7 @@ scripts/
 | 线程 | 职责 | 为什么 |
 |---|---|---|
 | 主线程 | `webview.start()` 的 GUI 循环 | pywebview 要求在主线程启动 |
-| ui-push 线程 | 控制器事件 + 30fps 电平 → `evaluate_js` | `evaluate_js` 是阻塞的,放主线程会卡住窗口 |
+| ui-push 线程 | 控制器事件 + 30fps 电平 → `evaluate_js`(面板和胶囊共用一条) | `evaluate_js` 是阻塞的,放主线程会卡住窗口;一条线程还能保证事件顺序 |
 | hotkey 线程 | RegisterHotKey + GetMessage | Win32 消息队列是线程局部的 |
 | tray 线程 | pystray 消息循环 | pystray 自带循环 |
 | model / mic 线程 | 后台初始化 | 不阻塞启动 |
@@ -327,6 +348,60 @@ pywebview 会在 `start()` 里显式设置 `UserDataFolder` 把它覆盖掉,
 "在录但没声"和"没在录"是两回事。反过来,**待机(根本没开始录音)时就不该显示
 条形**,改成一行状态文字;显示会动的假动画是在骗人。
 
+**胶囊显示绝不能抢焦点**
+抢了焦点,后面注入的文字就没有落点了 —— 光标会被抢到胶囊上,文字全丢。
+pywebview 的 `window.show()` 内部会调 WinForms 的 `Activate()`,必然抢焦点。
+所以胶囊显示一律走 Win32:先给 hwnd 加 `WS_EX_NOACTIVATE`,
+再用 `ShowWindow(hwnd, SW_SHOWNOACTIVATE)`。
+
+**pywebview 对透明窗口自带一个抢焦点的 hack**
+winforms 后端的 `EdgeChrome.on_navigation_start` 里有一段:透明窗口在
+页面**开始导航**时会 `form.Show()` + `form.Activate()`(源码注释写着
+"no idea why this works")。后果是胶囊在**启动时**就自己冒出来,
+还占住前台,用户的键盘输入全进了胶囊。
+`WS_EX_NOACTIVATE` 拦不住它 —— `Activate()` 走的是 `SetForegroundWindow`,
+那是程序显式激活,不是"用户点击"。
+
+定点修法:在 `before_show` 事件里把 `window.transparent` 置 `False`。
+这个时机唯一能同时满足两件事:BrowserForm 的构造函数**已经**按
+`transparent=True` 设好了 WebView2 的 `DefaultBackgroundColor = Transparent`
+(透明不受影响),而导航还没开始(那段 hack 因此不执行)。
+`before_show` 是同步事件,没有竞态。
+
+**透明窗口一旦被 resize,透明就失效**
+pywebview 的透明窗口只要被 `SetWindowPos` 改过尺寸,WebView2 就会
+用 Form 的背景色(`#F0F0F0`)把整块客户区填掉 —— 窗口外的区域从
+"透出桌面"变成"一块灰底"。实测:resize 前透明、resize 后灰底。
+
+色键(`WS_EX_LAYERED` + `LWA_COLORKEY`)对 WebView2 这个子窗口无效
+(灰底是 WebView2 自己画的);resize 后再重设 `DefaultBackgroundColor`
+又会被 CoreWebView2 的"只能从 UI 线程访问"挡下来。
+
+所以胶囊窗口**固定尺寸**(512×260 逻辑像素 —— 请求值会被 WinForms
+AutoScale 缩水,建窗时放大补偿),不做高度自适应 ——
+内容用 CSS 贴着窗口底部排,文字条到 `max-height` 就自己内部滚动。
+窗口空白区不属于命中区:前端把"文字条+胶囊"的矩形上报给 Python,
+`SetWindowRgn` 把窗口裁成内容形状,空白处点击直接穿透到底下应用。
+
+**透明窗口的背景要三层都透明**
+窗口(html / body)少写一层 `background: transparent` 就会露出一块
+不透明的底色 —— 根元素的背景会传播到 canvas,所以 `html` 这一层
+不能省。
+
+**还原焦点不许模拟按键**
+把焦点还给用户原来的窗口,只能用 `AttachThreadInput` +
+`SetForegroundWindow`。绝不能用 `keybd_event` / `SendInput` 之类
+"模拟 Alt 键"的老套路 —— 那会往用户的输入流里插东西,正在打字的人
+会打出多余的 Alt 组合。
+
+**透明窗口上不能有 box-shadow / backdrop-filter**
+它们在透明窗口上会渲染成一条灰带,非常难看。层次只靠"深底 + 半透明描边"。
+
+**面板和胶囊共用一条推送线程**
+两条线程并发推同一个 WebView2,事件顺序会乱 —— 胶囊的前端是状态机
+(setState → setPreview → setResult 必须按顺序到达)。而且电平采样一次
+就能分发给所有窗口,没必要重复采样。
+
 **便携存储**
 配置和日志放项目内的 `data/`,不要写 `%APPDATA%` —— 详见仓库根目录
 `AGENTS.md`。vibecoding 产物迭代快,系统目录里的旧配置会污染新版本,
@@ -378,9 +453,10 @@ uv pip install --python .venv\Scripts\python.exe pytest
 
 - 模型仓库: https://github.com/QwenLM/Qwen3-ASR
 - 论文: https://arxiv.org/abs/2601.21337
-- 交互与剪贴板策略参考: https://github.com/ct-jyjntc/opentype-public
-  (AGPL-3.0)。**只参考了设计思路与视觉规格**(剪贴板归属判定、
-  "部分成功不重贴"这类策略),实现是本仓库独立的 Python/JS 代码,
-  没有复制它的源码,所以本项目许可证保持 Apache-2.0。
-  若日后要直接搬用它的代码,需按 AGPL-3.0 处理。
+- 交互与视觉规格参考: https://github.com/ct-jyjntc/opentype-public
+  (AGPL-3.0)。胶囊的**样式与波形算法是直接移植**它的
+  `src/renderer/floating-bar.{tsx,css}`(见 `src/qwen3_voice/ui/static/capsule.*`
+  里的出处说明),剪贴板归属判定、"部分成功不重贴"这类策略则只参考了思路。
+  因为搬了它的源码,本项目整体按 **AGPL-3.0-or-later** 发布
+  (见仓库根目录 `LICENSE`)。
 - 频谱条的交互思路参考 MiniMax Code 的录音波形(真实 RMS 驱动 + 滚动条形图)

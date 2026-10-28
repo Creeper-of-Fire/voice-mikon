@@ -8,6 +8,9 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
       ^                                                              │
       └────────────────────── 识别完成/失败 ──────────────────────────┘
 
+用户随时可以 ``cancel_recording()`` 放弃当前这一轮:录音中就丢掉音频,
+识别中就作废结果 —— 两种情况都不识别、不注入,回到 IDLE。
+
 录音期间还会跑一个**预览线程**:把累积到的全部音频反复整段重识别,
 实时刷新"边说边显示"的文字(事件 kind="preview")。它只是体验,
 最终注入的始终是停止时那次整段识别的结果。
@@ -58,7 +61,7 @@ class State(str, Enum):
 class UIEvent:
     """控制器发给 UI 的事件。"""
 
-    kind: str                       # state / level / result / error / info
+    kind: str                       # state / level / result / error / info / cancelled
     state: State | None = None
     text: str = ""
     levels: list[float] = field(default_factory=list)
@@ -119,6 +122,16 @@ class VoiceController:
         # 实时预览线程(录音期间后台跑整段重识别)
         self._preview_stop: threading.Event | None = None
         self._preview_thread: threading.Thread | None = None
+
+        # 会话代号:每开始一轮录音 +1。
+        # 识别线程(阻塞推理,停不下来)靠它判断"我还是当前这一轮吗" ——
+        # 取消或开了新一轮都会让它过期,过期线程醒来后直接丢弃结果,
+        # 绝不注入文字(用户已经明确说了不要)。
+        # 注意:**"绝不注入作废文本"的主防线是这个代号**,
+        # `_cancelled` 标志只是补充(_process 里先查代号再注入,
+        # 竞态窗口里迟到的取消靠 session 递增兜住)。
+        self._session = 0
+        self._cancelled = False
 
     # ---------- 事件订阅 ----------
 
@@ -202,6 +215,10 @@ class VoiceController:
             return False
 
         self.recorder = recorder
+        # 新的一轮:会话代号 +1,并清掉上一轮的取消标记。
+        # 上一轮遗留的识别线程(如果还在跑)会因此过期,自动丢弃结果。
+        self._session += 1
+        self._cancelled = False
         self._set_state(State.RECORDING)
         # 新一轮录音:先把上一轮残留的预览文字清掉
         self._emit(UIEvent(kind="preview", text=""))
@@ -237,8 +254,44 @@ class VoiceController:
             return
 
         self._set_state(State.PROCESSING)
-        threading.Thread(target=self._process, args=(audio, native_rate),
+        threading.Thread(target=self._process, args=(audio, native_rate, self._session),
                          name="asr-run", daemon=True).start()
+
+    def cancel_recording(self) -> None:
+        """放弃当前这一轮:不识别、不注入。
+
+        录音中:停掉录音器和预览线程,音频直接丢掉。
+        识别中:推理是阻塞的,停不下来 —— 只能**标记**这一轮作废,
+        识别线程醒来后发现自己过期,于是丢掉结果、不注入文字。
+
+        两种情况都回到 IDLE(用户可以立刻开始下一轮),并发出
+        ``cancelled`` 事件,让胶囊显示「已取消」再淡出。
+        """
+        if self.state == State.RECORDING:
+            # 先停预览线程 —— 它用的是同一个引擎,不停掉会跟识别抢 GPU
+            self._stop_preview()
+
+            recorder = self.recorder
+            self.recorder = None
+            if recorder is not None:
+                try:
+                    recorder.stop()
+                except Exception as e:
+                    log.debug("取消录音时停止录音器失败: %s", e)
+
+            self._cancelled = True
+            self._set_state(State.IDLE)
+            self._emit(UIEvent(kind="preview", text=""))
+            self._emit(UIEvent(kind="cancelled", text="已取消"))
+            return
+
+        if self.state == State.PROCESSING:
+            # 识别线程还在跑,停不掉;标记作废 + 立刻回 IDLE,
+            # 免得用户被卡在"识别中"按不动热键
+            self._cancelled = True
+            self._set_state(State.IDLE)
+            self._emit(UIEvent(kind="preview", text=""))
+            self._emit(UIEvent(kind="cancelled", text="已取消"))
 
     # ---------- 实时预览 ----------
 
@@ -328,10 +381,19 @@ class VoiceController:
 
     # ---------- 识别与注入 ----------
 
-    def _process(self, audio: np.ndarray, sample_rate: int) -> None:
+    def _is_stale(self, session: int) -> bool:
+        """这一轮是不是已经作废了(被取消,或被新的一轮取代)。
+
+        作废的识别结果**绝不注入** —— 用户说了不要,就不能贴出去。
+        """
+        return self._cancelled or session != self._session
+
+    def _process(self, audio: np.ndarray, sample_rate: int, session: int) -> None:
         try:
             text = self.engine.transcribe(audio, sample_rate)
         except ASRError as e:
+            if self._is_stale(session):
+                return
             self._set_state(State.IDLE)
             self._emit(UIEvent(kind="error", text=str(e)))
             self._emit(UIEvent(kind="preview", text=""))
@@ -339,9 +401,17 @@ class VoiceController:
         except Exception as e:
             # 引擎抛任何异常都不能让工作线程死掉
             log.exception("识别异常: %s", e)
+            if self._is_stale(session):
+                return
             self._set_state(State.IDLE)
             self._emit(UIEvent(kind="error", text=f"识别失败: {e}"))
             self._emit(UIEvent(kind="preview", text=""))
+            return
+
+        # 作废的一轮:直接丢弃(不注入、不发结果、不动状态 ——
+        # 状态可能已经被新一轮的 RECORDING 接管了)
+        if self._is_stale(session):
+            log.debug("这一轮已被取消,丢弃识别结果")
             return
 
         self.last_text = text
@@ -353,6 +423,11 @@ class VoiceController:
 
         # 粘贴前捕获焦点窗口 —— 转写这 1 秒用户可能切窗口
         hwnd = get_foreground_window()
+        # 最后一道作废检查:上面 text.strip() 到这里只有几毫秒,
+        # 但用户的取消就落在这个窗口里的话,文字一样不该出门
+        if self._is_stale(session):
+            log.debug("注入前发现这一轮已被取消,丢弃")
+            return
         ok = self._injector(
             text,
             hwnd=hwnd,

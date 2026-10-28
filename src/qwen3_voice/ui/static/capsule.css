@@ -1,0 +1,263 @@
+/* qwen3-voice 录音胶囊样式
+ *
+ * 视觉实现**移植自 OpenType** 的 ``src/renderer/floating-bar.css``
+ * (AGPL-3.0,https://github.com/ct-jyjntc/opentype-public)。
+ * 本项目整体按 AGPL-3.0-or-later 发布(见仓库根目录 LICENSE)。
+ *
+ * 移植了两处本地适配(不是原样照抄):
+ *   1. 胶囊**不可拖动** → 去掉了 ``-webkit-app-region: drag`` 与
+ *      ``cursor: move``(OpenType 的胶囊能拖)。
+ *   2. 主题色用本项目的录音红 ``--wave: #ff5a5a``
+ *      (OpenType 的 dictation 模式是白色,靠 ``--wave`` 换色区分模式,
+ *      我们只有一种模式,用录音红)。
+ *   3. 胶囊宽度保持 fit-content(和 OpenType 一致):曾给过
+ *      ``min-width: 280px``,但内容(✕+波形+计时+✓)只有约 190px,
+ *      多出的空隙全堆在 ✓ 右侧,视觉上右截空了一大段 —— 已去掉。
+ *
+ * 两条硬规矩(都是透明窗口踩出来的):
+ *   1. 不写 box-shadow / backdrop-filter —— 在透明窗口上它们会渲染成
+ *      一条灰带,非常难看。层次只靠"深底 + 半透明白描边"表达。
+ *   2. html/body 背景必须 transparent,否则会铺一整块白/黑底。
+ *
+ * 上方的"文字条"是本项目自有的(OpenType 把状态文字放在胶囊里),
+ * 但配色与描边沿用它的设计语言。
+ */
+
+:root {
+  --deep: #0b0b0c;
+  --fg: #f4f4f5;
+  --stroke: #ffffff33;
+
+  /* 错误态(沿用 OpenType 的 error 配色) */
+  --err-bg: #2a0f11;
+  --err-stroke: #ff6b6b4d;
+  --err-fg: #fecaca;
+  --err-icon: #fca5a5;
+
+  --cancel-btn: #3a3a3e;
+  --cancel-btn-hover: #4a4a4f;
+
+  --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
+               "Liberation Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 高度写死 100%:窗口尺寸是固定的(见 .stack 的说明),
+   页面撑满视口,内容自己贴底排。 */
+html,
+body {
+  height: 100%;
+  /* 透明窗口要**三层**都透明:html / body / 控件本身。
+     少写一层就会露出一块不透明的底色(实测:html 不写就会铺一层白)。
+     根元素的背景会传播到 canvas,所以 html 这一层不能省。 */
+  background: transparent;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 内容贴着窗口底部排。
+   窗口是**固定**尺寸的 —— 透明窗口一旦被 resize,WebView2 的透明
+   背景就会失效,整块客户区会被 Form 的背景色填掉(见 capsule.py 的
+   WIN_H 注释)。所以高度不是"跟着内容走",而是反过来:窗口留够
+   空间,内容自己贴底。文字条超出就在它自己内部滚动。 */
+.stack {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100%;
+  padding: 10px 8px;
+}
+
+/* ---------------- 文字条（实时预览 / 最终结果 / 错误） ---------------- */
+
+.textbar {
+  width: fit-content;
+  max-width: 480px;
+  min-width: 96px;
+  margin: 0 auto 10px;
+  padding: 10px 14px;
+  /* 不许被 flex 压扁 —— 高度到 max-height 就自己内部滚动 */
+  flex: 0 0 auto;
+  background: var(--deep);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.8;
+  /* ⚠️ 这里**不能**用 white-space: pre-wrap ——
+     容器里的 HTML 缩进空白会被原样渲染成好几个空行
+     (实测:一行文字把文字条撑到 147px)。pre-wrap 只放在 .textbar-text 上。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* 120 不是随手定的:客户区会被 WinForms AutoScale 缩水(见
+     capsule.py 的 WIN_H 注释),窗口又不能 resize(会废掉透明)。
+     120 让"底部留白10+胶囊40+间隙10+文字条122+顶部留白"≈192,
+     在缩水后的客户区(实测 ~195)里也装得下,长文顶部不会被裁。 */
+  max-height: 120px;
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.textbar-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 空态：还没识别出内容时的占位 */
+.textbar.is-empty .textbar-text {
+  color: rgba(244, 244, 245, 0.5);
+}
+
+/* 错误态：暗红底 + 红描边 + 浅红字（沿用 OpenType 的 error 配色） */
+.textbar.is-error {
+  background: var(--err-bg);
+  border-color: var(--err-stroke);
+  color: var(--err-fg);
+}
+
+/* 取消态：中性灰,不惊动用户 */
+.textbar.is-cancelled {
+  color: rgba(244, 244, 245, 0.65);
+}
+
+/* ---------------- 胶囊（移植自 OpenType 的 recording-pill） ---------------- */
+
+.recording-pill {
+  --wave: #ff5a5a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 480px;
+  height: 40px;
+  margin: 0 auto;
+  padding: 4px;
+  flex: 0 0 auto;
+  color: #f4f4f5;
+  background: #0b0b0c;
+  border: 1px solid #ffffff33;
+  border-radius: 999px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.recording-pill button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.recording-pill .bar-cancel { background: #3a3a3e; color: #f4f4f5; }
+.recording-pill .bar-cancel:hover { background: #4a4a4f; }
+.recording-pill .bar-stop { background: var(--wave); color: #0b0b0c; }
+.recording-pill .bar-stop:hover { filter: brightness(0.92); }
+
+.bar-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+/* 波形：9 根对称包络的小条（短 → 高 → 短） */
+.waveform { display: flex; align-items: center; gap: 3px; height: 24px; }
+.waveform i {
+  display: block;
+  width: 3px;
+  min-height: 3px;
+  border-radius: 3px;
+  background: var(--wave);
+  transition: height 90ms;
+}
+
+/* 状态文字（OpenType 的 bar-label）
+   CJK 字形在 em 盒里偏低,往上顶 1px 才是视觉居中 */
+.bar-label {
+  display: block;
+  max-width: 180px;
+  padding: 0 4px;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding-bottom: 1px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #f4f4f5;
+}
+
+/* 计时（本项目自有：OpenType 的胶囊没有计时） */
+.bar-timer {
+  display: none;
+  flex: 0 0 auto;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(244, 244, 245, 0.7);
+  font-variant-numeric: tabular-nums;
+}
+
+.bar-state {
+  display: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #ffffff14;
+  color: var(--wave);
+}
+.recording-pill.done .bar-state { background: var(--wave); color: #0b0b0c; }
+.recording-pill.error { background: #2a0f11; border-color: #ff6b6b4d; }
+.recording-pill.error .bar-label { color: #fecaca; }
+.recording-pill.error .bar-state { background: #ffffff14; color: #fca5a5; }
+.recording-pill:not(.recording):not(.done):not(.error):not(.cancelled) .bar-state svg { animation: bar-spin 1.1s linear infinite; }
+@keyframes bar-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .bar-state svg { animation: none !important; } }
+
+/* ---------------- 阶段切换 ---------------- */
+
+/* 录音中：波形 + 计时，右侧是结束钮 */
+.recording-pill.recording .waveform { display: flex; }
+.recording-pill.recording .bar-timer { display: inline; }
+.recording-pill.recording .bar-stop { display: grid; }
+.recording-pill.recording .bar-state { display: none; }
+.recording-pill.recording .bar-label { display: none; }
+
+/* 非录音态：一行状态文字 + 右侧状态图标 */
+.recording-pill:not(.recording) .waveform { display: none; }
+.recording-pill:not(.recording) .bar-timer { display: none; }
+.recording-pill:not(.recording) .bar-stop { display: none; }
+.recording-pill:not(.recording) .bar-label { display: block; }
+.recording-pill:not(.recording) .bar-state { display: grid; }
+
+/* bar-state 里三个图标按阶段切换 */
+.bar-state svg { display: none; }
+.recording-pill.processing .icon-loader,
+.recording-pill.cancelled .icon-loader { display: block; }
+.recording-pill.done .icon-check { display: block; }
+.recording-pill.error .icon-info { display: block; }

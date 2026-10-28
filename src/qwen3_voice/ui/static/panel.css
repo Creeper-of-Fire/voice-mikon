@@ -2,15 +2,17 @@
  *
  * 纯手写 CSS：无框架、无构建、无 CDN、无外部字体/图标请求，离线完全可用。
  * 配色统一收敛到 :root 的 CSS 变量，方便一处调整全局观感。
+ *
+ * 面板瘦身后是"配置窗口"：只有标题栏、模型切换、页脚。
+ * 录音过程的视觉(文字条 / 波形胶囊)在 capsule.css 里,那边是另一套文件。
  * 窗口本身是矩形（WebView2 做不到真透明圆角），所以 body 背景 = 卡片底色，
- * 视觉上融为一体，层次靠描边和内部阴影撑起来。
+ * 视觉上融为一体，层次靠描边撑起来。
  */
 
 :root {
   /* 表面与描边 */
   --bg: #ffffff;
   --surface: #ffffff;
-  --border: #e7e9ee;
   --border-soft: #f0f2f6;
 
   /* 文字 */
@@ -20,26 +22,63 @@
 
   /* 状态色 */
   --accent: #3b6ef5;
-  --accent-2: #2f5ee0;
-  --rec: #e5484d;
-  --rec-2: #cf2f38;
   --ok: #16a34a;
   --warn: #d97706;
   --err: #e5484d;
+  --rec: #e5484d;
   --processing: #3b6ef5;
 
-  /* 电平条颜色（录音中用状态色；静音条用灰色） */
-  --level-rec: #e11d48;
-  --level-silent: #cfd5df;
+  /* 状态点周围的光晕:浅色底上要很淡,深色底上要更亮才看得见 */
+  --halo-ok: rgba(22, 163, 74, 0.12);
+  --halo-warn: rgba(217, 119, 6, 0.14);
+  --halo-rec: rgba(229, 72, 77, 0.16);
+  --halo-processing: rgba(59, 110, 245, 0.14);
+
+  /* 选中态的投影 */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.10);
 
   /* 尺寸与圆角 */
-  --radius: 10px;
   --radius-sm: 7px;
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 6px 14px rgba(16, 24, 40, 0.05);
 
   /* 字体全部使用系统自带，不请求任何外部字体文件 */
   --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+}
+
+/* ---------------- 日夜模式 ---------------- */
+
+/* 深色主题:跟随系统(prefers-color-scheme)。
+   WebView2 的 prefers-color-scheme 直接跟随 Windows 的应用主题,
+   所以这里只要用媒体查询换掉变量值,不用 JS、也不用监听切换事件。
+
+   配色思路(深色 UI 的常规做法):
+     - 底色压暗,但**不是纯黑**(纯黑配纯白字对比过冲,久看刺眼)
+     - 凸起面(--surface)比底色**亮**,深色下"凸起"靠亮度而不是阴影
+     - 状态色整体提亮,否则深底上不够醒目 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171a;
+    --surface: #2a2c31;
+    --border-soft: #23252a;
+
+    --text: #e7e8ea;
+    --text-2: #a9adb6;
+    --muted: #7d828c;
+
+    --accent: #6f9bff;
+    --ok: #3ecf8e;
+    --warn: #e0a23c;
+    --err: #f2686c;
+    --rec: #f2686c;
+    --processing: #6f9bff;
+
+    --halo-ok: rgba(62, 207, 142, 0.20);
+    --halo-warn: rgba(224, 162, 60, 0.22);
+    --halo-rec: rgba(242, 104, 108, 0.22);
+    --halo-processing: rgba(111, 155, 255, 0.22);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+  }
 }
 
 * {
@@ -60,7 +99,6 @@ body {
   line-height: 1.45;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  /* 面板整体不可选中文字，只有结果区放开 */
   user-select: none;
   -webkit-user-select: none;
 }
@@ -92,30 +130,30 @@ body {
   height: 9px;
   border-radius: 50%;
   background: var(--ok);
-  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12);
+  box-shadow: 0 0 0 3px var(--halo-ok);
 }
 
 .dot[data-state="starting"] {
   background: var(--warn);
-  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.14);
+  box-shadow: 0 0 0 3px var(--halo-warn);
   animation: dot-pulse 1.1s ease-in-out infinite;
 }
 
 .dot[data-state="recording"] {
   background: var(--rec);
-  box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.16);
+  box-shadow: 0 0 0 3px var(--halo-rec);
   animation: dot-pulse 1s ease-in-out infinite;
 }
 
 .dot[data-state="processing"] {
   background: var(--processing);
-  box-shadow: 0 0 0 3px rgba(59, 110, 245, 0.14);
+  box-shadow: 0 0 0 3px var(--halo-processing);
   animation: dot-pulse 1.4s ease-in-out infinite;
 }
 
 .dot[data-state="error"] {
   background: var(--err);
-  box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.16);
+  box-shadow: 0 0 0 3px var(--halo-rec);
 }
 
 @keyframes dot-pulse {
@@ -167,241 +205,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 5px 10px;
-}
-
-/* 主按钮 */
-
-.main-btn {
-  flex: 0 0 auto;
-  min-height: 30px;
-  border: 0;
-  border-radius: var(--radius);
-  background: linear-gradient(180deg, #4a7bff, var(--accent) 58%, var(--accent-2));
-  color: #ffffff;
-  font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 600;
-  letter-spacing: 0.6px;
-  cursor: pointer;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.18);
-  transition: filter 0.15s ease, transform 0.06s ease, background 0.2s ease;
-}
-
-.main-btn:hover {
-  filter: brightness(1.06);
-}
-
-.main-btn:active {
-  transform: translateY(1px);
-}
-
-/* 录音中：转红 */
-.main-btn.is-recording {
-  background: linear-gradient(180deg, #f2636a, var(--rec) 58%, var(--rec-2));
-}
-
-/* 识别中 / 准备中：禁用态 */
-.main-btn.is-busy {
-  background: #e7e9ee;
-  color: var(--muted);
-  box-shadow: none;
-  cursor: default;
-  filter: none;
-}
-
-.main-btn.is-busy:hover {
-  filter: none;
-}
-
-/* 卡片通用样式 */
-
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-card);
-}
-
-/* 电平条卡片
-   用 min-height 而不是 height：Python 侧会按内容高度 resize 窗口，
-   视口高度会变，写死 height 会让内容溢出被裁掉。
-   flex 允许它在视口变矮时略微压缩，但不让它把结果区挤没。
-   padding 2px + 上下边框 2px + 电平区 28px = 34px，正好等于 min-height。 */
-
-.card-level {
-  position: relative;
-  flex: 0 1 auto;
-  min-height: 34px;
-  padding: 2px 8px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  transition: border-color 0.25s ease, box-shadow 0.25s ease;
-}
-
-.card-level.is-recording {
-  border-color: rgba(229, 72, 77, 0.30);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 6px 16px rgba(229, 72, 77, 0.10);
-}
-
-/* 电平舞台：滚动电平条与提示文字共用这 28px，靠 opacity 互斥显示，
-   状态切换时整体淡入淡出。 */
-.wave-stage {
-  position: relative;
-  flex: 0 0 auto;
-  height: 28px;
-}
-
-/* 条的视口：22 根条 × 步进 6px = 132px，在卡片内水平居中，
-   溢出直接裁掉（滑出左边的条子不再显示）。 */
-.wave-viewport {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  width: 132px;
-  height: 28px;
-  transform: translateX(-50%);
-  overflow: hidden;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 180ms ease, visibility 0s linear 180ms;
-}
-
-/* 条容器：右对齐，颜色用 currentColor 传给每根条 */
-.wave-bars {
-  position: absolute;
-  inset: 0;
-  color: var(--level-rec);
-}
-
-/* 一根条：固定 3px 宽，底对齐（从底部往上长），
-   位置靠 transform 平移（向左滚动），高度靠 style.height 改。
-   transform 过渡 80ms = 推进周期，高度过渡 75ms 略短，避免拖尾。 */
-.wave-bars i {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 3px;
-  height: 2px;
-  border-radius: 3px;
-  background: currentColor;
-  transition: transform 80ms linear, height 75ms ease-out;
-}
-
-/* 静音条（level ≤ 0.04）：灰色，而不是主色 */
-.wave-bars i.is-silent {
-  color: var(--level-silent);
-}
-
-/* 左侧渐变遮罩：从卡片底色渐变到透明，让条子"从虚无中浮现" */
-.wave-mask {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 16px;
-  pointer-events: none;
-  background: linear-gradient(90deg, var(--surface) 0%, rgba(255, 255, 255, 0) 100%);
-}
-
-/* 待机 / 识别中的提示文字（灰色，不动） */
-.wave-hint {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 180ms ease, visibility 0s linear 180ms;
-}
-
-/* 只有录音中才显示电平条；其余状态只显示提示文字 */
-body.st-recording .wave-viewport {
-  opacity: 1;
-  visibility: visible;
-  transition: opacity 180ms ease, visibility 0s linear 0s;
-}
-
-body.st-idle .wave-hint,
-body.st-starting .wave-hint,
-body.st-processing .wave-hint,
-body.st-error .wave-hint {
-  opacity: 1;
-  visibility: visible;
-  transition: opacity 180ms ease, visibility 0s linear 0s;
-}
-
-/* 识别中：卡片上扫过一道高光，表现"不确定"的状态 */
-.card-level.is-processing::after,
-.card-result.is-processing::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(100deg, transparent 32%, rgba(59, 110, 245, 0.12) 50%, transparent 68%);
-  transform: translateX(-100%);
-  animation: sweep 1.5s ease-in-out infinite;
-}
-
-@keyframes sweep {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-/* 状态行 */
-
-.status-row {
-  flex: 0 0 auto;
-  min-height: 15px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.status-text {
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tone-dim {
-  color: var(--muted);
-}
-
-.tone-ok {
-  color: var(--ok);
-}
-
-.tone-warn {
-  color: var(--warn);
-}
-
-.tone-err {
-  color: var(--err);
-}
-
-.timer {
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-2);
-  font-variant-numeric: tabular-nums;
+  padding: 6px 10px;
 }
 
 /* 模型切换 */
@@ -449,97 +253,7 @@ body.st-error .wave-hint {
   background: var(--surface);
   color: var(--accent);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.10);
-}
-
-/* 结果预览
-   min-height 保证真实视口（286x224）下结果区不会被压成 0 高，
-   视口不够高时由电平条卡片先压缩让位。 */
-
-.card-result {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 32px;
-  display: flex;
-  padding: 6px 10px;
-  overflow: hidden;
-}
-
-/* 结果栈：partial 在上、final 在下，纵向排列。
-   单独套一层是为了不改卡片原本的 flex 布局。 */
-.result-stack {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* 实时部分结果（录音过程中已识别出的文字）
-   灰色 + 左侧竖线 + 淡背景，暗示"这是临时的"。
-   不用斜体（中文斜体难看），也不做任何闪烁/抖动动画。 */
-.result-partial {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 100%;
-  overflow-y: auto;
-  padding: 1px 6px;
-  border-left: 2px solid rgba(139, 147, 161, 0.45);
-  border-radius: 0 3px 3px 0;
-  background: var(--border-soft);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-  /* 换行与滚动行为和最终结果保持一致 */
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  text-align: left;
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-.result-text {
-  flex: 1 1 auto;
-  min-height: 0;
-  font-size: 12.5px;
-  color: var(--text);
-  /* 可换行、左对齐 */
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  text-align: left;
-  /* 超长时内部滚动 */
-  overflow-y: auto;
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-.result-empty {
-  flex: 1 1 auto;
-  /* 视口很矮时允许被压扁（由卡片的 overflow:hidden 裁掉），
-     否则占位文字的固有高度会把整页撑出视口 */
-  min-height: 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* 空态：既没有 partial 也没有 final 时，只显示占位 / 状态提示 */
-.card-result.is-empty .result-stack {
-  display: none;
-}
-
-.card-result:not(.is-empty) .result-empty {
-  display: none;
-}
-
-/* partial 与 final 不同时显示：partial 优先 */
-.card-result.has-partial .result-text {
-  display: none;
-}
-
-.card-result.has-final .result-partial {
-  display: none;
+  box-shadow: var(--shadow-sm);
 }
 
 /* 底部：热键提示 + 退出 */

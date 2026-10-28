@@ -58,7 +58,7 @@ class Config:
 
     # ---- 界面
     panel_geometry: str = ""                 # "x,y,w,h",空=用默认位置
-    panel_visible: bool = True                # 面板启动时是否显示
+    panel_visible: bool = False              # 面板启动时是否显示(默认不常驻,托盘打开)
     show_tray: bool = True
 
     # ---- 其它

@@ -1,5 +1,9 @@
 """常驻控制面板(pywebview + WebView2)。
 
+面板现在是**配置窗口**:只显示状态、切换模型、退出程序。
+录音过程的全部视觉反馈(实时预览文字、电平条、计时)搬到了
+**胶囊窗口**(同目录 ``capsule.py``)—— 面板关不关都不影响录音体验。
+
 面板前端是纯静态 HTML/CSS/JS,放在 ``src/qwen3_voice/ui/static/``,
 不引入任何前端框架或构建步骤 —— 项目定位是"绿色软件",
 ``git clone`` + ``pip install -e .`` 就能跑,不该有 node_modules。
@@ -7,14 +11,14 @@
 Python 与前端之间是双向桥接,方法名两边必须严格对齐
 (完整契约见同目录的 ``BRIDGE.md``):
 
-  Python → JS   window.__qwen.setState / setLevels / setElapsed / setStatus
-                        / setResult / setPreview / setModel / setHotkey
-  JS → Python   window.pywebview.api.ready / toggle_recording / switch_model
-                        / get_snapshot / move_window / close_panel / quit_app
+  Python → JS   window.__qwen.setState / setModel / setHotkey
+  JS → Python   window.pywebview.api.ready / switch_model / get_snapshot
+                / move_window / close_panel / quit_app
 
 线程分工:
-  主线程      webview.start() 的 GUI 消息循环
-  推送线程    把控制器事件 + 30fps 电平转成 evaluate_js 调用
+  主线程      调 webview.start() 并等它返回(winforms 后端会把 GUI
+              消息循环放到它自己起的 STA 线程上,主线程只是阻塞等待)
+  推送线程    _EventPump:把控制器事件转成各窗口的前端调用
   控制器线程  录音/识别,回调可能在任意线程触发,所以只往队列里投
 
 两个容易踩的坑,都在下面代码里处理了:
@@ -25,6 +29,7 @@ Python 与前端之间是双向桥接,方法名两边必须严格对齐
 2. 电平必须推**绝对值**(dBFS 映射),不能按窗口内最大值归一化。
    归一化之后波形永远看起来是满的,用户就没法从条的高低看出
    "我说话声音大不大" —— 那条电平条就只剩装饰作用了。
+   (电平现在只有胶囊窗口要,面板已经不显示电平了。)
 """
 
 from __future__ import annotations
@@ -36,14 +41,17 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32.api import (
+    get_foreground_window,
     get_window_rect,
     make_tool_window,
     move_window_to,
+    resize_window_no_activate,
+    restore_foreground,
     set_tool_window_style,
 )
 
@@ -53,8 +61,15 @@ log = get_logger("ui.panel")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # 设计基准(逻辑像素 = CSS 像素)
-BASE_W = 300
-BASE_H = 260
+# 面板瘦身后只剩标题栏 + 模型行 + 页脚,高度按内容自适应,
+# 这里给的是"内容刚好装下"的下限,不准就在 _fit_window 里量。
+BASE_W = 240
+BASE_H = 88
+
+# 页面加载完成前的窗口底色(占位):跟系统主题走,免得深色系统下闪一下白。
+# 真正的配色由 CSS 的 prefers-color-scheme 媒体查询决定,这里只管"开场"。
+WINDOW_BG_LIGHT = "#ffffff"
+WINDOW_BG_DARK = "#16171a"
 
 # 推送频率
 PUSH_INTERVAL = 1.0 / 30.0
@@ -113,6 +128,30 @@ def system_scale() -> float:
     return 1.0
 
 
+def system_prefers_dark() -> bool:
+    """系统是不是深色主题。
+
+    读注册表 ``HKCU\\...\\Themes\\Personalize`` 的 ``AppsUseLightTheme``:
+    0 = 深色,1 = 浅色。
+
+    只用来给 WebView2 选一个"页面还没加载时的窗口底色" —— 深色系统
+    配白底会闪一下白。真正的配色由 CSS 的 ``prefers-color-scheme``
+    媒体查询决定(WebView2 直接跟随 Windows 的应用主题)。
+    """
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return int(value) == 0
+    except Exception as e:
+        log.debug("读系统主题失败,按浅色处理: %s", e)
+        return False
+
+
 def dbfs_to_unit(rms: float, floor_rms: float = 0.0) -> float:
     """把线性 RMS 映射到 0..1(对数域)。
 
@@ -134,6 +173,128 @@ def dbfs_to_unit(rms: float, floor_rms: float = 0.0) -> float:
     return (db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)
 
 
+class _EventSink(Protocol):
+    """推送目标协议(鸭子类型)。
+
+    胶囊窗口也实现这套接口,但**不 import 本模块** ——
+    两个 UI 模块互相 import 迟早长成疙瘩。用协议把边界划清楚。
+    """
+
+    def handle_event(self, event: UIEvent) -> None:
+        """处理一个控制器事件。"""
+
+    def push_levels(self, levels: list[float], elapsed: float) -> None:
+        """推送一帧电平数据(30fps)。"""
+
+
+class _EventPump:
+    """控制器事件 → 各窗口前端的推送线程。
+
+    只有**一条**推送线程,而不是每个窗口一条:
+
+    - 胶囊的前端是状态机(setState → setPreview → setResult 必须按
+      顺序到达),两条线程并发推同一个 WebView2 会让顺序不可控;
+    - 电平数据采样一次就能分发给所有 sink,多线程反而要重复采样。
+
+    每个 sink 按 _EventSink 协议实现两个方法:
+
+    - ``handle_event(event)``:处理控制器事件
+    - ``push_levels(levels, elapsed)``:30fps 电平
+
+    面板瘦身之后不再要电平,它把 ``wants_levels`` 留成 False,
+    pump 就不会为一个没人要的窗口去采样。
+    """
+
+    def __init__(self, controller: VoiceController):
+        self.controller = controller
+        self._sinks: list[Any] = []
+        self._events: queue.Queue[UIEvent] = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._state = State.STARTING
+
+    # ---------- sink 注册 ----------
+
+    def add_sink(self, sink: Any) -> None:
+        self._sinks.append(sink)
+
+    def sinks(self) -> list[Any]:
+        return list(self._sinks)
+
+    # ---------- 线程 ----------
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, name="ui-push", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def on_event(self, event: UIEvent) -> None:
+        """控制器回调(任意线程):这里只投递。"""
+        self._events.put(event)
+
+    def _loop(self) -> None:
+        """把控制器事件和 30fps 电平转成前端调用。
+
+        单独一个线程,是因为 evaluate_js 是阻塞的(等 WebView2 执行完),
+        放在 GUI 主线程会卡住窗口响应。
+        """
+        last = 0.0
+        while not self._stop.is_set():
+            try:
+                while True:
+                    self._dispatch(self._events.get_nowait())
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if now - last >= PUSH_INTERVAL:
+                last = now
+                self._push_levels()
+
+            self._stop.wait(0.005)
+
+    def _dispatch(self, event: UIEvent) -> None:
+        """把一个事件发给所有 sink。"""
+        if event.kind == "state" and event.state is not None:
+            self._state = event.state
+        for sink in list(self._sinks):
+            try:
+                sink.handle_event(event)
+            except Exception as e:
+                # 一个 sink 炸了不能拖垮整条推送链
+                log.debug("推送事件到窗口失败: %s", e)
+
+    def _push_levels(self) -> None:
+        """采样一次电平,分发给需要的 sink。
+
+        推的是**绝对电平**(dBFS 映射后的 0..1)。前端绝不能按窗口内
+        最大值归一化 —— 那会让电平条永远看起来是满的,用户就没法从
+        条的高低看出"我说话声音大不大"了。
+        """
+        if self._state != State.RECORDING:
+            return
+        if not any(getattr(s, "wants_levels", False) for s in self._sinks):
+            return
+        recorder = getattr(self.controller, "recorder", None)
+        if recorder is None:
+            return
+        try:
+            raw = recorder.levels()
+            elapsed = recorder.elapsed
+        except Exception:
+            return
+        mapped = [dbfs_to_unit(v, self.controller.config.silence_rms)
+                  for v in raw]
+        for sink in list(self._sinks):
+            try:
+                sink.push_levels(mapped, elapsed)
+            except Exception as e:
+                log.debug("推送电平失败: %s", e)
+
+
 class _PanelApi:
     """暴露给前端 JS 的桥接对象。
 
@@ -150,9 +311,6 @@ class _PanelApi:
     def ready(self) -> None:
         """前端 DOM 就绪,请求推一次全量状态。"""
         self._panel._on_frontend_ready()
-
-    def toggle_recording(self) -> None:
-        self._panel.controller.toggle_recording()
 
     def switch_model(self, tag: str) -> None:
         self._panel.controller.switch_model(tag)
@@ -178,24 +336,30 @@ class _PanelApi:
 
 
 class VoicePanel:
-    """语音输入控制面板。"""
+    """语音输入控制面板(配置窗口)。"""
 
-    def __init__(self, controller: VoiceController, geometry: str = ""):
+    # 面板不显示电平了 —— 电平条搬到了胶囊窗口
+    wants_levels = False
+
+    def __init__(self, controller: VoiceController, geometry: str = "",
+                 focus_restore: int = 0):
+        """`focus_restore` 是**启动时**的前台窗口句柄。
+
+        pywebview 建 hidden 窗口时会偷偷 Show 一次(它的透明 hack),
+        那一下会把窗口激活 —— 程序启动就抢走用户的键盘焦点,正在打字
+        的用户会丢字。所以窗口建好后要把前台还回去。
+        """
         self.controller = controller
+        self._focus_restore = focus_restore
 
-        self._events: queue.Queue[UIEvent] = queue.Queue()
         self._state = State.STARTING
-        self._last_result = ""
-        self._status_text = "启动中..."
-        self._status_tone = "dim"
-        self._elapsed = 0.0
 
         self._scale = system_scale()
         self._visible = False          # 期望可见性(GUI 就绪前只记录)
-        self._visibility_applied = False
-        self._gui_ready = threading.Event()
+        self._gui_ready = threading.Event()      # 窗口已创建(可以 show/hide)
+        self._frontend_ready = threading.Event()  # 前端已就绪(可以 evaluate_js)
         self._stop = threading.Event()
-        self._pusher: threading.Thread | None = None
+        self._fit_lock = threading.Lock()   # fit 是耗时的,别让两个同时跑
 
         # 窗口位置(逻辑像素)。None 表示还没定,会在窗口就绪后摆到右下角。
         self._pos_x: int | None = None
@@ -216,6 +380,10 @@ class VoicePanel:
 
         import webview
 
+        # 推送线程:控制器事件从这里分发给面板和胶囊窗口
+        self._pump = _EventPump(controller)
+        self._pump.add_sink(self)
+
         self._api = _PanelApi(self)
         index = STATIC_DIR / "index.html"
         # 先解析保存过的位置:create_window 的 x/y 是逻辑像素,得在建窗时给
@@ -233,12 +401,38 @@ class VoicePanel:
             easy_drag=False,      # 自己实现拖动,才能记住位置
             on_top=True,
             resizable=False,
-            background_color="#ffffff",
+            background_color=(WINDOW_BG_DARK if system_prefers_dark()
+                             else WINDOW_BG_LIGHT),
         )
         self._window.events.before_show += self._on_before_show
         self._window.events.shown += self._on_window_shown
 
-        controller.subscribe(self._on_event)
+        controller.subscribe(self._pump.on_event)
+
+    # ---------- 推送目标接口 ----------
+
+    def add_sink(self, sink: Any) -> None:
+        """再挂一个推送目标(胶囊窗口)。
+
+        面板是推送线程的主人,所以注册也走这里 —— 胶囊窗口不用
+        自己去订阅控制器,顺序也就统一由一条推送线程保证。
+        """
+        self._pump.add_sink(sink)
+
+    def handle_event(self, event: UIEvent) -> None:
+        """控制器事件 → 面板前端。
+
+        面板瘦身后只关心三样东西:状态、模型、热键。
+        电平/计时/预览/结果都归胶囊窗口了。
+        """
+        if event.kind == "state" and event.state is not None:
+            self._state = event.state
+            self._call_js("setState", self._state_name())
+        elif event.kind == "model" and event.model_tag:
+            self._call_js("setModel", event.model_tag)
+
+    def push_levels(self, levels: list[float], elapsed: float) -> None:
+        """面板不显示电平 —— 空实现(接口要留着,免得 pump 判类型)。"""
 
     # ---------- 几何 ----------
 
@@ -308,8 +502,12 @@ class VoicePanel:
 
         前端可能还没加载完,所以在同一个表达式里先判断方法存在再调用 ——
         这样存在性检查和调用之间不会有竞态,也只花一次往返。
+
+        门控是"前端已就绪"而不是"窗口已创建":``evaluate_js`` 在前端
+        还没就绪时会**阻塞 20 秒**才抛异常(pywebview 等的是
+        ``_pywebviewready`` 事件),不能拿它当普通调用使。
         """
-        if not self._gui_ready.is_set():
+        if not self._frontend_ready.is_set():
             return False
         payload = ", ".join(json.dumps(a, ensure_ascii=False) for a in args)
         script = (
@@ -325,41 +523,6 @@ class VoicePanel:
             log.debug("调用前端 %s 失败: %s", method, e)
             return False
 
-    def _call_js_pair(self, m1: str, a1: Any, m2: str, a2: Any) -> bool:
-        """一次往返里调两个前端方法(电平 + 计时一起推,省一半开销)。"""
-        if not self._gui_ready.is_set():
-            return False
-        p1 = json.dumps(a1, ensure_ascii=False)
-        p2 = json.dumps(a2, ensure_ascii=False)
-        script = (
-            "(function(){try{"
-            f"if(window.__qwen&&typeof window.__qwen.{m1}==='function'"
-            f"&&typeof window.__qwen.{m2}==='function'){{"
-            f"window.__qwen.{m1}({p1});window.__qwen.{m2}({p2});return true;}}"
-            "}catch(e){return false;}return false;})()"
-        )
-        try:
-            self._window.evaluate_js(script)
-            return True
-        except Exception as e:
-            log.debug("调用前端 %s/%s 失败: %s", m1, m2, e)
-            return False
-
-    def _push_preview(self, text: str) -> None:
-        """推送实时预览文字。"""
-        if not self._gui_ready.is_set():
-            return
-        payload = json.dumps(text, ensure_ascii=False)
-        script = (
-            "(function(){try{var q=window.__qwen;if(!q)return false;"
-            f"if(typeof q.setPreview==='function'){{q.setPreview({payload});return true;}}"
-            "return false;}catch(e){return false;}})()"
-        )
-        try:
-            self._window.evaluate_js(script)
-        except Exception as e:
-            log.debug("调用前端 setPreview 失败: %s", e)
-
     def _on_frontend_ready(self) -> None:
         """前端就绪,推一次全量状态 + 补一次窗口尺寸。
 
@@ -368,13 +531,10 @@ class VoicePanel:
         靠这里兜底)。fit 是幂等的:量内容高度、resize 到刚好,
         重复执行结果相同。
         """
+        self._frontend_ready.set()
         self._call_js("setState", self._state_name())
-        self._call_js("setStatus", self._status_text, self._status_tone)
-        self._call_js("setResult", self._last_result)
         self._call_js("setModel", self._model_tag())
         self._call_js("setHotkey", self.controller.config.hotkey)
-        self._call_js("setElapsed", 0.0)
-        self._call_js("setLevels", "[]")
         try:
             self._fit_window()
         except Exception as e:
@@ -392,113 +552,21 @@ class VoicePanel:
     def _snapshot(self) -> dict:
         return {
             "state": self._state_name(),
-            "elapsed": self._elapsed,
             "model": self._model_tag(),
-            "last_result": self._last_result,
             "hotkey": self.controller.config.hotkey,
         }
 
-    # ---------- 事件 ----------
+    # ---------- 窗口生命周期 ----------
 
-    def _on_event(self, event: UIEvent) -> None:
-        """控制器线程调用,这里只投递。"""
-        self._events.put(event)
+    def _apply_visibility(self) -> None:
+        """把期望的可见性/位置/尺寸落到窗口上(后台线程里跑)。
 
-    def _handle_event(self, event: UIEvent) -> None:
-        if event.kind == "state" and event.state is not None:
-            self._state = event.state
-            self._call_js("setState", self._state_name())
-            if event.state == State.RECORDING:
-                self._status_text, self._status_tone = "录音中", "err"
-                self._call_js("setStatus", self._status_text, self._status_tone)
-            elif event.state == State.PROCESSING:
-                self._status_text, self._status_tone = "识别中", "warn"
-                self._call_js("setStatus", self._status_text, self._status_tone)
-        elif event.kind == "result":
-            self._last_result = event.text
-            self._status_text, self._status_tone = "已输入", "ok"
-            self._call_js("setResult", event.text)
-            self._call_js("setStatus", self._status_text, self._status_tone)
-            # 结果文字可能让内容变高,重新量一次窗口(别挡着推送线程)
-            threading.Thread(target=self._fit_window, daemon=True).start()
-        elif event.kind == "preview":
-            # 实时预览文字(录音过程中已识别出的内容)
-            self._push_preview(event.text)
-        elif event.kind == "error":
-            self._status_text, self._status_tone = event.text, "err"
-            self._call_js("setStatus", event.text, "err")
-        elif event.kind == "info":
-            self._status_text, self._status_tone = event.text, "dim"
-            self._call_js("setStatus", event.text, "dim")
-        elif event.kind == "model" and event.model_tag:
-            self._call_js("setModel", event.model_tag)
-
-    def set_status(self, text: str, tone: str = "dim") -> None:
-        """对外的公开接口:设置状态行文字。
-
-        ``__main__.py`` 在热键注册失败时用它报错。
-        """
-        self._status_text = text
-        self._status_tone = tone
-        self._call_js("setStatus", text, tone)
-
-    # ---------- 推送线程 ----------
-
-    def _pusher_loop(self) -> None:
-        """把控制器事件和 30fps 电平转成 evaluate_js 调用。
-
-        单独一个线程,是因为 evaluate_js 是阻塞的(等 WebView2 执行完),
-        放在 GUI 主线程会卡住窗口响应。
-        """
-        last = 0.0
-        while not self._stop.is_set():
-            try:
-                while True:
-                    self._handle_event(self._events.get_nowait())
-            except queue.Empty:
-                pass
-
-            now = time.monotonic()
-            if now - last >= PUSH_INTERVAL:
-                last = now
-                self._push_levels()
-                self._apply_pending_visibility()
-
-            self._stop.wait(0.005)
-
-    def _push_levels(self) -> None:
-        """把最近的音量序列推给前端。
-
-        推的是**绝对电平**(dBFS 映射后的 0..1)。前端绝不能按窗口内
-        最大值归一化 —— 那会让电平条永远看起来是满的,用户就没法从
-        条的高低看出"我说话声音大不大"了。
-        """
-        if self._state != State.RECORDING:
-            return
-        recorder = getattr(self.controller, "recorder", None)
-        if recorder is None:
-            return
-        try:
-            raw = recorder.levels()
-            self._elapsed = recorder.elapsed
-        except Exception:
-            return
-        mapped = [dbfs_to_unit(v, self.controller.config.silence_rms)
-                  for v in raw]
-        self._call_js_pair("setLevels", json.dumps(mapped),
-                           "setElapsed", self._elapsed)
-
-    def _apply_pending_visibility(self) -> None:
-        """GUI 就绪后,把期望的可见性/位置/尺寸落地(推线程里跑)。
-
-        这是**唯一**做窗口落地的地方:show()/hide() 只记意图,
-        shown 事件只改样式 —— 落地集中在这里,并且全程异常兜底:
-        推线程是这个面板的命根子,它一死整个 UI 就冻结
+        show()/hide() 只记意图,落地统一在这里 —— 并且全程异常兜底:
+        窗口层的异常绝不能把调用方(推送线程/托盘线程)带崩
         (发生过:一处裸奔的异常把推线程炸掉,面板全坏)。
         """
-        if self._visibility_applied or not self._gui_ready.is_set():
+        if not self._gui_ready.is_set():
             return
-        self._visibility_applied = True
         try:
             # 摆位:有保存位置就精确校准(create_window 的 x/y 会被
             # WinForms AutoScale 再动一次,和初始尺寸缩水是同一个坑),
@@ -526,35 +594,69 @@ class VoicePanel:
         except Exception as e:
             log.debug("首帧 fit 失败(等前端 ready 再试): %s", e)
 
+    def _schedule_apply(self) -> None:
+        """在后台线程里落地可见性。
+
+        落地会调 WinForms 的 Show/Hide,虽然 pywebview 内部有 Invoke
+        兜底,但这里仍不在 UI 线程里做 —— shown 事件是在 UI 线程同步
+        触发的,那时候再调 show() 是重入,可能把窗口搞挂。
+        """
+        if not self._gui_ready.is_set():
+            return
+        threading.Thread(target=self._apply_visibility,
+                         name="ui-layout", daemon=True).start()
+
     def _fit_window(self) -> None:
         """把窗口调整到刚好能容纳内容。
 
         pywebview 建窗时给的初始尺寸会被 WinForms 的 AutoScale 再缩一次
-        (请求 260 逻辑像素,实际客户区只有 224),底部几个像素的内容
-        就被裁掉了。但 ``resize()`` 走的是另一条路径,尺寸是准的
+        (实测:请求 300x260 逻辑像素,实际客户区只有 286x224),底部几个
+        像素的内容就被裁掉了。但 ``resize()`` 走的是另一条路径,尺寸是准的
         (实测 resize(300,320) 得到的正好是 320 逻辑像素)。
 
         所以这里自己量一次内容高度,再 resize 到刚好合适。
         """
+        # fit 是耗时的(resize + sleep 等前端布局),同一时间只允许一个在跑:
+        # show/hide 和前端 ready 都会触发它,撞在一起会互相改尺寸。
+        if not self._fit_lock.acquire(blocking=False):
+            return
+        try:
+            self._fit_window_locked()
+        finally:
+            self._fit_lock.release()
+
+    def _fit_window_locked(self) -> None:
         need = BASE_H
         for _ in range(3):
-            try:
-                self._window.resize(BASE_W, BASE_H)
-            except Exception as e:
-                log.debug("调整窗口尺寸失败: %s", e)
+            if not self._resize(BASE_W, BASE_H):
                 return
             time.sleep(0.25)
             need = self._content_height()
             if need <= BASE_H:
                 self._keep_on_screen(BASE_H)
                 return
-            try:
-                self._window.resize(BASE_W, need)
-            except Exception as e:
-                log.debug("按内容高度调整窗口失败: %s", e)
+            if not self._resize(BASE_W, need):
                 return
             time.sleep(0.25)
         self._keep_on_screen(need)
+
+    def _resize(self, width: int, height: int) -> bool:
+        """改窗口尺寸(逻辑像素)。
+
+        不用 pywebview 的 ``window.resize()``:它在 winforms 后端里带着
+        ``SWP_SHOWWINDOW``,会把**隐藏着的面板顺带显示出来**。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return False
+        try:
+            scale = self._current_scale()
+            resize_window_no_activate(hwnd, int(round(width * scale)),
+                                       int(round(height * scale)))
+            return True
+        except Exception as e:
+            log.debug("调整窗口尺寸失败: %s", e)
+            return False
 
     def _keep_on_screen(self, height: int) -> None:
         """窗口变高后别让它长出屏幕底部。
@@ -580,7 +682,13 @@ class VoicePanel:
             log.debug("把窗口拉回屏幕内失败: %s", e)
 
     def _content_height(self) -> int:
-        """页面内容实际需要的高度(逻辑像素)。"""
+        """页面内容实际需要的高度(逻辑像素)。
+
+        前端没就绪就返回 0 —— ``evaluate_js`` 在那之前会阻塞 20 秒,
+        量高度是给"内容排版好了"用的,那时候才有意义。
+        """
+        if not self._frontend_ready.is_set():
+            return 0
         try:
             info = self._window.evaluate_js(
                 "(function(){return {sh:document.body.scrollHeight,"
@@ -682,18 +790,42 @@ class VoicePanel:
         if hwnd:
             make_tool_window(hwnd)
         self._gui_ready.set()
+        # pywebview 建 hidden 窗口时会偷偷 Show 一次,那一下会把窗口激活 ——
+        # 把前台还给用户原来那个窗口
+        self._restore_focus()
+        # 首次落地(可见性 + 尺寸)扔到后台线程 —— 这里正处在 UI 线程
+        # 的事件回调里,再调 window.show() 是重入,可能把窗口搞挂。
+        self._schedule_apply()
+
+    def _restore_focus(self) -> None:
+        """把前台窗口还给用户原来那个(见 __init__ 的说明)。
+
+        pywebview 在 shown 之后还会再调一次 ``webview.Focus()``,把窗口
+        变成前台 —— 同步还原一次盖不住它,得再延迟还原一次。
+        """
+        self._restore_focus_once()
+        threading.Thread(target=self._restore_focus_later, name="ui-focus",
+                         daemon=True).start()
+
+    def _restore_focus_later(self) -> None:
+        time.sleep(0.25)
+        self._restore_focus_once()
+
+    def _restore_focus_once(self) -> None:
+        hwnd = self._native_handle()
+        if not hwnd or not self._focus_restore:
+            return
+        if get_foreground_window() != hwnd:
+            return
+        restore_foreground(self._focus_restore)
 
     def show(self) -> None:
         """记录"想要可见"。
 
-        GUI 就绪前只记意图(由推线程的 ``_apply_pending_visibility``
-        统一落地),就绪后直接显示。
+        GUI 就绪前只记意图(等窗口就绪后统一落地),就绪后直接落地。
         """
         self._visible = True
-        if self._gui_ready.is_set():
-            self._visibility_applied = False   # 让推线程再落地一次
-        # 就绪前不直接调 _window.show():窗口可能还没建好,
-        # 而且这方法可能在任意线程被调,WinForms 只认 UI 线程
+        self._schedule_apply()
 
     def hide(self) -> None:
         self._visible = False
@@ -701,7 +833,7 @@ class VoicePanel:
             # 隐藏前把真实位置记下来 —— 用户可能拖完就直接关面板,
             # 之后直接退出程序的话就再没机会读了
             self._save_geometry()
-            self._visibility_applied = False   # 让推线程再落地一次
+        self._schedule_apply()
 
     def toggle(self) -> None:
         if self._visible:
@@ -714,11 +846,28 @@ class VoicePanel:
         self.destroy()
 
     def destroy(self) -> None:
+        # 重入保护:下面遍历 sinks 调 destroy(),而**面板自己就是
+        # 第一个 sink** —— 没有这个标志就是 panel.destroy() 递归
+        # panel.destroy()…(实测 window.destroy() 被调了约 994 次,
+        # _save_geometry 也就把配置非原子地重写了近千遍)。
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
         self._stop.set()
+        self._pump.stop()
         try:
             self._save_geometry()
         except Exception:
             pass
+        # 别的窗口也得一起销毁:pywebview 的主循环要等**所有**窗口
+        # 都没了才返回,只关面板的话程序会变成"托盘没了但还活着"的僵尸。
+        for sink in self._pump.sinks():
+            destroy = getattr(sink, "destroy", None)
+            if callable(destroy):
+                try:
+                    destroy()
+                except Exception as e:
+                    log.debug("销毁窗口失败: %s", e)
         try:
             self._window.destroy()
         except Exception:
@@ -726,9 +875,7 @@ class VoicePanel:
 
     def mainloop(self) -> None:
         """阻塞运行 GUI 主循环(必须在主线程调用)。"""
-        self._pusher = threading.Thread(
-            target=self._pusher_loop, name="ui-push", daemon=True)
-        self._pusher.start()
+        self._pump.start()
 
         import webview
 
@@ -740,3 +887,4 @@ class VoicePanel:
             log.error("面板启动失败(WebView2 不可用?): %s", e)
         finally:
             self._stop.set()
+            self._pump.stop()

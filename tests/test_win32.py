@@ -183,3 +183,20 @@ def test_restore_foreground_to_same_window():
 
 def test_restore_foreground_invalid_handle():
     assert api.restore_foreground(0) is False
+
+
+# ---------------- 窗口区域(SetWindowRgn) ----------------
+
+def test_set_window_regions_rejects_invalid_handle():
+    """句柄无效时返回 False,不能抛异常。"""
+    assert api.set_window_regions(0, [(0, 0, 10, 10)]) is False
+
+
+def test_set_window_regions_releases_region_when_set_fails():
+    """SetWindowRgn 失败时区域还在我们手里 —— 必须自己释放,不然泄漏 GDI 对象。
+
+    成功时正好相反:区域归系统所有(MSDN:"系统不拷贝,调用方绝不能
+    再碰这个句柄,更不能 DeleteObject"),所以只有失败路径才 DeleteObject。
+    """
+    # 明显不是窗口的句柄:CreateRectRgn / CombineRgn 都能跑,SetWindowRgn 会失败
+    assert api.set_window_regions(0xDEADBEEF, [(0, 0, 10, 10)]) is False

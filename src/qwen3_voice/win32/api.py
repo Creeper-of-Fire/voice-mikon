@@ -12,6 +12,7 @@ import ctypes.wintypes as wt
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+gdi32 = ctypes.windll.gdi32
 
 # ---------------- 修饰键与虚拟键码 ----------------
 
@@ -26,8 +27,10 @@ WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 
 SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+HWND_TOPMOST = -1
 
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
@@ -101,6 +104,20 @@ user32.SetWindowPos.argtypes = [
 ]
 user32.SetWindowPos.restype = wt.BOOL
 
+# 工作区(任务栏之外的可用区域)与显示器信息
+user32.SystemParametersInfoW.argtypes = [wt.UINT, wt.UINT, ctypes.c_void_p, wt.UINT]
+user32.SystemParametersInfoW.restype = wt.BOOL
+user32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.c_void_p]
+user32.GetMonitorInfoW.restype = wt.BOOL
+user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+user32.MonitorFromPoint.restype = wt.HMONITOR
+user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+user32.MonitorFromWindow.restype = wt.HMONITOR
+
+# 模态消息框(热键注册失败之类的启动期错误)
+user32.MessageBoxW.argtypes = [wt.HWND, wt.LPCWSTR, wt.LPCWSTR, wt.UINT]
+user32.MessageBoxW.restype = ctypes.c_int
+
 # ---------------- 纯悬浮窗的扩展样式 ----------------
 # 做法照 cmd-dock 的路子(src/win32.rs):把窗口从"普通应用窗口"改成
 # "工具窗口",于是它不进任务栏、也不进 Alt+Tab,点击还不抢焦点。
@@ -109,11 +126,42 @@ WS_EX_TOOLWINDOW = 0x00000080      # 不在任务栏、不在 Alt+Tab
 WS_EX_APPWINDOW = 0x00040000       # 一旦置上,上面那条就失效
 WS_EX_NOACTIVATE = 0x08000000      # 点击不抢焦点
 SW_HIDE = 0
+SW_SHOWNOACTIVATE = 4              # 显示但不激活(不抢焦点)
+SPI_GETWORKAREA = 0x0030
+MONITOR_DEFAULTTONEAREST = 2
+MB_OK = 0x00000000
+MB_ICONERROR = 0x00000010
 
 user32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
 user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+
+# ---------------- 窗口区域(SetWindowRgn) ----------------
+# 把窗口的**命中区域**裁成指定形状:区域外的像素既不画也不吃鼠标,
+# 点击会直接穿透到底下的窗口。胶囊用它把大片透明空白从窗口里挖掉
+# (胶囊是固定尺寸的透明窗口,空白区虽然看不见,却会挡住底下的应用)。
+
+# CombineRgn 的合并方式(wingdi.h):RGN_AND=1, RGN_OR=2, RGN_XOR=3,
+# RGN_DIFF=4, RGN_COPY=5 —— **没有 0**!曾把 RGN_OR 写成 0(那是
+# ERROR),CombineRgn 静默失败,第二块矩形被丢弃,窗口只剩一块区域
+# (真机 GetWindowRgn 实测抓到的)。
+RGN_OR = 2
+# CombineRgn 的返回值(wingdi.h):0 = ERROR,1 = NULLREGION,
+# 2 = SIMPLEREGION(单矩形),3 = COMPLEXREGION(多矩形)
+NULLREGION = 1
+SIMPLEREGION = 2
+COMPLEXREGION = 3
+
+gdi32.CreateRectRgn.argtypes = [ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int]
+gdi32.CreateRectRgn.restype = wt.HRGN
+gdi32.CombineRgn.argtypes = [wt.HRGN, wt.HRGN, wt.HRGN, ctypes.c_int]
+gdi32.CombineRgn.restype = ctypes.c_int
+gdi32.DeleteObject.argtypes = [wt.HANDLE]
+gdi32.DeleteObject.restype = wt.BOOL
+user32.SetWindowRgn.argtypes = [wt.HWND, wt.HRGN, wt.BOOL]
+user32.SetWindowRgn.restype = wt.BOOL
 
 # 剪贴板
 user32.OpenClipboard.argtypes = [wt.HWND]
@@ -322,3 +370,225 @@ def make_tool_window(hwnd: int) -> bool:
     except Exception:
         pass
     return set_tool_window_style(hwnd)
+
+
+def is_window_visible(hwnd: int) -> bool:
+    """窗口当前是否可见。
+
+    胶囊要用它判断"pywebview 是不是偷偷把窗口 Show 出来了" ——
+    透明窗口的 pywebview 建窗流程会自己 Show 一次,窗口不该在那时候露面。
+    """
+    if not hwnd:
+        return False
+    try:
+        return bool(user32.IsWindowVisible(wt.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def show_window_no_activate(hwnd: int) -> bool:
+    """显示窗口但**不激活**它(不抢焦点)。
+
+    胶囊窗必须这么显示:它出现的时机正是用户在别的窗口里打字的时候,
+    一旦抢了焦点,后面注入的文字就没有落点了 —— 光标会被抢到胶囊上,
+    文字全丢。
+
+    纯 Win32 调用,不走 pywebview 的 ``window.show()`` ——
+    那个内部会调 WinForms 的 ``Activate()``,必然抢焦点。
+    """
+    if not hwnd:
+        return False
+    try:
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        return True
+    except Exception:
+        return False
+
+
+def hide_window(hwnd: int) -> bool:
+    """隐藏窗口(Win32 直调,比 pywebview 的 hide 轻量、不阻塞)。"""
+    if not hwnd:
+        return False
+    try:
+        user32.ShowWindow(hwnd, SW_HIDE)
+        return True
+    except Exception:
+        return False
+
+
+def resize_window_no_activate(hwnd: int, width: int, height: int) -> bool:
+    """把窗口改成指定的**物理像素**尺寸。
+
+    不用 pywebview 的 ``window.resize()``:它在 winforms 后端里是
+    ``SetWindowPos(hwnd, None, x, y, w, h, SWP_SHOWWINDOW)`` ——
+    两个副作用都要命:
+
+    - ``SWP_SHOWWINDOW`` 会**顺带把隐藏的窗口显示出来**
+      (面板/胶囊明明是隐藏的,却因为一次 resize 冒了出来);
+    - 没有 ``SWP_NOACTIVATE``,会**抢焦点** —— 胶囊最忌讳这个,
+      抢了焦点后面注入的文字就没有落点了。
+
+    这里自己发 SetWindowPos,三个都不要:NOMOVE / NOZORDER / NOACTIVATE,
+    也不带 SWP_SHOWWINDOW。
+    """
+    if not hwnd:
+        return False
+    try:
+        return bool(user32.SetWindowPos(
+            wt.HWND(hwnd), None, 0, 0, int(width), int(height),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
+def bring_to_top(hwnd: int) -> bool:
+    """把窗口提到**置顶组的最顶端**(不移动、不改大小、不抢焦点)。
+
+    别的置顶窗口(比如各种 AI 助手、录屏工具)可能正好压在胶囊上面,
+    显示时把我们提到最顶端才看得见。
+    """
+    if not hwnd:
+        return False
+    try:
+        return bool(user32.SetWindowPos(
+            wt.HWND(hwnd), wt.HWND(HWND_TOPMOST), 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD),
+                ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT),
+                ("dwFlags", wt.DWORD)]
+
+
+def get_work_area(hwnd: int = 0) -> tuple[int, int, int, int] | None:
+    """工作区(任务栏之外的可用区域)的**物理像素**矩形。
+
+    传 hwnd 就取该窗口所在显示器的作区,否则取主显示器的工作区。
+
+    不能用 ``GetSystemMetrics(SM_CYSCREEN)`` 算底部位置 ——
+    那是整块屏幕的高度,任务栏在下面,窗口会被任务栏盖住一半。
+    """
+    try:
+        if hwnd:
+            monitor = user32.MonitorFromWindow(
+                wt.HWND(hwnd), MONITOR_DEFAULTTONEAREST)
+            if monitor:
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    r = info.rcWork
+                    return r.left, r.top, r.right, r.bottom
+
+        rect = wt.RECT()
+        if user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        pass
+    return None
+
+
+def set_no_activate_tree(hwnd: int) -> int:
+    """给窗口及其**所有后代子窗口**加 WS_EX_NOACTIVATE,返回改了几个。
+
+    只给顶层窗口加是不够的:WebView2 在里面自建了子窗口
+    (Chrome_WidgetWin 一族),鼠标实际点到的是**子窗口** ——
+    子窗口没有 NOACTIVATE 的话,点击照样激活整棵窗口树,
+    前台被胶囊抢走。实测后果很具体:用户点胶囊上的 ✓ 结束录音,
+    前台变成胶囊,随后的 Ctrl+V 注入发给了胶囊自己,文字全丢。
+
+    每次"显示胶囊"时都要重刷一遍:WebView2 导航/重建页面时
+    可能换掉子窗口,新窗口不会继承扩展样式。
+    """
+    if not hwnd:
+        return 0
+
+    changed = 0
+
+    def _add_noactivate(h, _lparam):
+        nonlocal changed
+        try:
+            ex = user32.GetWindowLongPtrW(h, GWL_EXSTYLE)
+            if not ex & WS_EX_NOACTIVATE:
+                user32.SetWindowLongPtrW(
+                    h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE)
+                changed += 1
+        except Exception:
+            pass
+        return True  # 继续枚举
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    _add_noactivate(hwnd, 0)
+    user32.EnumChildWindows(
+        wt.HWND(hwnd), WNDENUMPROC(_add_noactivate), 0)
+    return changed
+
+
+def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]]) -> bool:
+    """把窗口的命中区域裁成几个矩形的**并集**(物理像素、窗口坐标)。
+
+    为什么要裁:胶囊是**固定尺寸**的透明窗口 —— 透明窗口一旦被 resize,
+    WebView2 的透明背景就废(见 capsule.py 的说明),所以窗口里留了一大片
+    空白。那片空白虽然**看不见**,却**属于窗口**:鼠标点上去会被胶囊吃掉,
+    底下的应用就点不到了。用 SetWindowRgn 把窗口的形状改成"文字条 + 胶囊",
+    空白区就不再属于窗口,点击直接穿透 —— 不 resize、不动透明实现。
+
+    坐标是**相对窗口左上角**的物理像素(MSDN:窗口区域的坐标相对窗口
+    左上角,不是客户区)。胶囊是 frameless 的,窗口原点 == 客户区原点,
+    所以前端 ``getBoundingClientRect()`` 的视口坐标可以直接拿来用。
+
+    区域句柄的生命周期(照 MSDN 的语义写,别想当然):
+      - ``SetWindowRgn`` **成功后区域归系统所有**,而且系统**不拷贝**,
+        调用方绝不能再碰这个句柄、更不能 DeleteObject —— 系统自己会删;
+      - 失败时区域还在我们手里,必须 DeleteObject 释放,不然泄漏 GDI 对象。
+    """
+    if not hwnd or not rects:
+        return False
+
+    region = None
+    try:
+        for (left, top, right, bottom) in rects:
+            piece = gdi32.CreateRectRgn(int(left), int(top),
+                                        int(right), int(bottom))
+            if not piece:
+                continue
+            if region is None:
+                region = piece
+                continue
+            # MSDN 明说"三个区域不必互不相同",所以 dst 直接复用自己
+            combined = gdi32.CombineRgn(region, region, piece, RGN_OR)
+            # 合并完这块就没用了,还是我们自己的句柄 —— 删掉
+            gdi32.DeleteObject(piece)
+            if not combined:
+                # 返回 0 = 空区域或出错,这块没并进去(继续用已有的)
+                continue
+        if region is None:
+            return False
+        if user32.SetWindowRgn(wt.HWND(hwnd), region, True):
+            # 成功:区域归系统了,再碰它就是用已释放的句柄
+            region = None
+            return True
+        return False
+    except Exception:
+        return False
+    finally:
+        if region is not None:
+            # 只有失败路径会走到这:区域还在我们手里,得自己释放
+            gdi32.DeleteObject(region)
+
+
+def show_error_box(text: str, caption: str = "Qwen3 语音输入") -> bool:
+    """弹一个系统级错误对话框。
+
+    面板瘦身后没有状态行了,启动期的致命错误(比如热键注册失败)
+    用这个弹窗告诉用户 —— 托盘图标上的提示太容易被忽略。
+    """
+    try:
+        user32.MessageBoxW(None, text, caption, MB_OK | MB_ICONERROR)
+        return True
+    except Exception:
+        return False

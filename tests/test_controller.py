@@ -246,3 +246,115 @@ def test_toggle_switches_recording(controller):
     controller.toggle_recording()
     # start_recording 会新建 Recorder,这里只验证状态流转方向
     assert controller.state in (State.RECORDING, State.IDLE)
+
+
+# ---------------- 取消 ----------------
+
+class SlowEngine(FakeEngine):
+    """假的慢引擎:识别会卡住,方便在"识别中"插一脚。"""
+
+    def __init__(self, result="今天天气不错"):
+        super().__init__(result)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe(self, audio, sample_rate=16000, language=None):
+        self.started.set()
+        self.release.wait(5.0)
+        return self.result
+
+
+def test_cancel_recording_drops_audio(controller):
+    """录音中取消:不识别、不注入,回到待机。"""
+    controller.state = State.RECORDING
+    controller.recorder = FakeRecorder()
+
+    events = []
+    controller.subscribe(events.append)
+
+    controller.cancel_recording()
+
+    assert controller.state is State.IDLE
+    assert controller.recorder is None
+    assert controller.injected == []
+    assert any(e.kind == "cancelled" for e in events)
+    # 预览文字要清掉,别留着上一轮的内容
+    assert any(e.kind == "preview" and e.text == "" for e in events)
+
+
+def test_cancel_recording_stops_recorder(controller):
+    """取消要真的把录音器停掉 —— 否则麦克风一直开着。"""
+    controller.state = State.RECORDING
+    rec = FakeRecorder()
+    stopped = []
+    rec.stop = lambda: stopped.append(1) or rec.audio
+    controller.recorder = rec
+
+    controller.cancel_recording()
+
+    assert stopped
+    # 预览线程也要收掉(它和识别抢同一个引擎)
+    assert controller._preview_thread is None
+
+
+def test_cancel_while_idle_does_nothing(controller):
+    """待机时取消是空操作 —— 不该凭空冒出"已取消"。"""
+    controller.state = State.IDLE
+
+    events = []
+    controller.subscribe(events.append)
+
+    controller.cancel_recording()
+
+    assert controller.state is State.IDLE
+    assert not any(e.kind == "cancelled" for e in events)
+
+
+def test_cancel_while_processing_does_not_inject(controller):
+    """识别中取消:这一轮作废,结果绝不注入。"""
+    engine = SlowEngine()
+    controller.engine = engine
+    controller.state = State.RECORDING
+    controller.recorder = FakeRecorder(
+        audio=(np.ones(32000) * 5000).astype(np.int16))
+
+    events = []
+    controller.subscribe(events.append)
+
+    controller.stop_recording()
+    assert wait_for(lambda: engine.started.is_set())
+
+    controller.cancel_recording()
+
+    assert controller.state is State.IDLE
+    assert any(e.kind == "cancelled" for e in events)
+
+    # 放行识别线程:它醒来后发现这一轮作废,只能丢掉结果
+    engine.release.set()
+    assert not wait_for(lambda: any(e.kind == "result" for e in events),
+                        timeout=1.0)
+    assert controller.injected == []
+
+
+def test_new_recording_invalidates_cancelled_result(controller):
+    """取消后马上开新一轮,上一轮迟到的结果也不能注入。"""
+    engine = SlowEngine()
+    controller.engine = engine
+    controller.state = State.RECORDING
+    controller.recorder = FakeRecorder(
+        audio=(np.ones(32000) * 5000).astype(np.int16))
+
+    events = []
+    controller.subscribe(events.append)
+
+    controller.stop_recording()
+    assert wait_for(lambda: engine.started.is_set())
+    controller.cancel_recording()
+
+    # 新一轮录音:会话代号变了,旧线程回来时必须认出来
+    controller.start_recording()
+    engine.release.set()
+
+    assert not wait_for(lambda: any(e.kind == "result" for e in events),
+                        timeout=1.0)
+    assert controller.injected == []

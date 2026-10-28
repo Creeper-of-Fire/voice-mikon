@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 声明支持双色:浏览器原生部件(滚动条等)也跟着系统主题走 -->
+<meta name="color-scheme" content="light dark">
 <title>语音输入</title>
 <!-- 本地样式，无任何外链资源，离线可用 -->
 <link rel="stylesheet" href="panel.css">
@@ -18,31 +20,8 @@
       <button class="icon-btn" id="closeBtn" type="button" title="隐藏面板" aria-label="隐藏面板">✕</button>
     </header>
 
+    <!-- 面板已经是"配置窗口"了：录音过程的反馈全在胶囊窗口里 -->
     <main class="content">
-      <!-- 主按钮：待机 / 录音中 / 识别中 三态 -->
-      <button class="main-btn" id="mainBtn" type="button">● 开始录音</button>
-
-      <!-- 滚动电平条卡片（对齐 MiniMax Code 的 asr-volume-bars）
-           22 根条从右往左滚动：JS 只改每根条的 transform（位置）和 height（高度），
-           高度由真实音量序列经非线性映射得到，不画任何假动画。
-           待机 / 识别中不显示条形，只显示一行居中提示文字 -->
-      <section class="card card-level" id="levelCard">
-        <div class="wave-stage">
-          <div class="wave-viewport" id="waveViewport">
-            <div class="wave-bars" id="waveBars"></div>
-            <!-- 左侧渐变遮罩：让条子"从虚无中浮现" -->
-            <div class="wave-mask"></div>
-          </div>
-          <div class="wave-hint" id="waveHint">按 Ctrl+Alt+Space 开始说话</div>
-        </div>
-      </section>
-
-      <!-- 状态行：左状态文字 + 右等宽计时 -->
-      <div class="status-row">
-        <span class="status-text tone-dim" id="statusText">待机</span>
-        <span class="timer" id="timer">0.0s</span>
-      </div>
-
       <!-- 模型切换 -->
       <div class="model-row">
         <span class="row-label">模型</span>
@@ -51,20 +30,6 @@
           <button class="seg-item" type="button" data-model="1.7B">1.7B</button>
         </div>
       </div>
-
-      <!-- 识别结果预览：可换行、左对齐、超长内部滚动
-           栈内上下两段：上半是录音过程中的实时部分结果（灰色、临时），
-           下半是停止录音后的最终结果（正常色）；两者不同时显示 -->
-      <section class="card card-result is-empty" id="resultCard">
-        <div class="result-stack" id="resultStack">
-          <!-- 实时部分结果：灰色 + 左侧竖线，暗示"这是临时的" -->
-          <div class="result-partial" id="resultPartial"></div>
-          <!-- 最终识别结果 -->
-          <div class="result-text" id="resultText"></div>
-        </div>
-        <!-- 占位 / 状态提示：待机、录音中（还没有 partial）、识别中 -->
-        <div class="result-empty" id="resultEmpty">识别结果将显示在这里</div>
-      </section>
 
       <footer class="footer">
         <span class="hotkey" id="hotkeyLabel">热键 Ctrl+Alt+V</span>

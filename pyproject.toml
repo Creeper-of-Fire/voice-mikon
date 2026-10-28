@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "基于本地 Qwen3-ASR 的全局语音输入 —— 按热键说话,文字直接打进光标处"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = { text = "AGPL-3.0-or-later" }
 
 dependencies = [
     "numpy>=1.26",

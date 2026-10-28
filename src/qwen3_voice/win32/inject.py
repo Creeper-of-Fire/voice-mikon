@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from ..logging_setup import get_logger
@@ -89,7 +90,14 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
         log.warning("Ctrl+V 只投递了 %d/4 个事件,可能没送达", sent)
     time.sleep(PASTE_SETTLE)
 
-    _restore(original, text, published_seq)
+    # 恢复原剪贴板放到后台线程:_restore 里要等 RESTORE_SETTLE(约 1 秒)
+    # 才动手,同步等它的话 UI 状态会滞后 —— 用户已经看到文字进输入框
+    # 了,面板却还转着"识别中"(实测被吐槽过)。归属守卫(序号比对)
+    # 在后台做完全等价:比对的是我们发布时的序号,谁先检查都一样。
+    threading.Thread(
+        target=_restore, args=(original, text, published_seq),
+        name="clipboard-restore", daemon=True,
+    ).start()
     return True
 
 

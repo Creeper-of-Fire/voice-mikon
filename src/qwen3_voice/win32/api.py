@@ -26,6 +26,9 @@ WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+
+INPUT_KEYBOARD = 1
 
 VK_BACK = 0x08
 VK_TAB = 0x09
@@ -40,6 +43,8 @@ VK_UP = 0x26
 VK_RIGHT = 0x27
 VK_DOWN = 0x28
 VK_V = 0x56
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 
 # 字母/数字 A-Z -> 虚拟键码
 for _i in range(26):
@@ -99,6 +104,47 @@ user32.PostQuitMessage.argtypes = [ctypes.c_int]
 # 键盘输入
 user32.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_ulong]
 
+
+# ---- SendInput ----
+# keybd_event 是老 API,投递成功与否完全不知道;SendInput 会返回实际
+# 投递的事件数,注入失败时才能识别出来(比如被 UIPI 拦掉)。
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
+                ("dwFlags", wt.DWORD), ("time", wt.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wt.DWORD), ("wParamL", wt.WORD), ("wParamH", wt.WORD)]
+
+
+class _INPUTunion(ctypes.Union):
+    _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wt.DWORD), ("u", _INPUTunion)]
+
+
+user32.SendInput.argtypes = [wt.UINT, ctypes.c_void_p, ctypes.c_int]
+user32.SendInput.restype = wt.UINT
+
+# 键盘状态
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+
+# 剪贴板归属
+user32.GetClipboardSequenceNumber.restype = wt.DWORD
+user32.GetClipboardOwner.restype = wt.HWND
+user32.IsWindow.argtypes = [wt.HWND]
+user32.IsWindow.restype = wt.BOOL
+
 # ---------------- 通用辅助 ----------------
 
 
@@ -147,9 +193,49 @@ def restore_foreground(hwnd: int) -> bool:
             return False
 
 
-def send_ctrl_v() -> None:
-    """模拟 Ctrl+V。"""
-    user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, 0, 0)
-    user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+def send_ctrl_v() -> int:
+    """模拟 Ctrl+V,返回**实际投递**的事件数(4 = 全部成功)。
+
+    用 SendInput 而不是 keybd_event:后者投递成功与否完全不可知,
+    被 UIPI 拦掉时也照样"成功",表现出来就是"按了热键没反应"。
+    SendInput 只插入数组前缀,返回实际插入的个数 —— 靠它才能知道
+    到底有没有发出去,以及发出去几个。
+
+    投递不全时**只补发抬起事件**,绝不重贴:重贴会造成重复文本。
+    """
+    keys = []
+    for vk, up in ((VK_CONTROL, False), (VK_V, False), (VK_V, True), (VK_CONTROL, True)):
+        ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0)
+        keys.append(INPUT(INPUT_KEYBOARD, _INPUTunion(ki=ki)))
+
+    sent = user32.SendInput(len(keys), (INPUT * len(keys))(*keys), ctypes.sizeof(INPUT))
+    if sent < len(keys):
+        # 只把**确实按下过**的键抬起来:
+        #   索引 0 = Ctrl down,索引 1 = V down
+        release = []
+        if sent >= 2:
+            release.append(VK_V)
+        if sent >= 1:
+            release.append(VK_CONTROL)
+        if release:
+            ups = []
+            for vk in release:
+                ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, 0)
+                ups.append(INPUT(INPUT_KEYBOARD, _INPUTunion(ki=ki)))
+            user32.SendInput(len(ups), (INPUT * len(ups))(*ups), ctypes.sizeof(INPUT))
+    return int(sent)
+
+
+def key_is_down(vk: int) -> bool:
+    """某个键当前是否被按住。"""
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def modifiers_held() -> bool:
+    """用户此刻是否正按着 Ctrl / Alt / Shift / Win。
+
+    按着的时候发 Ctrl+V,目标应用收到的是 Ctrl+Alt+V 之类,
+    粘贴根本不会触发 —— 这种时候宁可放弃注入,也不要往目标窗口
+    塞一个莫名其妙的东西。
+    """
+    return any(key_is_down(vk) for vk in (VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN))

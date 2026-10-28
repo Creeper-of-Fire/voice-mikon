@@ -1,4 +1,4 @@
-"""Win32 层测试:热键解析、剪贴板、焦点。
+"""Win32 层测试:热键解析、剪贴板、焦点、注入守卫。
 
 这些是真实调用 Windows API 的集成测试 —— 剪贴板和焦点必须真的能用,
 不能 mock 掉(之前踩的句柄截断坑就是 mock 测不出来的)。
@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from qwen3_voice.win32 import api, clipboard
+from qwen3_voice.win32 import api, clipboard, inject
 from qwen3_voice.win32.hotkey import parse_hotkey
 
 
@@ -71,6 +71,79 @@ def test_clipboard_handles_empty_text():
     assert clipboard.get_text() in ("", None)
     if original is not None:
         clipboard.set_text(original)
+
+
+# ---------------- 注入守卫 ----------------
+# 核心承诺:借了用户的剪贴板,一定要还;但用户中途复制了新内容时,
+# **绝不能**用旧内容把它盖掉 —— 那才是真的丢数据。
+
+def test_clipboard_sequence_number_advances():
+    original = clipboard.get_text()
+    try:
+        before = clipboard.get_sequence_number()
+        clipboard.set_text("序号测试")
+        after = clipboard.get_sequence_number()
+        assert after != before
+    finally:
+        if original is not None:
+            clipboard.set_text(original)
+
+
+def test_restore_puts_back_original(monkeypatch):
+    """没人动过剪贴板 -> 正常归还。"""
+    monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
+    original = clipboard.get_text()
+    try:
+        clipboard.set_text("识别文本")
+        published = clipboard.get_sequence_number()
+        inject._restore("用户的原始内容", "识别文本", published)
+        assert clipboard.get_text() == "用户的原始内容"
+    finally:
+        if original is not None:
+            clipboard.set_text(original)
+
+
+def test_restore_skips_when_user_changed_clipboard(monkeypatch):
+    """用户中途复制了新内容 -> 放弃恢复,用户的新内容优先。"""
+    monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
+    original = clipboard.get_text()
+    try:
+        clipboard.set_text("识别文本")
+        published = clipboard.get_sequence_number()
+        clipboard.set_text("用户新复制的内容")   # 用户在这期间动了剪贴板
+        inject._restore("用户的原始内容", "识别文本", published)
+        assert clipboard.get_text() == "用户新复制的内容"
+    finally:
+        if original is not None:
+            clipboard.set_text(original)
+
+
+def test_restore_skips_when_content_changed(monkeypatch):
+    """内容对不上(被别人换掉) -> 也放弃恢复。"""
+    monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
+    original = clipboard.get_text()
+    try:
+        clipboard.set_text("识别文本")
+        published = clipboard.get_sequence_number()
+        inject._restore("用户的原始内容", "完全不同的东西", published)
+        assert clipboard.get_text() == "识别文本"
+    finally:
+        if original is not None:
+            clipboard.set_text(original)
+
+
+def test_restore_without_original_leaves_clipboard_alone(monkeypatch):
+    """原剪贴板没有文本时不动它 —— 宁可把识别结果留在剪贴板里,
+    也不要"清空"掉用户剪贴板里的图片之类读不出来的内容。"""
+    monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
+    original = clipboard.get_text()
+    try:
+        clipboard.set_text("识别文本")
+        inject._restore(None, "识别文本", clipboard.get_sequence_number())
+        assert clipboard.get_text() == "识别文本"
+    finally:
+        if original is not None:
+            clipboard.set_text(original)
 
 
 # ---------------- 焦点 ----------------

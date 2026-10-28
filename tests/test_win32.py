@@ -89,61 +89,72 @@ def test_clipboard_sequence_number_advances():
             clipboard.set_text(original)
 
 
-def test_restore_puts_back_original(monkeypatch):
+class FakeClipboard:
+    """假剪贴板 —— 测试**不能**碰真实系统剪贴板。
+
+    真实剪贴板是用户的数据:测试期间用户复制的东西会被抢走,
+    而且真实剪贴板还可能被别的程序改动,让测试变得不稳定
+    (序号对不上 -> 归属守卫生效 -> 恢复被跳过 -> 假失败)。
+    """
+
+    def __init__(self):
+        self._text = ""
+        self._seq = 0
+
+    def get_text(self) -> str:
+        return self._text
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self._seq += 1
+
+    def get_sequence_number(self) -> int:
+        return self._seq
+
+
+@pytest.fixture
+def fake_clipboard(monkeypatch):
+    """把 inject 模块里的剪贴板换成假的。"""
+    fake = FakeClipboard()
+    monkeypatch.setattr(inject, "clipboard", fake)
+    return fake
+
+
+def test_restore_puts_back_original(monkeypatch, fake_clipboard):
     """没人动过剪贴板 -> 正常归还。"""
     monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
-    original = clipboard.get_text()
-    try:
-        clipboard.set_text("识别文本")
-        published = clipboard.get_sequence_number()
-        inject._restore("用户的原始内容", "识别文本", published)
-        assert clipboard.get_text() == "用户的原始内容"
-    finally:
-        if original is not None:
-            clipboard.set_text(original)
+    fake_clipboard.set_text("识别文本")
+    published = fake_clipboard.get_sequence_number()
+    inject._restore("用户的原始内容", "识别文本", published)
+    assert fake_clipboard.get_text() == "用户的原始内容"
 
 
-def test_restore_skips_when_user_changed_clipboard(monkeypatch):
+def test_restore_skips_when_user_changed_clipboard(monkeypatch, fake_clipboard):
     """用户中途复制了新内容 -> 放弃恢复,用户的新内容优先。"""
     monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
-    original = clipboard.get_text()
-    try:
-        clipboard.set_text("识别文本")
-        published = clipboard.get_sequence_number()
-        clipboard.set_text("用户新复制的内容")   # 用户在这期间动了剪贴板
-        inject._restore("用户的原始内容", "识别文本", published)
-        assert clipboard.get_text() == "用户新复制的内容"
-    finally:
-        if original is not None:
-            clipboard.set_text(original)
+    fake_clipboard.set_text("识别文本")
+    published = fake_clipboard.get_sequence_number()
+    fake_clipboard.set_text("用户新复制的内容")   # 用户在这期间动了剪贴板
+    inject._restore("用户的原始内容", "识别文本", published)
+    assert fake_clipboard.get_text() == "用户新复制的内容"
 
 
-def test_restore_skips_when_content_changed(monkeypatch):
+def test_restore_skips_when_content_changed(monkeypatch, fake_clipboard):
     """内容对不上(被别人换掉) -> 也放弃恢复。"""
     monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
-    original = clipboard.get_text()
-    try:
-        clipboard.set_text("识别文本")
-        published = clipboard.get_sequence_number()
-        inject._restore("用户的原始内容", "完全不同的东西", published)
-        assert clipboard.get_text() == "识别文本"
-    finally:
-        if original is not None:
-            clipboard.set_text(original)
+    fake_clipboard.set_text("识别文本")
+    published = fake_clipboard.get_sequence_number()
+    inject._restore("用户的原始内容", "完全不同的东西", published)
+    assert fake_clipboard.get_text() == "识别文本"
 
 
-def test_restore_without_original_leaves_clipboard_alone(monkeypatch):
+def test_restore_without_original_leaves_clipboard_alone(monkeypatch, fake_clipboard):
     """原剪贴板没有文本时不动它 —— 宁可把识别结果留在剪贴板里,
     也不要"清空"掉用户剪贴板里的图片之类读不出来的内容。"""
     monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
-    original = clipboard.get_text()
-    try:
-        clipboard.set_text("识别文本")
-        inject._restore(None, "识别文本", clipboard.get_sequence_number())
-        assert clipboard.get_text() == "识别文本"
-    finally:
-        if original is not None:
-            clipboard.set_text(original)
+    fake_clipboard.set_text("识别文本")
+    inject._restore(None, "识别文本", fake_clipboard.get_sequence_number())
+    assert fake_clipboard.get_text() == "识别文本"
 
 
 # ---------------- 焦点 ----------------

@@ -25,6 +25,10 @@ WM_HOTKEY = 0x0312
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 
@@ -83,6 +87,19 @@ user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
 user32.FindWindowW.restype = wt.HWND
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wt.BOOL
+
+# 窗口几何
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+user32.GetWindowRect.restype = wt.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+user32.GetCursorPos.restype = wt.BOOL
+user32.SetWindowPos.argtypes = [
+    wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, wt.UINT,
+]
+user32.SetWindowPos.restype = wt.BOOL
 
 # ---------------- 纯悬浮窗的扩展样式 ----------------
 # 做法照 cmd-dock 的路子(src/win32.rs):把窗口从"普通应用窗口"改成
@@ -245,6 +262,21 @@ def send_ctrl_v() -> int:
 def key_is_down(vk: int) -> bool:
     """某个键当前是否被按住。"""
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """窗口在屏幕上的**物理像素**位置 (left, top, right, bottom)。"""
+    rect = wt.RECT()
+    if not user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(rect)):
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def move_window_to(hwnd: int, x: int, y: int) -> bool:
+    """把窗口左上角移到**物理像素** (x, y),不改大小、不抢焦点、不动 Z 序。"""
+    return bool(user32.SetWindowPos(
+        wt.HWND(hwnd), None, x, y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
 
 
 def modifiers_held() -> bool:

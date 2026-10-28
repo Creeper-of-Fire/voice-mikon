@@ -81,16 +81,25 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `toggle_recording()` | None | 开始 / 停止录音 |
 | `switch_model(tag)` | None | `tag` ∈ `"0.6B"` / `"1.7B"` |
 | `get_snapshot()` | dict | `{state, elapsed, model, last_result, hotkey}` |
-| `move_window(dx, dy)` | None | 拖动窗口,**相对位移,单位物理像素** |
+| `move_window(x, y)` | None | 窗口左上角移到**绝对位置** (x, y),CSS(逻辑)像素 |
 | `close_panel()` | None | 隐藏面板(**不是**退出程序) |
 | `quit_app()` | None | 退出整个程序 |
 
-### 拖动的单位
+### 拖动的单位与节流
 
-前端发的是**物理像素**(`dx * devicePixelRatio`)。
-pywebview 6.x 的 `Window.move(x, y)` 吃的是**逻辑像素**(内部自己乘缩放),
-所以 Python 侧必须做一次 physical → logical 换算,否则在 175% 屏幕上
-窗口会比光标快 1.75 倍。
+前端拖动时**每次都从 mousedown 起点算绝对目标**:
+
+    目标 = mousedown 时的 window.screenX/Y + (当前 clientX/Y − 起点_clientX/Y)
+
+发绝对位置而不是增量:某一次调用丢了或慢了,下一次直接覆盖,
+天然不漂。mousemove 用 `requestAnimationFrame` 节流,每帧只发
+最新一次(IPC ≤ 60Hz),Python 侧直接 `SetWindowPos`(物理 =
+逻辑 × 缩放)。
+
+两个已证伪的方案,勿复辟:
+1. mousemove 发增量、Python 累计 —— IPC 一慢就漂;
+2. `SendMessage(SC_MOVE)` 原生拖动 —— 在 WebView2 架构下死锁
+   js_api 调用链,整个面板点什么都卡(实测)。
 
 ---
 

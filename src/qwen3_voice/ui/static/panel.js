@@ -597,10 +597,22 @@
 
   /* ==================== 拖动 ==================== */
 
+  /* 拖动 = 发**绝对目标位置**,不是增量:
+   *   目标 = mousedown 时的窗口位置 + (当前鼠标 screenX − 起点鼠标 screenX)
+   * 必须用 e.screenX(鼠标的**屏幕**坐标)而不是 clientX —— 窗口自己
+   * 一动 clientX(视口内坐标)就变,会被窗口移动污染,形成正反馈
+   * 震荡(实测:剧烈抖动、不跟鼠标)。screenX 不受窗口移动影响。
+   * rAF 节流:mousemove 可能 100Hz+,每帧只发最新一次,IPC 不超 60Hz。
+   * (另一个已证伪方案:SendMessage(SC_MOVE) 原生拖动 —— 在 WebView2
+   * 架构下死锁 js_api 调用链,整个面板点什么都卡。) */
   var drag = {
     active: false,
-    lastX: 0,
-    lastY: 0
+    startScreenX: 0,
+    startScreenY: 0,
+    startWinX: 0,
+    startWinY: 0,
+    pending: null,
+    raf: 0
   };
 
   function onDragStart(e) {
@@ -612,9 +624,11 @@
       return;
     }
     drag.active = true;
-    drag.lastX = e.clientX;
-    drag.lastY = e.clientY;
-    document.body.classList.add('dragging');
+    drag.startScreenX = e.screenX;   // 鼠标的屏幕坐标(CSS 像素)
+    drag.startScreenY = e.screenY;
+    drag.startWinX = window.screenX; // 窗口在屏幕上的位置(CSS 像素)
+    drag.startWinY = window.screenY;
+    drag.pending = null;
     document.addEventListener('mousemove', onDragMove, false);
     document.addEventListener('mouseup', onDragEnd, false);
     e.preventDefault();
@@ -624,16 +638,27 @@
     if (!drag.active) {
       return;
     }
-    var dx = e.clientX - drag.lastX;
-    var dy = e.clientY - drag.lastY;
-    if (dx === 0 && dy === 0) {
+    drag.pending = e;
+    if (!drag.raf) {
+      drag.raf = requestAnimationFrame(flushDrag);
+    }
+  }
+
+  function flushDrag() {
+    drag.raf = 0;
+    var e = drag.pending;
+    drag.pending = null;
+    if (!e || !drag.active) {
       return;
     }
-    drag.lastX = e.clientX;
-    drag.lastY = e.clientY;
-    // 契约要求 move_window 收物理像素，CSS 像素要乘上系统缩放系数
-    var scale = window.devicePixelRatio || 1;
-    callApi('move_window', dx * scale, dy * scale);
+    var x = drag.startWinX + (e.screenX - drag.startScreenX);
+    var y = drag.startWinY + (e.screenY - drag.startScreenY);
+    // 位移为零不发(首帧) —— window.screenX 与 WinForms 窗口原点
+    // 若有微小偏差,发零位移会让窗口跳一下
+    if (x === drag.startWinX && y === drag.startWinY) {
+      return;
+    }
+    callApi('move_window', x, y);
   }
 
   function onDragEnd() {
@@ -641,9 +666,13 @@
       return;
     }
     drag.active = false;
-    document.body.classList.remove('dragging');
     document.removeEventListener('mousemove', onDragMove, false);
     document.removeEventListener('mouseup', onDragEnd, false);
+    if (drag.raf) {
+      cancelAnimationFrame(drag.raf);
+      drag.raf = 0;
+    }
+    flushDrag();   // 把最后一次位置补上
   }
 
   /* ==================== 事件绑定 ==================== */

@@ -40,7 +40,12 @@ from typing import Any
 
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
-from ..win32.api import make_tool_window, set_tool_window_style
+from ..win32.api import (
+    get_window_rect,
+    make_tool_window,
+    move_window_to,
+    set_tool_window_style,
+)
 
 log = get_logger("ui.panel")
 
@@ -155,9 +160,13 @@ class _PanelApi:
     def get_snapshot(self) -> dict:
         return self._panel._snapshot()
 
-    def move_window(self, dx: float, dy: float) -> None:
-        """拖动窗口。前端给的是**物理像素**增量。"""
-        self._panel._move_window(dx, dy)
+    def move_window(self, x: float, y: float) -> None:
+        """把窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+
+        前端拖动时每次都从 mousedown 起点算绝对目标发过来,
+        不发增量 —— 某次调用丢了/慢了也不会漂。
+        """
+        self._panel._move_window_abs(x, y)
 
     def close_panel(self) -> None:
         """隐藏面板(不是退出程序)。"""
@@ -254,7 +263,13 @@ class VoicePanel:
         return None, None
 
     def _save_geometry(self) -> None:
-        """保存窗口位置(逻辑像素)。"""
+        """保存窗口位置(逻辑像素)。
+
+        先用 GetWindowRect 读**真实位置**再存 —— 记账式维护的
+        ``_pos_x/_pos_y`` 可能和真实窗口脱钩(取整、clamp、
+        pywebview 内部换算),读为准。
+        """
+        self._sync_position_from_window()
         if self._pos_x is None or self._pos_y is None:
             return
         try:
@@ -281,7 +296,10 @@ class VoicePanel:
             x, y = 60, 60
         self._pos_x = x
         self._pos_y = y
-        self._window.move(x, y)
+        try:
+            self._window.move(x, y)
+        except Exception as e:
+            log.debug("摆默认位置失败: %s", e)
 
     # ---------- 前端桥接 ----------
 
@@ -343,7 +361,13 @@ class VoicePanel:
             log.debug("调用前端 setPreview 失败: %s", e)
 
     def _on_frontend_ready(self) -> None:
-        """前端就绪,推一次全量状态。"""
+        """前端就绪,推一次全量状态 + 补一次窗口尺寸。
+
+        fit 放这里是因为 DOM ready 之后 evaluate_js 一定能执行
+        (GUI 就绪那一刻页面可能还没加载完,那时的 fit 会失败,
+        靠这里兜底)。fit 是幂等的:量内容高度、resize 到刚好,
+        重复执行结果相同。
+        """
         self._call_js("setState", self._state_name())
         self._call_js("setStatus", self._status_text, self._status_tone)
         self._call_js("setResult", self._last_result)
@@ -351,6 +375,10 @@ class VoicePanel:
         self._call_js("setHotkey", self.controller.config.hotkey)
         self._call_js("setElapsed", 0.0)
         self._call_js("setLevels", "[]")
+        try:
+            self._fit_window()
+        except Exception as e:
+            log.debug("前端 ready 后 fit 失败: %s", e)
 
     def _state_name(self) -> str:
         return _STATE_NAMES.get(self._state, "idle")
@@ -461,23 +489,42 @@ class VoicePanel:
                            "setElapsed", self._elapsed)
 
     def _apply_pending_visibility(self) -> None:
-        """GUI 就绪后把期望的可见性真正应用上。
+        """GUI 就绪后,把期望的可见性/位置/尺寸落地(推线程里跑)。
 
-        show()/hide() 在 webview.start() 之前被调用时,GUI 还不存在,
-        只能先记下来,这里再补一刀。
+        这是**唯一**做窗口落地的地方:show()/hide() 只记意图,
+        shown 事件只改样式 —— 落地集中在这里,并且全程异常兜底:
+        推线程是这个面板的命根子,它一死整个 UI 就冻结
+        (发生过:一处裸奔的异常把推线程炸掉,面板全坏)。
         """
         if self._visibility_applied or not self._gui_ready.is_set():
             return
         self._visibility_applied = True
-        self._place_default()
         try:
+            # 摆位:有保存位置就精确校准(create_window 的 x/y 会被
+            # WinForms AutoScale 再动一次,和初始尺寸缩水是同一个坑),
+            # 没有就摆到主屏右下角
+            if self._pos_x is not None and self._pos_y is not None:
+                hwnd = self._native_handle()
+                if hwnd:
+                    scale = self._current_scale()
+                    move_window_to(hwnd,
+                                   int(round(self._pos_x * scale)),
+                                   int(round(self._pos_y * scale)))
+            else:
+                self._place_default()
+
             if self._visible:
                 self._window.show()
             else:
                 self._window.hide()
         except Exception as e:
-            log.debug("应用窗口可见性失败: %s", e)
-        self._fit_window()
+            log.warning("应用窗口可见性失败: %s", e)
+        # fit 单独兜底:此时页面可能还没加载完,evaluate_js 会失败,
+        # 前端 DOM ready 后(_on_frontend_ready)还会再 fit 一次
+        try:
+            self._fit_window()
+        except Exception as e:
+            log.debug("首帧 fit 失败(等前端 ready 再试): %s", e)
 
     def _fit_window(self) -> None:
         """把窗口调整到刚好能容纳内容。
@@ -564,27 +611,42 @@ class VoicePanel:
             pass
         return self._scale
 
-    def _move_window(self, dx: float, dy: float) -> None:
-        """拖动窗口。
+    def _move_window_abs(self, x: float, y: float) -> None:
+        """窗口左上角 → (x, y) 逻辑像素。
 
-        前端发来的是**物理像素**增量(契约规定),而 pywebview 6.x 的
-        ``move()`` 吃的是**逻辑像素**(内部自己乘缩放)。这里换算一次,
-        漏掉的话在 175% 屏幕上窗口会比光标快 1.75 倍。
+        用 Win32 SetWindowPos 直接设(物理 = 逻辑 × 当前缩放),
+        不走 pywebview 的 move()(内部还有一层换算与消息,更慢)。
         """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
         try:
             scale = self._current_scale()
-            lx = int(round(float(dx) / scale))
-            ly = int(round(float(dy) / scale))
-        except (TypeError, ValueError):
-            lx, ly = int(dx), int(dy)
-        if self._pos_x is None:
-            self._pos_x, self._pos_y = 0, 0
-        self._pos_x += lx
-        self._pos_y += ly
-        try:
-            self._window.move(self._pos_x, self._pos_y)
+            move_window_to(hwnd, int(round(float(x) * scale)),
+                           int(round(float(y) * scale)))
+            self._pos_x = int(round(float(x)))
+            self._pos_y = int(round(float(y)))
         except Exception as e:
             log.debug("移动窗口失败: %s", e)
+
+    def _sync_position_from_window(self) -> None:
+        """用窗口的**真实物理位置**回填逻辑坐标。
+
+        任何"我以为窗口在哪"的记账都可能和真实位置脱钩
+        (取整、clamp、pywebview 内部换算),所以读为准。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        rect = get_window_rect(hwnd)
+        if rect is None:
+            return
+        try:
+            scale = self._current_scale()
+        except Exception:
+            scale = self._scale
+        self._pos_x = int(round(rect[0] / scale))
+        self._pos_y = int(round(rect[1] / scale))
 
     # ---------- 生命周期 ----------
 
@@ -605,13 +667,16 @@ class VoicePanel:
             set_tool_window_style(hwnd)
 
     def _on_window_shown(self) -> None:
-        """窗口已创建:改成纯悬浮窗。
+        """窗口已创建:改成纯悬浮窗,然后放行 GUI 就绪。
 
-        顺序很重要:
-          先隐藏再改样式 —— 任务栏只在窗口显示时重新评估可见性,
-          顺序反了会先冒出一个任务栏按钮再消失;
-          改完才放行 ``_gui_ready`` —— 免得推送线程抢先 show,
-          把窗口显示成还带任务栏按钮的样子。
+        这里**只做样式**,不做显示/摆位/尺寸 ——
+        shown 是 pywebview 在 UI 线程里同步触发的事件(hidden 窗口
+        也会被透明 Show 一次从而触发),在这里再调 window.show()
+        是 UI 线程重入,可能把窗口搞挂。显示/摆位/fit 由推线程的
+        ``_apply_pending_visibility`` 负责(有异常兜底,炸不了线程)。
+
+        先隐藏再改样式的顺序照旧:任务栏只在窗口显示时重新评估
+        可见性,顺序反了会先冒出一个任务栏按钮再消失。
         """
         hwnd = self._native_handle()
         if hwnd:
@@ -619,20 +684,24 @@ class VoicePanel:
         self._gui_ready.set()
 
     def show(self) -> None:
+        """记录"想要可见"。
+
+        GUI 就绪前只记意图(由推线程的 ``_apply_pending_visibility``
+        统一落地),就绪后直接显示。
+        """
         self._visible = True
         if self._gui_ready.is_set():
-            try:
-                self._window.show()
-            except Exception as e:
-                log.debug("显示面板失败: %s", e)
+            self._visibility_applied = False   # 让推线程再落地一次
+        # 就绪前不直接调 _window.show():窗口可能还没建好,
+        # 而且这方法可能在任意线程被调,WinForms 只认 UI 线程
 
     def hide(self) -> None:
         self._visible = False
         if self._gui_ready.is_set():
-            try:
-                self._window.hide()
-            except Exception as e:
-                log.debug("隐藏面板失败: %s", e)
+            # 隐藏前把真实位置记下来 —— 用户可能拖完就直接关面板,
+            # 之后直接退出程序的话就再没机会读了
+            self._save_geometry()
+            self._visibility_applied = False   # 让推线程再落地一次
 
     def toggle(self) -> None:
         if self._visible:
@@ -641,11 +710,8 @@ class VoicePanel:
             self.show()
 
     def _quit(self) -> None:
-        """退出程序:关掉窗口,webview.start() 就会返回。"""
-        try:
-            self._window.destroy()
-        except Exception as e:
-            log.debug("销毁窗口失败: %s", e)
+        """退出程序:先存窗口位置,再销毁窗口让 webview.start() 返回。"""
+        self.destroy()
 
     def destroy(self) -> None:
         self._stop.set()

@@ -86,10 +86,6 @@ body {
   -webkit-user-select: none;
 }
 
-body.dragging .titlebar {
-  cursor: grabbing;
-}
-
 .dot {
   flex: 0 0 auto;
   width: 9px;

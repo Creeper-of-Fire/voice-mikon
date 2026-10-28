@@ -109,19 +109,25 @@ class ASREngine:
         重采样到 16 kHz 由 ``qwen_asr`` 内部用 librosa 完成 —— 与官方评测
         路径完全一致,不要在外面自己降采样(线性插值没有抗混叠滤波)。
 
-        注意 qwen_asr 的音频输入必须是 (np.ndarray, sr) 元组或文件路径,
-        传裸 ndarray 会报 Unsupported audio input type。
+        注意两件事:
+        1. qwen_asr 的音频输入必须是 (np.ndarray, sr) 元组或文件路径,
+           传裸 ndarray 会报 Unsupported audio input type。
+        2. **必须是浮点音频** —— qwen_asr 内部用 librosa 重采样,而 librosa
+           只接受浮点。传 int16 会报
+           ``ParameterError: Audio data must be floating-point``。
+           所以这里把 int16 转成 [-1, 1] 的 float32 再交出去。
         """
-        if self._model is None:
-            raise ASRError("模型尚未加载")
         if len(audio) == 0:
             return ""
+        if self._model is None:
+            raise ASRError("模型尚未加载")
 
+        wav = self._to_float32(audio)
         lang = language if language is not None else self.language
         context = self._build_context()
         t0 = time.time()
         try:
-            results = self._model.transcribe(audio=(audio, sample_rate),
+            results = self._model.transcribe(audio=(wav, sample_rate),
                                               language=lang, context=context)
         except Exception as e:
             raise ASRError(f"识别失败: {e}") from e
@@ -130,6 +136,27 @@ class ASREngine:
         dur = len(audio) / sample_rate
         log.info("识别完成 %.1fs 音频 / %.1fs 耗时: %s", dur, time.time() - t0, text)
         return text
+
+    @staticmethod
+    def _to_float32(audio: np.ndarray) -> np.ndarray:
+        """把音频统一成 [-1, 1] 的 float32(单声道)。
+
+        录音器给的是 int16,但 librosa(重采样用)只吃浮点。
+        已经在 [-1, 1] 范围的浮点原样保留。
+        """
+        arr = np.asarray(audio)
+        # 注意顺序:**先记住原始 dtype**,再混音。
+        # mean 会把 int16 提升成 float64,之后再判断"是不是整数"
+        # 就永远判不到了 —— 那样 int16 的刻度(±32768)会被当成
+        # 已经归一化的浮点,直接 clip 成 ±1(全幅方波)。
+        was_int = np.issubdtype(arr.dtype, np.integer)
+        if arr.ndim > 1:
+            arr = arr.mean(axis=-1)
+        arr = arr.astype(np.float32)
+        if was_int:
+            # int16 的刻度是 ±32768,除完正好落在 ±1
+            arr = arr / 32768.0
+        return np.clip(arr, -1.0, 1.0)
 
     def transcribe_file(self, path: str | Path, language: str | None = None) -> str:
         """识别音频文件。"""

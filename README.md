@@ -237,6 +237,17 @@ int16 提升成 float64,此时若再走「浮点音频 × 32768」那条分支,�
 实测**46.5% 的样本变成满刻度**,音频被削成方波,模型看到的是严重失真的信号。
 `audio/recorder.py:frames_to_int16` 里对 int16 单独走 `astype(np.int16)` 还原刻度。
 
+**dtype 判断要在混音之前**
+上面那个坑的通用形态 —— `mean` 会把 int16 提升成 float64,所以
+**先记下原始 dtype,再混音,最后按原始刻度还原**。
+`asr/engine.py:_to_float32` 里如果写成「先 mean 再判断是不是整数」,
+判断就永远不成立,int16 会被当成已归一化的浮点,直接 clip 成 ±1(全幅方波)。
+
+**传给 qwen_asr 的必须是浮点音频**
+`qwen_asr` 内部用 librosa 重采样,而 librosa 只接受浮点 —— 传 int16 会报
+`ParameterError: Audio data must be floating-point`。
+所以 `asr/engine.py:_to_float32` 负责把 int16 转成 [-1,1] 的 float32。
+
 **热键路径上不能做耗时操作**
 早期版本在按热键时同步做 2 秒设备探测,导致用户按下的前 2 秒说的话全丢。
 现在设备探测在后台预热,结果走缓存,热键路径零延迟。

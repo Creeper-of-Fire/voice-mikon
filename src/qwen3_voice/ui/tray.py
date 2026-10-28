@@ -121,5 +121,12 @@ class TrayIcon:
         try:
             self.controller.shutdown()
         finally:
+            # 必须销毁窗口:webview.start() 是主线程阻塞点,窗口不关
+            # 主循环就不返回,进程会变成"托盘没了但还活着"的僵尸。
+            if self.panel is not None:
+                try:
+                    self.panel.destroy()
+                except Exception:
+                    pass
             if self.icon is not None:
                 self.icon.stop()

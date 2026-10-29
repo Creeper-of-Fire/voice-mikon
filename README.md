@@ -198,7 +198,8 @@ src/qwen3_voice/
 │   ├── devices.py       设备枚举与自动选择(带可用性实测)
 │   └── recorder.py      录音采集(原生采样率采集,重采样交给 qwen_asr)
 ├── asr/
-│   └── engine.py        Qwen3-ASR 封装,支持热切换模型
+│   ├── engine.py        Qwen3-ASR 封装,支持热切换模型
+│   └── streaming.py     流式引擎:统一接口(feed/close)+ 分句预览 / 整段两种实现
 ├── win32/
 │   ├── api.py           Win32 API 绑定(ctypes 签名集中声明)
 │   ├── dpi.py           DPI 感知(高分屏必需)

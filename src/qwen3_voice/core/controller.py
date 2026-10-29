@@ -11,15 +11,22 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
 用户随时可以 ``cancel_recording()`` 放弃当前这一轮:录音中就丢掉音频,
 识别中就作废结果 —— 两种情况都不识别、不注入,回到 IDLE。
 
-录音期间还会跑一个**预览线程**:把累积到的全部音频反复整段重识别,
+录音期间还会跑一个**预览线程**:把录音增量喂给预览位的引擎,
 实时刷新"边说边显示"的文字(事件 kind="preview")。它只是体验,
-最终注入的始终是停止时那次整段识别的结果。
+最终注入的始终是最终位那次整段识别的结果。
+
+两个插槽,同一套接口(见 ``asr/streaming.py``):
+
+    预览位 —— 要"快":默认分句预览引擎,切句就出字,跟手
+    最终位 —— 要"准":固定整段引擎,最终注入的文字只来自它
+
+引擎接口只有一种形态(``feed(chunk)`` / ``close()``),
+能力差异全在实现里 —— 控制器对"预览位上是哪颗引擎"一无所知。
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -27,6 +34,12 @@ from typing import Callable
 import numpy as np
 
 from ..asr.engine import ASREngine, ASRError
+from ..asr.streaming import (
+    FullPassEngine,
+    PreviewEngineKind,
+    StreamingEngine,
+    make_preview_engine,
+)
 from ..audio.devices import choose_device
 from ..audio.recorder import Recorder, rms_of
 from ..config import Config
@@ -35,6 +48,16 @@ from ..win32.api import get_foreground_window
 from ..win32.inject import paste_text
 
 log = get_logger("core")
+
+# 预览位插哪颗引擎 —— **模块级常量**,代码内可切换,不做成用户配置项。
+#
+#   PreviewEngineKind.SENTENCE   分句预览(默认):切一句认一句,跟手;
+#                                分句的不一致只污染预览层
+#   PreviewEngineKind.FULL_PASS  旧行为:每轮把累积音频整段重识别
+#
+# 最终位固定整段引擎(见 ``_make_final_engine``):最终注入的文字
+# 必须永远来自整段识别,预览层怎么马虎都不许影响它。
+PREVIEW_ENGINE_KIND = PreviewEngineKind.SENTENCE
 
 
 class State(str, Enum):
@@ -83,20 +106,42 @@ def _default_recorder_factory(config: Config, device: int | None = None) -> Reco
     return Recorder(device=device, target_rate=config.sample_rate)
 
 
+def _make_chunk_puller(recorder):
+    """造一个"取录音增量"的函数,返回 None 表示取不到。
+
+    优先用 ``Recorder.drain_chunks()``:它只给**新增**的音频,
+    不用每次都把全部音频重新拼一遍。
+
+    只有 ``snapshot()`` 的录音器(比如测试里的假录音器)才退回差量拉取:
+    记住已经喂过多少样本,只把新增的部分切出来。效果一样,
+    只是每次仍然要拼一次全量(那是旧录音器的固有成本)。
+    """
+    drain = getattr(recorder, "drain_chunks", None)
+    if callable(drain):
+        return drain
+
+    snapshot = getattr(recorder, "snapshot", None)
+    if not callable(snapshot):
+        return None
+
+    fed = {"samples": 0}
+
+    def pull():
+        audio = snapshot()
+        if audio is None:
+            return None
+        total = len(audio)
+        if total <= fed["samples"]:
+            return None
+        out = audio[fed["samples"]:]
+        fed["samples"] = total
+        return out
+
+    return pull
+
+
 class VoiceController:
     """语音输入的核心逻辑。"""
-
-    # ---- 实时预览(边说边显示)的调度参数 ----
-
-    # 最短音频:太短的片段识别不出东西,白跑一次推理
-    PREVIEW_MIN_SECONDS = 0.5
-    # 两轮之间的最小间隔(秒)
-    PREVIEW_MIN_INTERVAL = 1.5
-    # 实际间隔 = max(最小间隔, 上次推理耗时 × 系数)
-    # 必须自适应:重喂全部音频的开销随音频长度线性增长
-    # (transformers 后端没有 vLLM 的 prefix caching),
-    # 推理一变慢,固定间隔就会让请求越积越多。
-    PREVIEW_INTERVAL_FACTOR = 1.2
 
     def __init__(self, config: Config, injector=None, recorder_factory=None):
         self.config = config
@@ -119,9 +164,13 @@ class VoiceController:
         self._listeners: list[Callable[[UIEvent], None]] = []
         self._lock = threading.RLock()
 
-        # 实时预览线程(录音期间后台跑整段重识别)
+        # 实时预览线程(录音期间后台跑,喂预览位的引擎)
         self._preview_stop: threading.Event | None = None
         self._preview_thread: threading.Thread | None = None
+        # 两个插槽的引擎实例。预览位的引擎归预览线程所有(它负责 close),
+        # 最终位的引擎只在停止录音时被喂完整音频、然后 close 出最终结果。
+        self._preview_engine: StreamingEngine | None = None
+        self._final_engine: StreamingEngine | None = None
 
         # 会话代号:每开始一轮录音 +1。
         # 识别线程(阻塞推理,停不下来)靠它判断"我还是当前这一轮吗" ——
@@ -222,6 +271,10 @@ class VoiceController:
         self._set_state(State.RECORDING)
         # 新一轮录音:先把上一轮残留的预览文字清掉
         self._emit(UIEvent(kind="preview", text=""))
+        # 最终位的引擎:整段引擎,最终结果只认它。
+        # 先造好放在那儿,停止录音时把完整音频喂进去、close 出最终文本。
+        native_rate = int(getattr(recorder, "native_rate", 0) or 0) or self.config.sample_rate
+        self._final_engine = self._make_final_engine(native_rate)
         self._start_preview(recorder)
         return True
 
@@ -268,7 +321,11 @@ class VoiceController:
         ``cancelled`` 事件,让胶囊显示「已取消」再淡出。
         """
         if self.state == State.RECORDING:
-            # 先停预览线程 —— 它用的是同一个引擎,不停掉会跟识别抢 GPU
+            # 先把这轮标成作废,再停预览线程:
+            # 预览线程可能正卡在一次识别里,它醒来后的 partial 回调
+            # 必须已经知道自己过期了 —— 作废的文字一个字都不许推给界面。
+            self._cancelled = True
+            # 再停预览线程 —— 它用的是同一个引擎,不停掉会跟识别抢 GPU
             self._stop_preview()
 
             recorder = self.recorder
@@ -279,7 +336,6 @@ class VoiceController:
                 except Exception as e:
                     log.debug("取消录音时停止录音器失败: %s", e)
 
-            self._cancelled = True
             self._set_state(State.IDLE)
             self._emit(UIEvent(kind="preview", text=""))
             self._emit(UIEvent(kind="cancelled", text="已取消"))
@@ -295,21 +351,70 @@ class VoiceController:
 
     # ---------- 实时预览 ----------
 
+    def _make_preview_engine(self, sample_rate: int,
+                             partial) -> StreamingEngine:
+        """造预览位的引擎。
+
+        默认按模块级常量 ``PREVIEW_ENGINE_KIND`` 选(分句 / 整段回退),
+        测试可以覆盖这个方法换成假引擎。
+        """
+        return make_preview_engine(PREVIEW_ENGINE_KIND, self.engine,
+                                   sample_rate, partial=partial)
+
+    def _make_final_engine(self, sample_rate: int) -> StreamingEngine:
+        """造最终位的引擎。
+
+        **固定整段引擎** —— 最终结果必须永远来自整段识别。
+        分句预览带来的不一致只允许停留在预览层。
+        """
+        return FullPassEngine(self.engine, sample_rate)
+
+    def _make_partial_callback(self, session: int):
+        """预览引擎的 partial 回调(跑在预览线程里)。
+
+        必须过 session 检查:作废的一轮(被取消,或已被新一轮取代)
+        的文字**绝不推 UI** —— 和最终结果一个待遇。
+        """
+
+        def on_partial(text: str) -> None:
+            if self._is_stale(session):
+                log.debug("这一轮已作废,丢弃预览文字")
+                return
+            if text and text.strip():
+                self._emit(UIEvent(kind="preview", text=text))
+
+        return on_partial
+
     def _start_preview(self, recorder: Recorder) -> None:
         """启动实时预览线程。
 
-        做法和官方 ``qwen_asr`` 的 ``streaming_transcribe`` 一致:
-        每次把**累积到目前的全部音频**重新喂给模型一次,模型每次都
-        **重新生成完整文本**,所以结果直接整体替换即可 ——
-        不需要拼接、去重、切句。
+        预览位插一颗"快"的引擎(默认分句引擎),它吐出来的文字只影响
+        界面上的预览条 —— 最终注入的文字永远来自最终位的整段识别。
+
+        线程只做一件事:不停地取录音增量喂给引擎。
+        引擎自己决定什么时候出字(分句引擎切句就出,整段引擎定时重识别),
+        控制器对"预览位上是哪颗引擎"一无所知。
         """
         self._stop_preview()
+        pull = _make_chunk_puller(recorder)
+        if pull is None:
+            # 录音器拿不到音频(不是本项目的 Recorder)→ 没有预览可做
+            return
+
+        # 快照/增量都是设备原生采样率,阈值和重采样都要按原生采样率算
+        native_rate = int(getattr(recorder, "native_rate", 0) or 0)
+        if native_rate <= 0:
+            native_rate = self.config.sample_rate
+
+        engine = self._make_preview_engine(
+            native_rate, self._make_partial_callback(self._session))
         stop = threading.Event()
         thread = threading.Thread(
-            target=self._preview_loop, args=(recorder, stop),
+            target=self._preview_loop, args=(stop, engine, pull),
             name="asr-preview", daemon=True)
         self._preview_stop = stop
         self._preview_thread = thread
+        self._preview_engine = engine
         thread.start()
 
     def _stop_preview(self) -> None:
@@ -317,6 +422,11 @@ class VoiceController:
 
         最多等 2 秒 —— 线程可能正卡在一次推理里,不能让它把
         ``stop_recording()`` 堵住。超时就放弃,让它自己退出。
+
+        预览引擎由**预览线程**负责 close(它才是唯一的写者):
+        线程退出时会把最后一句认掉,close 出来的 final 只用于收尾,
+        最终结果不取它。线程没退出时控制器不抢着 close ——
+        那会和正在进行的识别撞车。
         """
         stop, thread = self._preview_stop, self._preview_thread
         self._preview_stop = None
@@ -328,56 +438,39 @@ class VoiceController:
             if thread.is_alive():
                 log.warning("预览线程未在 2 秒内退出(可能卡在推理中)")
 
-    def _preview_loop(self, recorder: Recorder, stop: threading.Event) -> None:
-        """后台线程:反复对"到目前为止的音频"做整段识别,实时刷新预览文字。
+    def _preview_loop(self, stop: threading.Event, engine: StreamingEngine,
+                      pull) -> None:
+        """后台线程:把录音增量喂给预览位的引擎。
 
         绝不能把这个循环放到录音回调线程或 UI 线程里 ——
-        ``engine.transcribe`` 是阻塞的,会卡住录音或界面。
+        识别是阻塞的,会卡住录音或界面。
+
+        切句识别是在 ``feed`` 内部同步做的:断句间隔天然大于 300ms,
+        单句识别几百毫秒,不会积压。识别期间攒下的音频会在下一次
+        拉取时一次性喂进来(引擎内部按固定帧长切分,句边界不会丢)。
         """
-        snapshot = getattr(recorder, "snapshot", None)
-        if snapshot is None:
-            # 录音器拿不到快照(不是本项目的 Recorder)→ 没有预览可做
-            return
-
-        rate = self.config.sample_rate
-        # 快照是设备原生采样率,阈值和重采样都要按原生采样率算
-        native_rate = int(getattr(recorder, "native_rate", 0) or 0)
-        if native_rate <= 0:
-            native_rate = rate
-        min_samples = int(self.PREVIEW_MIN_SECONDS * native_rate)
-        interval = self.PREVIEW_MIN_INTERVAL
-
-        while not stop.is_set():
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = pull()
+                except Exception as e:
+                    log.debug("取录音增量失败: %s", e)
+                    chunk = None
+                if chunk is None or len(chunk) == 0:
+                    # 暂时没有新音频(刚开始录音 / 已经停了)
+                    stop.wait(0.05)
+                    continue
+                try:
+                    engine.feed(chunk)
+                except Exception as e:
+                    # 喂音频失败(引擎异常)只跳过这一块,线程绝对不能死
+                    log.debug("预览喂音频失败: %s", e)
+        finally:
+            # 预览引擎归这条线程所有:退出前 close 掉它
             try:
-                audio = snapshot()
+                engine.close()
             except Exception as e:
-                log.debug("取录音快照失败: %s", e)
-                audio = None
-            # 太短不值得跑一次识别(刚开始录音时快照是空的)
-            if audio is None or len(audio) < min_samples:
-                stop.wait(0.2)
-                continue
-
-            # 快照是原生采样率,直接交给引擎 —— qwen_asr 内部会用
-            # librosa 做高质量重采样(与官方评测路径一致),
-            # 不在这里自己降采样(线性插值没有抗混叠滤波,会毁掉高频)。
-            t0 = time.monotonic()
-            text = ""
-            try:
-                text = self.engine.transcribe(audio, native_rate)
-            except Exception as e:
-                # 识别失败(引擎异常 / 切换模型时旧模型被换掉)只跳过这一轮,
-                # 线程绝对不能死
-                log.debug("预览识别失败: %s", e)
-            elapsed = time.monotonic() - t0
-
-            # 间隔自适应:推理越慢,间隔拉得越长,避免越积越多
-            interval = max(self.PREVIEW_MIN_INTERVAL,
-                           elapsed * self.PREVIEW_INTERVAL_FACTOR)
-
-            if text and text.strip() and not stop.is_set():
-                self._emit(UIEvent(kind="preview", text=text))
-            stop.wait(interval)
+                log.debug("关闭预览引擎失败: %s", e)
 
     # ---------- 识别与注入 ----------
 
@@ -390,7 +483,15 @@ class VoiceController:
 
     def _process(self, audio: np.ndarray, sample_rate: int, session: int) -> None:
         try:
-            text = self.engine.transcribe(audio, sample_rate)
+            # 最终位:整段引擎。喂完整音频、close 出最终文本 ——
+            # 和以前直接调 engine.transcribe(audio, rate) 完全等价。
+            final = self._final_engine
+            if final is None:
+                # 兜底:没走过 start_recording(比如测试直接摆状态)也能跑
+                final = self._make_final_engine(sample_rate)
+                self._final_engine = final
+            final.feed(audio)
+            text = final.close()
         except ASRError as e:
             if self._is_stale(session):
                 return

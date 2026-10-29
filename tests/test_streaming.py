@@ -3,9 +3,13 @@
 不碰真实模型 / 音频设备 / 剪贴板 —— 用假引擎和假录音器,
 验证的是"预览事件怎么发"和"停止时最终结果仍然是整段识别"。
 
-设计前提(和官方 qwen_asr 的 streaming_transcribe 一致):
-每次把**累积到目前的全部音频**重新喂给模型,模型每次都重新生成完整文本,
-所以预览文字是**整体替换**的,不存在拼接/去重/切句。
+设计前提(重构后):
+预览位插一颗**分句预览引擎** —— 它靠能量 VAD 切句,切一句认一句,
+回调给的是"已识别句子的拼接"。所以假录音器喂的必须是
+"有声 + 静音"交替的音频:没有静音,分句引擎永远断不出句子。
+
+最终位固定整段引擎:最终结果永远来自停止时那次整段识别,
+和预览层怎么马虎无关。
 """
 
 import time
@@ -14,8 +18,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from qwen3_voice.asr.streaming import PreviewEngineKind
 from qwen3_voice.audio.recorder import Recorder
 from qwen3_voice.config import Config
+from qwen3_voice.core import controller as controller_module
 from qwen3_voice.core.controller import VoiceController
 
 
@@ -24,8 +30,8 @@ from qwen3_voice.core.controller import VoiceController
 class FakeEngine:
     """假 ASR 引擎。
 
-    识别文本按**音频长度**编造,这样能区分"预览那一轮"(短音频)和
-    "停止时的整段识别"(完整音频)。
+    识别文本按**音频长度**编造,这样能区分"预览认的那一句"(短)
+    和"停止时的整段识别"(完整音频)。
     """
 
     def __init__(self, fail_times=0, result=None):
@@ -53,18 +59,38 @@ class FakeEngine:
         return f"文本-{len(audio)}"
 
 
-class FakeRecorder:
-    """假录音器。
+def tone(seconds: float, rate: int = 16000, amp: int = 5000) -> np.ndarray:
+    return (np.ones(int(seconds * rate)) * amp).astype(np.int16)
 
-    ``snapshot()`` 返回的是"到目前为止的音频"(短),
-    ``stop()`` 返回整段音频(长)—— 两者故意不一样,用来验证
-    最终结果来自整段识别,而不是预览。
+
+def quiet(seconds: float, rate: int = 16000) -> np.ndarray:
+    return np.zeros(int(seconds * rate), dtype=np.int16)
+
+
+def speech_pattern(rate: int = 16000, repeats: int = 3):
+    """默认的录音内容:有声 0.4s + 静音 0.4s,重复几次。
+
+    静音是分句预览引擎的断句依据 —— 没有它就断不出句子。
+    """
+    chunks = []
+    for _ in range(repeats):
+        chunks.append(tone(0.4, rate))
+        chunks.append(quiet(0.4, rate))
+    return chunks
+
+
+class BaseFakeRecorder:
+    """假录音器的公共部分。
+
+    ``stop()`` 返回整段音频(和预览看到的不一样),
+    这样能验证"最终结果来自整段识别,而不是预览"。
     """
 
-    def __init__(self, audio=None, snapshot=None, native_rate=16000):
+    def __init__(self, audio=None, chunks=None, native_rate=16000):
         self.audio = audio if audio is not None else np.zeros(16000, dtype=np.int16)
-        self._snapshot = snapshot if snapshot is not None else self.audio
         self.native_rate = native_rate
+        self._chunks = list(chunks) if chunks is not None else speech_pattern(native_rate)
+        self._pos = 0
         self.started = True
         self.stopped = False
 
@@ -75,15 +101,47 @@ class FakeRecorder:
         self.stopped = True
         return self.audio
 
-    def snapshot(self):
-        return self._snapshot
-
     def levels(self):
         return []
 
     @property
     def elapsed(self):
         return 1.0
+
+
+class FakeRecorder(BaseFakeRecorder):
+    """假录音器(有增量接口)。
+
+    ``drain_chunks()`` 每次给一块新音频(增量,原生采样率)——
+    这是预览线程真正用的接口。
+    """
+
+    def drain_chunks(self):
+        if self._pos >= len(self._chunks):
+            return np.zeros((0,), dtype=np.int16)
+        chunk = self._chunks[self._pos]
+        self._pos += 1
+        return chunk
+
+
+class SnapshotOnlyRecorder(BaseFakeRecorder):
+    """只有 ``snapshot()`` 的假录音器(没有 ``drain_chunks``)。
+
+    ``snapshot()`` 每次返回"到目前为止录到的全部音频"(会变长)——
+    预览线程靠差量拉取从中切出新增部分。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._acc: list[np.ndarray] = []
+
+    def snapshot(self):
+        if self._pos < len(self._chunks):
+            self._acc.append(self._chunks[self._pos])
+            self._pos += 1
+        if not self._acc:
+            return np.zeros((0,), dtype=np.int16)
+        return np.concatenate(self._acc)
 
 
 # ---------------- 夹具与工具 ----------------
@@ -100,7 +158,6 @@ def controller(tmp_path: Path):
 
     recorder = FakeRecorder(
         audio=(np.ones(32000) * 5000).astype(np.int16),    # 整段 2 秒
-        snapshot=(np.ones(8000) * 5000).astype(np.int16),  # 快照 0.5 秒
     )
 
     def fake_recorder_factory(config, device=None):
@@ -113,9 +170,6 @@ def controller(tmp_path: Path):
     ctrl._init_mic = lambda: None
     ctrl.injected = injected
     ctrl.recorder_obj = recorder
-    # 预览调度参数调快,测试不用等 1.5 秒
-    ctrl.PREVIEW_MIN_INTERVAL = 0.05
-    ctrl.PREVIEW_MIN_SECONDS = 0.1
     yield ctrl
     ctrl._stop_preview()
 
@@ -153,7 +207,7 @@ def _recorder_with_frames(native_rate: int, n_frames: int = 2,
     return rec
 
 
-# ---------------- Recorder.snapshot ----------------
+# ---------------- Recorder 快照 / 增量 ----------------
 
 def test_snapshot_empty_before_any_audio():
     """刚开始录音时快照是空的 —— 调用方必须判空。"""
@@ -197,17 +251,47 @@ def test_snapshot_is_native_rate_stop_is_same_rate():
     assert np.array_equal(snap, stopped)
 
 
+def test_drain_chunks_returns_increment():
+    """增量接口:每次只给新录到的那部分,不重复。"""
+    rec = _recorder_with_frames(16000, n_frames=3, frames=800)
+    first = rec.drain_chunks()
+    assert len(first) == 2400           # 攒下的三帧一起给
+
+    # 再录一帧,增量接口只给这一帧
+    rec._callback(np.full((800, 1), 9, dtype=np.int16), 800, None, None)
+    second = rec.drain_chunks()
+    assert len(second) == 800
+    # 拼起来 == 全量
+    assert np.array_equal(np.concatenate([first, second]), rec.snapshot())
+
+
+def test_drain_chunks_empty_when_nothing_new():
+    """没有新音频时给空数组,不能报错。"""
+    rec = _recorder_with_frames(16000)
+    rec.drain_chunks()
+    assert len(rec.drain_chunks()) == 0
+
+
+def test_drain_chunks_does_not_consume_audio():
+    """增量拉取不能消费音频 —— stop() 仍然拿到完整数据。"""
+    rec = _recorder_with_frames(16000)
+    rec.drain_chunks()
+    stopped = rec.stop()
+    assert len(stopped) == 1600
+
+
 # ---------------- 预览线程 ----------------
 
 def test_preview_thread_emits_preview_event(controller):
-    """录音过程中会发 kind="preview" 的事件,文字来自引擎。"""
+    """录音过程中会发 kind="preview" 的事件,文字来自预览引擎。"""
     events = []
     controller.subscribe(events.append)
 
     assert controller.start_recording() is True
     assert wait_for(lambda: preview_texts(events))
 
-    assert preview_texts(events)[0] == "文本-8000"   # 快照长度 → 假引擎的输出
+    # 分句引擎认的是"那一句"(0.4s 有声),不是整段
+    assert preview_texts(events)[0] == "文本-6400"
     # 识别必须走 engine.transcribe,且采样率是模型要的 16 k
     assert controller.engine.calls
     assert controller.engine.calls[0][1] == 16000
@@ -237,13 +321,13 @@ def test_preview_thread_stops_after_stop(controller):
 
 
 def test_preview_thread_survives_engine_error(controller):
-    """引擎抛异常时预览线程不能死 —— 下一轮还要能出文字。"""
+    """引擎抛异常时预览线程不能死 —— 下一句还要能出文字。"""
     controller.engine = FakeEngine(fail_times=1)
     events = []
     controller.subscribe(events.append)
 
     controller.start_recording()
-    # 第一次推理抛异常,第二次成功
+    # 第一句推理抛异常,第二句成功
     assert wait_for(lambda: preview_texts(events))
     assert len(controller.engine.calls) >= 2
 
@@ -270,3 +354,124 @@ def test_result_is_full_recognition_not_preview(controller):
 
     # 结果到了之后清空预览
     assert len(preview_clears(events)) >= 2
+
+
+def test_final_slot_is_full_pass_engine(controller):
+    """最终位固定整段引擎 —— 最终结果只能是整段识别那一次。"""
+    controller.start_recording()
+    assert wait_for(lambda: controller.engine.calls)
+
+    controller.stop_recording()
+    assert wait_for(lambda: controller.injected)
+    # 整段识别只发生一次(长度 = 整段音频)
+    full_calls = [c for c in controller.engine.calls if c[0] == 32000]
+    assert len(full_calls) == 1
+
+
+# ---------------- 插槽与回退 ----------------
+
+def test_default_preview_slot_is_sentence_engine(controller):
+    """默认组合:预览位分句引擎,最终位整段引擎。"""
+    assert controller_module.PREVIEW_ENGINE_KIND == PreviewEngineKind.SENTENCE
+    controller.start_recording()
+    assert type(controller._preview_engine).__name__ == "SentencePreviewEngine"
+    assert type(controller._final_engine).__name__ == "FullPassEngine"
+
+
+def test_full_pass_fallback_still_previews(monkeypatch, controller):
+    """回退模式:整段引擎插预览位 —— 预览变成整段重识别(旧行为)。"""
+    monkeypatch.setattr(controller_module, "PREVIEW_ENGINE_KIND",
+                        PreviewEngineKind.FULL_PASS)
+    events = []
+    controller.subscribe(events.append)
+
+    controller.start_recording()
+    assert wait_for(lambda: preview_texts(events))
+
+    # 整段重识别:认的是"累积到目前的全部音频"(0.4s 有声 + 0.4s 静音)
+    assert preview_texts(events)[0] == "文本-12800"
+
+
+def test_snapshot_only_recorder_still_previews(tmp_path):
+    """只有 snapshot() 的录音器也能出预览(差量拉取回退路径)。"""
+    cfg = Config(model_root=str(tmp_path), silence_rms=0.0001)
+    recorder = SnapshotOnlyRecorder(
+        audio=(np.ones(32000) * 5000).astype(np.int16))
+
+    ctrl = VoiceController(cfg, injector=lambda *a, **k: True,
+                           recorder_factory=lambda config, device=None: recorder)
+    ctrl.engine = FakeEngine()
+    ctrl._init_model = lambda: None
+    ctrl._init_mic = lambda: None
+
+    events = []
+    ctrl.subscribe(events.append)
+    try:
+        ctrl.start_recording()
+        assert wait_for(lambda: preview_texts(events))
+        assert preview_texts(events)[0] == "文本-6400"
+    finally:
+        ctrl._stop_preview()
+
+
+# ---------------- 作废机制 ----------------
+
+def test_stale_partial_is_not_pushed(controller):
+    """过期的 partial 绝不推 UI —— session 代号机制照旧生效。"""
+    captured: dict = {}
+    original = controller._make_preview_engine
+
+    def spy(sample_rate, partial):
+        captured["partial"] = partial
+        return original(sample_rate, partial)
+
+    controller._make_preview_engine = spy
+
+    events = []
+    controller.subscribe(events.append)
+    controller.start_recording()
+    assert wait_for(lambda: preview_texts(events))
+
+    # 预览线程收工,然后把这一轮作废(模拟取消/开了新一轮)
+    controller._stop_preview()
+    controller._session += 1
+
+    before = len(preview_texts(events))
+    captured["partial"]("作废的文字")
+    assert len(preview_texts(events)) == before
+    assert "作废的文字" not in [e.text for e in events]
+
+
+def test_current_partial_is_pushed(controller):
+    """没作废的一轮,partial 照常推给界面。"""
+    captured: dict = {}
+    original = controller._make_preview_engine
+
+    def spy(sample_rate, partial):
+        captured["partial"] = partial
+        return original(sample_rate, partial)
+
+    controller._make_preview_engine = spy
+
+    events = []
+    controller.subscribe(events.append)
+    controller.start_recording()
+    assert wait_for(lambda: preview_texts(events))
+    controller._stop_preview()
+
+    captured["partial"]("这一轮的文字")
+    assert "这一轮的文字" in preview_texts(events)
+
+
+def test_cancel_drops_preview_text(controller):
+    """取消:预览文字清掉,之后也不该再有预览事件冒出来。"""
+    events = []
+    controller.subscribe(events.append)
+    controller.start_recording()
+    assert wait_for(lambda: preview_texts(events))
+
+    controller.cancel_recording()
+    assert controller.state.value == "idle"
+    count = len(preview_texts(events))
+    time.sleep(0.3)
+    assert len(preview_texts(events)) == count

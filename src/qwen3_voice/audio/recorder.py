@@ -71,6 +71,8 @@ class Recorder:
         self.start_time = 0.0
         # 最近若干帧的 rms,给界面画电平用
         self._levels: deque[float] = deque(maxlen=level_window)
+        # 已经取走到第几帧了(drain_chunks 的游标)
+        self._chunk_cursor = 0
 
     # ---------- 状态 ----------
 
@@ -93,6 +95,7 @@ class Recorder:
         import sounddevice as sd
 
         self._frames = []
+        self._chunk_cursor = 0
         self.native_rate = supported_rate(self.device) if self.device is not None else supported_rate(None)
         try:
             self._device_lock_held = _device_lock.acquire(timeout=10)
@@ -171,6 +174,31 @@ class Recorder:
         with self._lock:
             frames = list(self._frames)
         return frames_to_int16(frames)
+
+    def drain_chunks(self) -> np.ndarray:
+        """取走"上次取走之后新录到的音频"(原生采样率,int16 单声道)。
+
+        给流式引擎用:预览位只需要**增量**,不必每次都把全部音频重新拼一遍
+        —— 那正是旧预览"整段重识别"越说越慢的根源之一。
+
+        与 ``snapshot()`` 的分工:
+            ``snapshot()``     给**全量**且不消费(整段引擎 / 调试用)
+            ``drain_chunks()`` 给**增量**且推进游标(流式引擎用)
+
+        两者都不打断录音 —— ``stop()`` 仍然拿到完整音频。
+        录音停止后(帧列表已清空)再调用只会拿到空数组。
+
+        必须**在锁内取游标**:采集回调线程随时在往 ``_frames`` 里塞数据,
+        游标和帧列表要一起取,否则会漏帧或者重复。
+        """
+        with self._lock:
+            frames = self._frames
+            start = self._chunk_cursor
+            if start >= len(frames):
+                return np.zeros((0,), dtype=np.int16)
+            self._chunk_cursor = len(frames)
+            new_frames = frames[start:]
+        return frames_to_int16(new_frames)
 
     def _release_device_lock(self) -> None:
         if self._device_lock_held:

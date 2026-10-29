@@ -12,6 +12,7 @@
   "min_duration": 0.3,
   "max_duration": 120.0,
   "silence_rms": 0.002,
+  "save_recordings": true,
   "language": null,
   "hotwords": [
     "Qwen3-ASR",

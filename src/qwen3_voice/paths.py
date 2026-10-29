@@ -52,6 +52,15 @@ def hotwords_path() -> Path:
     return data_dir() / "hotwords.txt"
 
 
+def recordings_dir() -> Path:
+    """录音留存目录(调试用的原始音频)。
+
+    放在 ``data/`` 下面,跟着项目走 —— 见仓库根目录 AGENTS.md 的
+    portable 约定:程序写出的数据一律留在项目目录内。
+    """
+    return data_dir() / "recordings"
+
+
 def webview_dir() -> Path:
     """WebView2 运行时数据目录。
 
@@ -64,7 +73,7 @@ def webview_dir() -> Path:
 
 def ensure_dirs() -> None:
     """确保数据目录存在。"""
-    for d in (data_dir(), webview_dir()):
+    for d in (data_dir(), recordings_dir(), webview_dir()):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except OSError:

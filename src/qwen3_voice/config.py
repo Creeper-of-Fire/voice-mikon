@@ -54,6 +54,10 @@ class Config:
     min_duration: float = 0.3
     max_duration: float = 120.0
     silence_rms: float = 0.002                # 低于此电平视为静音
+    # 每轮录音结束后把原始音频存成 WAV(调试用)。
+    # 默认开:出问题时需要**同一段真实录音**反复回放定位,
+    # 光看日志不够。不想留就把这个开关关掉。
+    save_recordings: bool = True
 
     # ---- 识别
     language: str | None = None               # None = 自动检测语种

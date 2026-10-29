@@ -97,6 +97,7 @@ python -m qwen3_voice
 | `restore_clipboard` | `true` | 粘贴后恢复原剪贴板 |
 | `trailing_space` | `true` | 末尾自动补空格 |
 | `silence_rms` | `0.002` | 低于此电平视为静音 |
+| `save_recordings` | `true` | 每轮录音结束后把原始音频存成 WAV 到 `data/recordings/`(调试用,只留最近 20 个) |
 | `max_duration` | `120` | 单次最长录音秒数 |
 | `panel_geometry` | `""` | 面板位置,自动保存(逻辑像素) |
 | `panel_visible` | `false` | 面板启动时是否常驻(`true` = 启动就显示,默认靠托盘打开) |
@@ -196,7 +197,8 @@ src/qwen3_voice/
 │   └── controller.py    状态机 + 编排(UI 和热键都只跟这层打交道)
 ├── audio/
 │   ├── devices.py       设备枚举与自动选择(带可用性实测)
-│   └── recorder.py      录音采集(原生采样率采集,重采样交给 qwen_asr)
+│   ├── recorder.py      录音采集(原生采样率采集,重采样交给 qwen_asr)
+│   └── recording_store.py 录音留存:原始音频落成 WAV(调试用)
 ├── asr/
 │   ├── engine.py        Qwen3-ASR 封装,支持热切换模型
 │   └── streaming.py     流式引擎:统一接口(feed/close)+ 分句预览 / 整段两种实现
@@ -219,11 +221,12 @@ src/qwen3_voice/
     └── tray.py          托盘图标
 
 scripts/
-└── hotwords_manager.py 从聊天记录提取术语表候选(只读)
+├── hotwords_manager.py 从聊天记录提取术语表候选(只读)
+└── replay_preview.py   无头回放:拿真实录音复现预览问题(不加载 UI、不占麦克风)
 ```
 
 运行时数据都在项目内的 `data/`(portable,见 AGENTS.md):
-`config.json`、`hotwords.txt`、`voice_input.log`、`webview/`。
+`config.json`、`hotwords.txt`、`voice_input.log`、`recordings/`、`webview/`。
 
 前端是**纯静态 HTML/CSS/JS**,零 npm、零框架、零 CDN —— 项目定位是绿色软件,
 `git clone` + `pip install -e .` 就能跑,不该有 node_modules。Python 与前端之间
@@ -448,6 +451,28 @@ uv pip install --python .venv\Scripts\python.exe pytest
 # 单独跑某个模块
 .venv\Scripts\python.exe -m qwen3_voice
 ```
+
+### 调试:录音留存 + 无头回放
+
+「预览不出字」这类问题光看日志不够 —— 日志分不清是**帧没喂进去**、
+**全判有声断不出句**、**断句了但识别为空**、还是**认出字了没推给界面**。
+所以加了两个基建:
+
+1. **录音留存** —— 每轮录音结束,原始音频自动存成 WAV 到
+   `data/recordings/`(文件名带时间戳和时长,只留最近 20 个)。
+   不想要就把配置里的 `save_recordings` 关掉。
+2. **无头回放** —— 拿留存下来的真实录音复现同一段音频,
+   **不加载 UI、不占麦克风**:
+
+```bash
+python scripts/replay_preview.py data/recordings/20261029-164630_31s.wav
+python scripts/replay_preview.py <wav> --realtime   # 按真实时间推进(复现节奏)
+python scripts/replay_preview.py <wav> --verbose    # 逐帧打印 RMS 和静音判定
+```
+
+它按录音器的真实块大小喂给**真实的分句引擎**,打印:每个分析帧的 RMS
+与静音判定(引擎真正看到的帧)、每次断句的句长/识别文本/耗时、
+每次 partial 的累计文本,最后直接给结论 —— 断在哪一环。
 
 ---
 

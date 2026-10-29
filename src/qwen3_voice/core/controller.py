@@ -42,6 +42,7 @@ from ..asr.streaming import (
 )
 from ..audio.devices import choose_device
 from ..audio.recorder import Recorder, rms_of
+from ..audio.recording_store import save_recording
 from ..config import Config
 from ..logging_setup import get_logger
 from ..win32.api import get_foreground_window
@@ -292,6 +293,15 @@ class VoiceController:
         self.recorder = None
         dur = len(audio) / native_rate
         log.info("停止录音,时长 %.1fs", dur)
+
+        # 录音留存:调试期需要**同一段真实录音**反复回放才能定位
+        # "预览零出字"这类问题(日志分不清是没喂进去还是没识别出来)。
+        # 存盘失败绝不影响主流程 —— 只是个调试基建,不值得为它中断识别。
+        if self.config.save_recordings:
+            try:
+                save_recording(audio, native_rate)
+            except Exception as e:
+                log.debug("录音留存失败: %s", e)
 
         if dur < self.config.min_duration:
             self._set_state(State.IDLE)

@@ -24,6 +24,11 @@ from .devices import supported_rate
 
 log = get_logger("audio.recorder")
 
+# 采集块大小(每次回调的样本数)。
+# 回放工具要按**同样的粒度**切音频喂引擎,否则复现不出真实的喂入节奏
+# —— 粒度不同,分句引擎内部按帧切分的边界也跟着变。
+RECORDER_BLOCK_SIZE = 1024
+
 # 设备访问锁:探测与录音互斥
 _device_lock = threading.Lock()
 # 录音进行中的标志,后台探测看到就主动让路
@@ -104,7 +109,7 @@ class Recorder:
                 channels=1,
                 samplerate=self.native_rate,
                 dtype="int16",
-                blocksize=1024,
+                blocksize=RECORDER_BLOCK_SIZE,
                 callback=self._callback,
             )
             self._stream.start()

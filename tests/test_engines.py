@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from qwen3_voice.asr.streaming import (
+    VAD_SILENCE_RMS,
     FullPassEngine,
     PreviewEngineKind,
     SentencePreviewEngine,
@@ -98,6 +99,51 @@ def test_make_preview_engine_picks_implementation():
     full = make_preview_engine(PreviewEngineKind.FULL_PASS, fake, RATE)
     assert isinstance(sentence, SentencePreviewEngine)
     assert isinstance(full, FullPassEngine)
+
+
+# ---------------- 音频块的归一化(_as_audio) ----------------
+#
+# 守的是 README「dtype 判断要在混音之前」那条坑在**流式层**的复刻:
+# mean 会把 int16 提升成 float64,之后再当成"已归一化的浮点"处理,
+# ±32768 的样本就被当成 ±1 的音频 —— 音频直接毁掉。
+# (录音器那层有 ``frames_to_int16`` 兜着,流式层没有 —— 这里必须守住。)
+
+def test_as_audio_downmixes_stereo_int16_keeping_the_scale():
+    """int16 立体声混成单声道后,**刻度必须还原**。
+
+    混音前的整数刻度(2000)不能变成浮点归一化后的 0.06,
+    也不能变成 65536000 那种削波值。
+    """
+    stereo = np.array([[1000, 3000], [-2000, 2000], [32767, -32767]],
+                       dtype=np.int16)
+    out = StreamingEngine._as_audio(stereo)
+
+    assert out.dtype == np.int16
+    assert out.tolist() == [2000, 0, 0]
+
+
+def test_as_audio_keeps_float_stereo_as_float():
+    """浮点立体声混完还是浮点 —— 不能再当整数处理一遍。"""
+    stereo = np.array([[0.5, -0.5], [0.25, 0.75]], dtype=np.float32)
+    out = StreamingEngine._as_audio(stereo)
+
+    assert out.dtype == np.float32
+    assert out.tolist() == [0.0, 0.5]
+
+
+def test_as_audio_passes_mono_through():
+    """单声道原样通过(不做混音、不改 dtype)。"""
+    mono = np.array([100, -100, 32767], dtype=np.int16)
+    out = StreamingEngine._as_audio(mono)
+
+    assert out.dtype == np.int16
+    assert out.tolist() == [100, -100, 32767]
+
+
+def test_as_audio_rejects_none_and_empty():
+    """没有数据时返回 None —— 调用方要判空。"""
+    assert StreamingEngine._as_audio(None) is None
+    assert StreamingEngine._as_audio(np.zeros((0,), dtype=np.int16)) is None
 
 
 # ---------------- 整段引擎 ----------------
@@ -314,3 +360,34 @@ def test_custom_thresholds_are_respected():
     eng.feed(tone(0.3))
     eng.feed(quiet(0.1))
     assert len(fake.calls) == 1
+
+
+# ---------------- VAD 静音阈值(实测定标,别随手改) ----------------
+#
+# 提交 172dfd0 按真机实测把它从 0.01 改成 0.0015:
+# 底噪峰 -63~-60 dB(0.0009~0.0011),语音主体 -53~-40 dB(0.002~0.01),
+# 峰值才 -33 dB —— 没有干净的双峰分界,0.01 会把语音主体大半判成静音
+# (实测 94% 的帧被判静音),一句话被切成碎片,预览大量缺字。
+#
+# 这个数字是**实测定标**出来的,不是随手写的。改回去预览就会碎,
+# 而那种问题在单测里看不出来 —— 所以这里把它钉死。
+
+def test_vad_silence_threshold_is_locked_to_the_calibrated_value():
+    assert VAD_SILENCE_RMS == 0.0015
+
+
+def test_vad_threshold_separates_quiet_noise_from_speech():
+    """门限两侧:安静房间底噪判静音,语音主体判有声。"""
+    eng = sentence_engine(FakeEngine())
+    assert eng._silence_rms == VAD_SILENCE_RMS
+
+    # 底噪(实测 -60 dB ≈ 0.001)整块喂进去:不该断出句子
+    eng.feed((np.ones(1600) * int(0.001 * 32768)).astype(np.int16))
+    eng.feed(quiet(0.4))
+    assert eng.partials == []
+
+    # 语音主体(实测 -40 dB ≈ 0.01)同样喂:应该断出一句
+    eng2 = sentence_engine(FakeEngine())
+    eng2.feed((np.ones(6400) * int(0.01 * 32768)).astype(np.int16))
+    eng2.feed(quiet(0.4))
+    assert eng2.partials == ["文本-6400"]

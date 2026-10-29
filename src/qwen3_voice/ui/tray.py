@@ -2,7 +2,7 @@
 
 托盘与面板共享同一个控制器:
   - 托盘图标点击 -> 显示/隐藏面板
-  - 托盘菜单   -> 显示面板 / 退出 / 打开配置
+  - 托盘菜单   -> 显示面板 / 重启 / 退出 / 打开配置
 """
 
 from __future__ import annotations
@@ -51,6 +51,9 @@ class TrayIcon:
         self.panel = panel
         self.config_path = config_path
         self.icon = None
+        # 用户点了「重启」:main() 在全部清理完成后检查它,
+        # 由入口负责拉起新实例(见 __main__.py 的 _spawn_restart)
+        self.restart_requested = False
 
     def start(self) -> None:
         import pystray
@@ -65,6 +68,7 @@ class TrayIcon:
             pystray.MenuItem("打开配置文件", self._open_config),
             pystray.MenuItem("查看日志", self._open_log),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("重启", self._restart),
             pystray.MenuItem("退出", self._quit),
         )
         self.icon = pystray.Icon("qwen3_voice", make_icon(), "Qwen3 语音输入", menu)
@@ -116,6 +120,18 @@ class TrayIcon:
         p = Path(self.controller.config.log_file)
         if p.is_file():
             os.startfile(str(p))
+
+    def _restart(self, *_args) -> None:
+        """重启:置位请求,然后走和退出**完全一样**的清理流程。
+
+        新实例**不能在这里拉**:此刻热键还没注销、窗口还没销毁 ——
+        拉早了新实例注册热键就撞车("快速重启注册失败"就是这么来的)。
+        main() 在所有清理(热键注销 → 窗口销毁 → 主循环返回)做完之后
+        检查 ``restart_requested``,由它负责拉起新实例。
+        """
+        self.restart_requested = True
+        log.info("托盘请求重启")
+        self._quit()
 
     def _quit(self, *_args) -> None:
         try:

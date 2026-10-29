@@ -6,6 +6,9 @@
 真机行为(光标到底能不能跟住、拖拽顺不顺手)要靠真人冒烟。
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 from qwen3_voice.config import Config
@@ -23,6 +26,10 @@ from qwen3_voice.win32 import caret
 
 # 一个 1920×1080 的工作区(物理像素)
 WORK = (0, 0, 1920, 1040)
+
+# 胶囊前端样式表(球形态的尺寸就是从这儿来的)
+CAPSULE_CSS = (Path(__file__).resolve().parents[1]
+               / "src" / "qwen3_voice" / "ui" / "static" / "capsule.css")
 
 
 # ---------------- 跟随输入:贴着光标摆 ----------------
@@ -268,6 +275,129 @@ def test_gui_caret_rect_is_converted_to_screen_coordinates(monkeypatch):
     assert rect == (1003, 2005, 1004, 2027)
 
 
+# ---------------- 常驻悬浮球:位置计算与记忆 ----------------
+#
+# 悬浮球和胶囊**共用同一个窗口**(固定尺寸,不能 resize),球固定待在
+# 窗口的底边居中处。所以"球在哪"就是"窗口摆哪",两边互为逆运算。
+
+
+def _css_value(css: str, selector: str, prop: str) -> str:
+    """从 CSS 里抠出某个选择器的某个属性值(纯文本解析,够用)。
+
+    选择器要求出现在**行首**:否则 ``.recording-pill`` 会先撞上
+    ``.can-drag .recording-pill``(它也在文件里,而且没有 height)。
+    """
+    m = re.search(r"(?:^|\n)[ \t]*" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert m, f"CSS 里找不到选择器: {selector}"
+    m2 = re.search(re.escape(prop) + r"\s*:\s*([^;]+)", m.group(1))
+    assert m2, f"{selector} 里找不到属性 {prop}"
+    return m2.group(1).strip()
+
+
+def test_the_ball_is_exactly_as_big_as_the_capsule():
+    """球和胶囊**一样大**:球的直径必须等于胶囊的高度。
+
+    球不是另一个元素 —— 它就是这颗胶囊收窄成的正圆。不等大的话,
+    球横向长开时走的轨迹和胶囊对不上,窗口的命中区(SetWindowRgn,
+    按上报的矩形裁)就会切到球上 —— 真机症状是"球的上半截多一条
+    白线",像被切出一个球冠。
+    """
+    css = CAPSULE_CSS.read_text(encoding="utf-8")
+
+    assert _css_value(css, ".recording-pill", "height") == f"{placement.ORB_SIZE}px"
+
+
+def test_the_ball_form_is_the_pill_narrowed_to_the_ball_size():
+    """CSS 里球形态的宽度也必须等于 ORB_SIZE —— 前后端只有一个真相源。
+
+    改了一边忘了另一边,球就会和胶囊对不上(和上面那条一样的后果)。
+    """
+    css = CAPSULE_CSS.read_text(encoding="utf-8")
+
+    selector = "body.orb-mode.orb-idle .recording-pill"
+    assert _css_value(css, selector, "max-width") == f"{placement.ORB_SIZE}px"
+
+
+def test_orb_inset_is_centered_at_the_bottom():
+    """球在窗口里底边居中 → 和胶囊同一横坐标,展开时不用挪位置。"""
+    assert placement.orb_inset_x(512) == (512 - placement.ORB_SIZE) // 2
+
+
+def test_orb_screen_position_is_the_bottom_center():
+    """窗口位置 → 球的左上角(物理像素)。"""
+    x, y = placement.orb_screen_position(100, 200, 512, 260, 1.0)
+
+    assert x == 100 + (512 - placement.ORB_SIZE) // 2
+    assert y == 200 + 260 - (placement.ORB_INSET_Y + placement.ORB_SIZE)
+
+
+def test_orb_window_position_is_the_inverse():
+    """球的位置 → 窗口位置:和上面互为逆运算。"""
+    x, y = placement.orb_screen_position(100, 200, 512, 260, 1.0)
+
+    win = placement.orb_window_position(x, y, 512, 260, 1.0, WORK)
+
+    assert win == (100, 200)
+
+
+def test_orb_position_is_clamped_into_the_work_area():
+    """拖出屏幕的球要夹回来 —— 窗口不能跟着甩出去。"""
+    x, y = placement.clamp_orb_position(-500, -500, 512, 260, 1.0, WORK)
+
+    assert x >= WORK[0]
+    assert y >= WORK[1]
+    # 纵向还得多留一截:球的上方要放得下展开后的胶囊(文字条 + 胶囊)
+    assert y >= WORK[1] + 260 - (placement.ORB_INSET_Y + placement.ORB_SIZE)
+
+
+def test_orb_position_from_geometry_restores_the_saved_offset():
+    """记忆的偏移 → 窗口位置(存的是相对工作区的逻辑偏移,换屏不飞)。"""
+    second = (1920, 0, 3840, 1040)
+
+    win = placement.orb_position_from_geometry("100,300", second, 1.0,
+                                                512, 260)
+
+    assert win[0] == 2020 - (512 - placement.ORB_SIZE) // 2
+    assert win[1] == 300 + (placement.ORB_INSET_Y + placement.ORB_SIZE) - 260
+
+
+def test_orb_position_from_geometry_clamps_a_too_high_saved_position():
+    """记住的位置太高(换了块矮屏)也要夹回来 —— 展开后文字条不能出屏。"""
+    win = placement.orb_position_from_geometry("100,10", WORK, 1.0, 512, 260)
+
+    assert win[1] == (260 - (placement.ORB_INSET_Y + placement.ORB_SIZE)
+                      + placement.ORB_INSET_Y + placement.ORB_SIZE - 260)
+
+
+def test_orb_position_from_geometry_returns_none_for_garbage():
+    """记忆坏掉(手改过配置文件)就当没有,别硬套一个坐标。"""
+    assert placement.orb_position_from_geometry(
+        "不是数字", WORK, 1.0, 512, 260) is None
+    assert placement.orb_position_from_geometry(
+        "", WORK, 1.0, 512, 260) is None
+
+
+def test_default_orb_position_is_the_bottom_right_corner():
+    """默认摆在工作区右下角(不挡中间的编辑区,也不挡任务栏)。"""
+    x, y = placement.default_orb_position(WORK, 1.0)
+
+    assert x == WORK[2] - placement.ORB_MARGIN - placement.ORB_SIZE
+    assert y == WORK[3] - placement.ORB_MARGIN - placement.ORB_SIZE
+
+
+def test_orb_position_round_trips_through_the_saved_offset():
+    """球的屏幕坐标 → 记忆的偏移 → 还原回来,位置不变。"""
+    x, y = placement.orb_screen_position(100, 200, 512, 260, 1.0)
+    geometry = encode_offset(x, y, WORK, 1.0)
+
+    win = placement.orb_position_from_geometry(geometry, WORK, 1.0, 512, 260)
+
+    assert win is not None
+    back_x, back_y = placement.orb_screen_position(
+        win[0], win[1], 512, 260, 1.0)
+    assert (back_x, back_y) == (x, y)
+
+
 # ---------------- 配置校验 ----------------
 
 def test_config_rejects_unknown_capsule_position():
@@ -302,3 +432,22 @@ def test_config_round_trips_the_new_fields():
     assert restored.show_preview is False
     assert restored.capsule_geometry == "12,34"
     assert restored.capsule_monitor == "\\\\.\\DISPLAY2"
+
+
+def test_floating_orb_defaults_to_off():
+    """默认关:老用户看到的还是"按热键才弹胶囊",一点不变。"""
+    assert Config().floating_orb is False
+
+
+def test_config_round_trips_the_orb_fields():
+    """常驻球的开关与位置记忆要能存能读。"""
+    cfg = Config()
+    cfg.floating_orb = True
+    cfg.orb_geometry = "12,34"
+    cfg.orb_monitor = "\\\\.\\DISPLAY2"
+
+    restored = Config.from_dict(cfg.to_dict())
+
+    assert restored.floating_orb is True
+    assert restored.orb_geometry == "12,34"
+    assert restored.orb_monitor == "\\\\.\\DISPLAY2"

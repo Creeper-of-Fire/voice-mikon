@@ -42,6 +42,10 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__qwen.setTheme(mode)` | `mode` ∈ `"auto"` \| `"light"` \| `"dark"` | 当前主题档位,启动时推一次;换档时再推 |
 | `__qwen.setCapsulePosition(mode)` | `mode` ∈ `"follow"` \| `"bottom"` \| `"custom"` | 当前胶囊位置档位,启动时推一次;换档时再推 |
 | `__qwen.setPreviewEnabled(enabled)` | `enabled` boolean | 预览文字条开关,启动时推一次;换档时再推 |
+| `__qwen.setOrbEnabled(enabled)` | `enabled` boolean | 常驻悬浮球开关,启动时推一次;换档时再推 |
+| `__qwen.setOrbPosition(mode)` | `mode` ∈ `"follow"` \| `"pinned"` \| `"custom"` | 悬浮球的位置档位,启动时推一次;换档时再推 |
+| `__qwen.setBackend(kind)` | `kind` ∈ `"local"` \| `"dashscope"` | 当前识别后端(本地模型 / 网络 API),启动时推一次;切换后端成功后推 |
+| `__qwen.setNotice(text)` | `text` string | 面板上的操作提示(切换后端的进展 / 拒绝 / 失败)。空串表示清空 |
 
 > 面板瘦身后**不再**接收 `setLevels` / `setElapsed` / `setStatus` /
 > `setResult` / `setPreview` —— 这些全部归胶囊窗口。
@@ -49,7 +53,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 > 胶囊推全套。
 
 前端在 DOM 就绪后调用 `window.pywebview.api.ready()`;Python 收到 `ready()`
-后立即推一次**全量状态**(state / model / hotkey / theme)。
+后立即推一次**全量状态**(state / model / hotkey / theme / backend)。
 
 ## JS → Python
 
@@ -67,6 +71,28 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `set_theme(mode)` | None | 切换主题档位,`mode` ∈ `"auto"` / `"light"` / `"dark"` |
 | `set_capsule_position(mode)` | None | 切换胶囊位置档位,`mode` ∈ `"follow"` / `"bottom"` / `"custom"` |
 | `set_preview(enabled)` | None | 开关录音时的实时预览文字条 |
+| `set_orb(enabled)` | None | 开关常驻悬浮球(`true` = 屏幕上常驻一颗球) |
+| `set_orb_position(mode)` | None | 切换悬浮球的位置档位,`mode` ∈ `"follow"` / `"pinned"` / `"custom"` |
+| `switch_backend(kind)` | None | 切换识别后端,`kind` ∈ `"local"` / `"dashscope"` |
+
+### 识别后端(本地 / 网络)
+
+面板上多一行「后端」分段控件:本地模型 ↔ 阿里云百炼网络接口。
+**两者互斥** —— 同一时刻只留一个后端。
+
+| 环节 | 谁做 | 说明 |
+|---|---|---|
+| 点后端段 | 前端 → Python | `window.pywebview.api.switch_backend(kind)` |
+| 切换中 | Python | 后台线程做(不卡 UI);先加载新后端,成功后才卸旧后端 |
+| 切换结果 | Python → 前端 | 成功推 `setBackend(kind)`;进展/拒绝/失败推 `setNotice(text)` |
+| 拒绝切换 | Python | 录音中 / 识别中切换会被**拒绝**,推一条 `setNotice` 说明原因 |
+
+- **API Key 不进配置文件** —— 只从环境变量 `DASHSCOPE_API_KEY` 读。
+  缺 key 时切换会失败并明确报错,**不静默回落到本地**
+  (静默回落会让用户以为在用网络)。
+- 网络后端**不支持实时预览**(兼容端点是整段请求,做不了逐句流式)。
+  面板上「模型」和「预览」两行在网络模式下置灰,并有一行说明文字 ——
+  **行为差异必须写出来**,不能静默失效。
 
 ### 拖动的单位与节流
 
@@ -108,6 +134,9 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__capsule.setTheme(mode)` | `mode` ∈ `"auto"` \| `"light"` \| `"dark"` | 主题档位;面板改档位时推,胶囊每次显示前也会补推一次 |
 | `__capsule.setPositionMode(mode)` | `mode` ∈ `"follow"` \| `"bottom"` \| `"custom"` | 位置档位;面板改档位时推,胶囊每次显示前也会补推一次 |
 | `__capsule.setPreviewEnabled(enabled)` | `enabled` boolean | 预览文字条开关;面板改开关时推,胶囊每次显示前也会补推一次 |
+| `__capsule.setOrbMode(enabled)` | `enabled` boolean | **常驻悬浮球模式**开关;面板改开关时推,胶囊前端就绪时也补推一次 |
+| `__capsule.setOrbPosition(mode)` | `mode` ∈ `"follow"` \| `"pinned"` \| `"custom"` | 悬浮球的位置档位。pinned/custom **可拖**(位置归用户管,共用一份持久化位置);follow 不可拖(位置由光标决定),前端据此不响应拖动、也不给 `grab` 光标 |
+| `__capsule.setHideDelay(ms)` | `ms` number | 本轮结束后停多久再收起(毫秒)。常驻球模式下**前端自己**收回胶囊,所以 Python 把时长推给它,而不是等隐藏定时器响了再回头调一次前端(那是定时器线程去 evaluate_js,会破坏推送线程的串行顺序) |
 
 ### `setLevels` 的语义(重要)
 
@@ -149,6 +178,10 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 新一轮录音开始时,上一轮的隐藏定时器必须作废(否则刚开始的胶囊会被
 旧的定时器藏掉)。
 
+常驻悬浮球模式下多一条:**窗口不藏**(球一直杵在那儿),胶囊由**前端**
+在终态停留够时间后自己收回球 —— Python 把时长用 `setHideDelay` 推过去,
+不在隐藏定时器线程里回头调前端(会破坏推送线程的串行顺序)。
+
 ### 注入失败时的回退(不许让刚说出口的话消失)
 
 注入失败有三条路径,每一条都得有"这段文字改去哪"的答案:
@@ -181,6 +214,9 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `follow` | 按热键那一刻捕获一次定位信号,胶囊贴在信号点**下方**(像输入法候选框);下方空间不够就翻到上方;最后一定夹回工作区 |
 | `bottom` | 工作区底部居中(原来的行为) |
 | `custom` | 用户拖到哪就记在哪,下次录音从记忆位置出现 |
+
+> 常驻悬浮球模式下这三档**不生效** —— 位置归悬浮球,胶囊在球的位置
+> 原地展开(理由见「常驻悬浮球」一节)。
 
 #### 定位信号的四级回退
 
@@ -266,11 +302,106 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `ready()` | None | 前端已就绪 |
 | `cancel_recording()` | None | 放弃这一轮:**不识别、不注入** |
 | `stop_recording()` | None | 结束录音,进入识别(等同再按一次热键) |
-| `update_regions(payload)` | None | 上报"文字条 + 胶囊"的矩形,Python 侧据此裁窗口命中区(见「窗口区域裁形」) |
+| `start_recording()` | None | **点悬浮球开始录音**。Python 侧会先把前台还给用户原先所在的窗口,再调 `controller.start_recording()` |
+| `update_regions(payload)` | None | 上报可见内容的矩形,Python 侧据此裁窗口命中区(见「窗口区域裁形」) |
 | `move_capsule(x, y)` | None | 拖动胶囊:窗口左上角移到**绝对位置** (x, y),CSS(逻辑)像素 |
-| `begin_drag()` | None | 用户开始拖胶囊(Python 侧拖动期间不抢回焦点) |
+| `move_orb(x, y)` | None | 拖动悬浮球:窗口左上角移到**绝对位置** (x, y),CSS(逻辑)像素(球的位置会被夹回允许的范围) |
+| `begin_drag()` | None | 用户开始拖胶囊/悬浮球(Python 侧拖动期间不抢回焦点) |
 | `end_drag()` | None | 用户松手(Python 侧归还焦点 + 记住位置) |
 | `copy_result(text)` | bool | 把识别结果**手动**写进剪贴板(注入失败时的兜底出口)。写完要**读回校验**:读回来不是同一份就算失败。成功就把胶囊收掉 —— 用户拿到东西了,胶囊继续杵着就是干扰 |
+
+---
+
+## 常驻悬浮球(胶囊的另一种形态)
+
+配置项 `floating_orb`(默认**关**)。开着时,屏幕上常驻一颗小球:
+点它 → 球**原地**展开成现在的录音胶囊 → 开始录音;录完胶囊收回成球,
+继续常驻等下一轮。拖球可以挪位置,松手记住。
+
+**它不是另一个窗口,也不是另一个元素** —— 是**同一个固定尺寸窗口**里、
+**同一颗胶囊**的另一种形态(见「透明窗口不能 resize」:窗口一旦被 resize,
+透明就废了)。
+
+那颗球**就是这颗胶囊收窄成的正圆**(40×40,和胶囊的高度一样大):
+- 前端只有一颗元素(`.recording-pill`),待机时它收窄成 40px 的圆,
+  展开时横向长回胶囊的宽度;
+- 所以"球在哪"= "窗口摆哪":球固定待在窗口的**底边居中**处,胶囊也在
+  底边居中,两者横坐标一致 —— 展开时球"长成"胶囊,位置不用挪;
+- **球和胶囊必须一样大**:不等大的话,球长开时走的轨迹和胶囊对不上,
+  窗口的命中区(按上报矩形裁)会切到球上 —— 真机症状是"球的上半截
+  多一条白线",像被切出一个球冠。`placement.ORB_SIZE` 和 CSS 里的
+  `height` / `max-width` 由一条测试盯着。
+
+| 环节 | 谁做 | 说明 |
+|---|---|---|
+| 显示球 | Python `capsule.py` | 前端就绪后**等 0.3s** 再露脸:窗口是固定尺寸的透明窗,必须等前端把"球"那一小块报上来、Python 裁好命中区之后才能露脸 |
+| 命中区 | 前端 → Python | 待机时只上报 `pill` 一块(球就是收窄的胶囊);展开后上报 `textbar` + `pill` 两块(和原来一样) |
+| 点击/拖动 | 前端 | pinned/custom 档:按下后位移超过 **5 个逻辑像素**才算拖动,否则算点击。跟随档**没有拖动**(球拖不动),但仍要分清"点了一下"和"按着划走" —— 后者不该触发录音 |
+| 点球开始录音 | 前端 → Python → 控制器 | **先把前台还给用户**,再 `controller.start_recording()` |
+| 拖球挪位置 | 前端 → Python | 发**绝对目标位置**(和面板/胶囊同一套机制),球的位置被夹回允许的范围 |
+| 记住位置 | Python | 存**球**的偏移(相对所在工作区的逻辑像素)+ 显示器设备名 |
+| 收回成球 | 前端 | 终态(`result`/`error`/`cancelled`)后停 `setHideDelay` 推来的时长,再收回球 |
+
+### 位置档位(球自己的三档,和胶囊的「位置」是两套独立设计)
+
+配置项 `orb_position`,取值三档(设计由用户拍板):
+
+| 档位 | 露脸时机 | 位置 | 可拖 |
+|---|---|---|---|
+| `follow`(默认) | 光标聚焦在输入处 | 光标旁边(像输入法候选框) | 否 |
+| `pinned` | 光标聚焦在输入处(和 follow 同一套一致性) | 记住的位置(持久化) | **是** |
+| `custom` | **常驻** | 记住的位置(持久化) | **是** |
+
+pinned 和 custom **共用同一份** `orb_geometry`:位置都是用户拖出来
+记住的,两档的差别只在显隐。球的档里**没有 bottom** —— 和胶囊的
+`capsule_position`(follow/bottom/custom)档位名不同、含义不同,
+两边各自演化,不许互相参照。
+
+**怎么判断"光标聚焦在输入处"**:`win32/caret.py` 的 `capture_anchor()`
+本来是四级回退 —— UIA 真光标 → 传统控件真光标 → **鼠标位置** → 前台窗口
+中心。后两级说的都不是光标,拿它们冒充的话,用户只是把鼠标挪过来球就冒出来。
+
+所以加了 `capture_anchor(require_caret=True)`:UIA / 传统光标之外还有
+`edit` 级兜底 —— 焦点在可编辑输入框里但一个字符都没有(空输入框,
+UIA 扩不到字符矩形)时,退化成输入框的左下角。判定标准是
+`anchor.kind in ("uia", "caret", "edit")`,拿不到就收球。
+
+**切档竞态(修过的坑)**:follow/pinned 档靠轮询线程(250ms)维持显隐,
+线程里 UIA 捕获一笔就是几十到几百毫秒 —— 切到 custom 的瞬间,旧线程可能
+正攥着一个刚捕获的锚点,醒来把球又挪回光标处(或把球藏掉),盖掉新档位
+的摆位,看起来就是"切了档没反应"。修法是**线程代数(epoch)**:起/停线程
+都让计数 +1,线程在动窗口前发现代数变了就立刻收手;切档侧先
+`_stop_follow_thread()`(join 到线程退出)再摆位。
+
+**只有 custom 档可拖**:follow 的位置由光标决定、bottom 固定在底部,
+拖了也会被拉回去 —— 前端靠 `setOrbPosition` 知道当前档位
+(不给 `grab` 光标、不挂 mousemove)。但**点击仍然开始录音** ——
+球就是录音入口,这个不能因为"不能拖"就一起没了。
+
+### 位置规则
+
+- 自定义档:球默认在**工作区右下角**;拖过之后记住上次的位置
+  (`orb_geometry` + `orb_monitor`,和胶囊自定义档一个路子,但**两套互不干扰**)
+- **球的上方要留出展开后胶囊的高度**:窗口是固定尺寸的,球拖得太靠上,
+  展开后文字条会出屏 —— 所以纵向的夹取比横向严
+- 换缩放率、换显示器都不飞(存的是相对工作区的逻辑偏移)
+
+### 与「胶囊的位置三档」的关系
+
+**常驻模式下 `capsule_position` 三档不生效**:胶囊的位置归**悬浮球**,
+胶囊在球的位置**原地**展开。球自己的档位由 `orb_position` 决定
+(跟随光标 / 用户拖的位置) —— 球在哪儿由球说了算,胶囊跟着球走。
+
+非常驻模式(开关关掉)下,胶囊的三档行为一个字都没变。
+
+### 点击球开始录音时的焦点陷阱
+
+鼠标点在 WebView2 的子窗口上会激活整棵窗口树,前台被胶囊抢走。
+注入靠"粘贴到前台窗口",前台是胶囊的话,**这一轮的文字会贴到胶囊
+自己身上**,而不是用户的输入框 —— 功能级的致命 bug。
+
+所以点球的路径是:**先归还前台,再开始录音**。用户原先所在的窗口由
+守卫线程动态跟踪(`_last_foreground`),不靠猜。
 
 ---
 
@@ -378,6 +509,7 @@ CSS 侧三段(`panel.css` / `capsule.css` 各一份,结构一样):
 ### 胶囊窗口的视觉规格
 
 - 透明窗口,可见的只有两块:上方**文字条**、下方**胶囊**,中间留透明间隙
+  (常驻悬浮球模式下,可见的只有**球**那一小块)
 - **窗口尺寸固定**(512×260 逻辑像素,请求值会被 WinForms AutoScale
   缩水,建窗时放大补偿),**不随内容高度变化**。
   原因见下方「透明窗口不能 resize」—— 一旦 resize,WebView2 的透明
@@ -483,8 +615,8 @@ pywebview 的透明窗口一旦被 `SetWindowPos` 改过尺寸,WebView2 就会
 
 | 环节 | 谁做 | 说明 |
 |---|---|---|
-| 量矩形 | 前端 `capsule.js` | `getBoundingClientRect()`,**CSS 逻辑像素**、相对视口 |
-| 上报 | 前端 → Python | `window.pywebview.api.update_regions(payload)`,60ms 合并一次 |
+| 量矩形 | 前端 `capsule.js` | `offsetLeft/Top/Width/Height`(布局尺寸,**不受 transform 影响**),**CSS 逻辑像素**、相对视口 |
+| 上报 | 前端 → Python | `window.pywebview.api.update_regions(payload)`,60ms 合并一次;球↔胶囊形变期间**每 50ms 报一次**(宽度一直在变) |
 | 换算 | Python `capsule.py` | 逻辑 × DPI 缩放 = 物理像素,每边再外扩 8 物理像素 |
 | 裁窗口 | `win32/api.py` | `CreateRectRgn` ×N → `CombineRgn(RGN_OR)` → `SetWindowRgn` |
 
@@ -496,8 +628,18 @@ payload 格式:
 
 全 0 表示那块隐藏(不参与并集);两块都隐藏时裁成 1×1 的最小区域。
 
+常驻悬浮球模式下,待机时只有 `pill` 那一块非零 —— 那颗球**就是**收窄到
+40×40 的胶囊;展开成胶囊后回到 `textbar` + `pill` 两块。
+
 几个坑:
 
+- **量矩形要用 `offset*`,不能用 `getBoundingClientRect()`**:后者会把
+  CSS `transform` 一起算进去,量到的是"动画中"的矩形。按它裁窗口,
+  描边两端就被切掉(实测:上下边线在两端断开)。现在球↔胶囊的形变
+  不用 transform(宽度靠 `max-width` 过渡),但这条规矩留着当保险。
+- **形变期间要持续上报**:球↔胶囊是 0.3s 的宽度过渡,布局宽度每帧
+  都在变。只在头尾各报一次的话,中间那 0.3s 里窗口形状停在"球"那一
+  小块,胶囊多出来的那部分点不到(会穿透到底下的应用)。
 - **区域句柄的生命周期**:`SetWindowRgn` **成功后区域归系统所有**,
   而且系统**不拷贝** —— 调用方绝不能再 `DeleteObject`(MSDN 明说)。
   只有**失败**时区域还在我们手里,必须自己释放。

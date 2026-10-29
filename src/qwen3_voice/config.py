@@ -38,6 +38,24 @@ THEME_MODES = ("auto", "light", "dark")
 #   custom  用户拖到哪就记在哪(存相对工作区的逻辑偏移)
 CAPSULE_POSITION_MODES = ("follow", "bottom", "custom")
 
+# 常驻悬浮球的位置三档(设计由用户拍板):
+#   follow  跟随输入光标 —— 光标真的聚焦在输入处才露脸,
+#           贴着光标出现(像输入法候选框);位置不归用户管,不可拖
+#   pinned  记住的位置 —— 可拖、持久化(orb_geometry),和 custom 共用
+#           同一份位置;同样只在光标聚焦到输入处才露脸
+#   custom  记住的位置 —— 可拖、持久化,常驻露脸(球是录音入口,随时在)
+#
+# ⚠ 和胶囊的 CAPSULE_POSITION_MODES(follow/bottom/custom)是**两套
+# 独立设计**:档位名相同不代表含义相同(球的 follow 显隐同胶囊 follow,
+# 但球的档里没有 bottom,却有 pinned)。两边各自演化,不许互相参照。
+ORB_POSITION_MODES = ("follow", "pinned", "custom")
+
+# 识别后端(互斥,同一时刻只留一个):
+#   local      本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
+#   dashscope  阿里云百炼 DashScope 网络接口(OpenAI 兼容 HTTP)
+# API Key **不进配置文件** —— 只从环境变量 DASHSCOPE_API_KEY 读。
+ASR_BACKENDS = ("local", "dashscope")
+
 
 @dataclass
 class Config:
@@ -50,6 +68,15 @@ class Config:
     hotkey: str = "ctrl+alt+space"
     model: str = "0.6B"                       # 可选 0.6B / 1.7B
     model_root: str = r"D:\Dev\Environments\models"
+
+    # ---- 识别后端(本地 / 网络,互斥)
+    # local      = 本地 Qwen3-ASR 模型常驻显存,离线、零等待
+    # dashscope  = 阿里云百炼网络接口,音频出本机,有网络延迟
+    asr_backend: str = "local"
+    # 网络后端的模型名与端点前缀(新加坡地域改 base_url 即可)。
+    # **API Key 不在这里** —— 只从环境变量 DASHSCOPE_API_KEY 读。
+    dashscope_model: str = "qwen3-asr-flash"
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # ---- 音频
     input_device: int | None = None           # None = 自动挑选
@@ -92,6 +119,22 @@ class Config:
     # 自定义模式下记忆的显示器设备名(如 \\.\DISPLAY1):还原时先找到
     # 那块屏,找不到就退回当前屏。
     capsule_monitor: str = ""
+    # 常驻悬浮球:屏幕上常驻一颗小球 —— 点它开始录音(展开成胶囊),
+    # 拖它换位置(松手就记住)。默认**关**:关着时行为和以前一模一样
+    # (按热键才弹胶囊),老用户的体验一点不变。
+    floating_orb: bool = False
+    # 悬浮球出现在哪:
+    #   follow  跟随输入光标(默认)—— 光标聚焦在输入框里才露脸,
+    #           贴着光标出现
+    #   custom  用户拖出来的位置(记在 orb_geometry 里)
+    orb_position: str = "follow"
+    # 悬浮球位置记忆:"dx,dy",相对**所在工作区左上角**的逻辑像素偏移。
+    # 和 capsule_geometry 一个路子,但两套位置**互不干扰**:
+    # 球的位置归球,胶囊的位置归胶囊。
+    orb_geometry: str = ""
+    # 悬浮球位置记忆的显示器设备名(如 \\.\DISPLAY1):还原时先找那块屏,
+    # 找不到就退回当前屏。
+    orb_monitor: str = ""
 
     # ---- 其它
     log_file: str = ""
@@ -104,6 +147,10 @@ class Config:
         issues: list[str] = []
         if self.model not in ("0.6B", "1.7B"):
             issues.append(f"model 只能是 0.6B 或 1.7B,当前 {self.model!r}")
+        if self.asr_backend not in ASR_BACKENDS:
+            issues.append(
+                f"asr_backend 只能是 {' / '.join(ASR_BACKENDS)},"
+                f"当前 {self.asr_backend!r}")
         if self.sample_rate <= 0:
             issues.append("sample_rate 必须为正数")
         if self.min_duration < 0:
@@ -120,6 +167,11 @@ class Config:
                 "capsule_position 只能是 "
                 f"{' / '.join(CAPSULE_POSITION_MODES)},"
                 f"当前 {self.capsule_position!r}")
+        if self.orb_position not in ORB_POSITION_MODES:
+            issues.append(
+                "orb_position 只能是 "
+                f"{' / '.join(ORB_POSITION_MODES)},"
+                f"当前 {self.orb_position!r}")
         return issues
 
     # ---------- 序列化 ----------

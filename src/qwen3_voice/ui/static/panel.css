@@ -289,6 +289,13 @@ body {
   gap: 8px;
 }
 
+/* 显隐联动用 HTML 的 hidden 属性(「位置」↔「球位置」互斥显示)。
+   .option-row 自己的 display:flex 会盖掉 hidden 的默认样式,
+   必须显式压回 display:none。 */
+.option-row[hidden] {
+  display: none;
+}
+
 .row-label {
   font-size: 12px;
   color: var(--muted);
@@ -347,8 +354,41 @@ body {
   padding: 0 10px;
 }
 
-/* ---------------- 开关(预览显隐) ---------------- */
+/* ---------------- 说明与提示 ---------------- */
 
+/* 后端说明(网络模式下才出现)。
+   行为差异必须写出来 —— 静默失效比没有这个功能更糟:
+   用户会以为"预览坏了"或者"网络没生效"。 */
+.hint {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--warn);
+}
+
+/* 操作提示(切换后端的进展 / 拒绝 / 失败)。
+   空的时候不占位置 —— 平时面板该多紧凑还是多紧凑。 */
+.notice {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text2);
+}
+
+.notice:empty {
+  display: none;
+}
+
+/* 置灰的一行(网络模式下的"模型""预览")。
+   用降透明度 + 去掉指针事件 —— 看得见它在,但点不动。 */
+.option-row.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ---------------- 开关(预览显隐) ---------------- */
 /* 轨道 + 圆钮。跟分段控件是同一套设计语言:
    轨道用 nav 底色 + line 描边,圆钮用 card 底色 + shadow。 */
 .switch {

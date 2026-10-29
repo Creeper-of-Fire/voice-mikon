@@ -22,6 +22,11 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
 
 引擎接口只有一种形态(``feed(chunk)`` / ``close()``),
 能力差异全在实现里 —— 控制器对"预览位上是哪颗引擎"一无所知。
+
+识别后端(本地模型 / 网络 API)是**互斥**的:同一时刻只留一个,
+切走后旧后端被 unload(本地释放显存,网络关会话)。
+切换在后台线程里做;录音/识别中**拒绝切换** ——
+这一轮的最终位引擎持有旧后端的引用,中途换掉会出错或丢结果。
 """
 
 from __future__ import annotations
@@ -33,7 +38,9 @@ from typing import Callable
 
 import numpy as np
 
-from ..asr.engine import ASREngine, ASRError
+from ..asr.base import ASRBackend, ASRError
+from ..asr.engine import LocalASRBackend
+from ..asr.network import DashScopeBackend
 from ..asr.streaming import (
     FullPassEngine,
     PreviewEngineKind,
@@ -50,6 +57,11 @@ from ..win32.inject import paste_text
 
 log = get_logger("core")
 
+# 识别后端(互斥,同一时刻只留一个)
+BACKEND_LOCAL = "local"            # 本地 Qwen3-ASR(transformers,GPU)
+BACKEND_DASHSCOPE = "dashscope"    # 阿里云百炼 DashScope(OpenAI 兼容 HTTP)
+BACKEND_KINDS = (BACKEND_LOCAL, BACKEND_DASHSCOPE)
+
 # 预览位插哪颗引擎 —— **模块级常量**,代码内可切换,不做成用户配置项。
 #
 #   PreviewEngineKind.SENTENCE   分句预览(默认):切一句认一句,跟手;
@@ -59,6 +71,12 @@ log = get_logger("core")
 # 最终位固定整段引擎(见 ``_make_final_engine``):最终注入的文字
 # 必须永远来自整段识别,预览层怎么马虎都不许影响它。
 PREVIEW_ENGINE_KIND = PreviewEngineKind.SENTENCE
+
+
+def normalize_backend(kind: str | None) -> str:
+    """把后端名字规整成合法值(认不出来就当本地)。"""
+    name = str(kind or "").strip().lower()
+    return name if name in BACKEND_KINDS else BACKEND_LOCAL
 
 
 class State(str, Enum):
@@ -148,15 +166,16 @@ def _make_chunk_puller(recorder):
 class VoiceController:
     """语音输入的核心逻辑。"""
 
-    def __init__(self, config: Config, injector=None, recorder_factory=None):
+    def __init__(self, config: Config, injector=None, recorder_factory=None,
+                 backend_factory=None):
         self.config = config
         self.state = State.STARTING
-        self.engine = ASREngine(
-            model_root=config.model_root,
-            model_tag=config.model,
-            language=config.language,
-            hotwords=config.hotwords,
-        )
+        # 后端工厂可替换 —— 测试用假实现,避免真的加载模型/真的联网
+        self._backend_factory = backend_factory or self._default_backend_factory
+        # 当前生效的后端(本地模型 / 网络 API)。两种后端互斥。
+        self.backend_kind = normalize_backend(
+            getattr(config, "asr_backend", BACKEND_LOCAL))
+        self.engine: ASRBackend = self._make_backend(self.backend_kind)
         # 注入器可替换 —— 测试用假实现,避免真的改剪贴板/模拟按键
         self._injector = injector or _default_injector
         # 录音器工厂可替换 —— 测试用假实现,避免真的打开音频设备
@@ -168,10 +187,17 @@ class VoiceController:
 
         self._listeners: list[Callable[[UIEvent], None]] = []
         self._lock = threading.RLock()
+        # 后端换装是"整体动作"(建新的 → 加载 → 卸旧的 → 换引用),
+        # 拿一把单独的锁串起来:启动加载和切换不会交叉。
+        self._backend_lock = threading.RLock()
 
         # 实时预览线程(录音期间后台跑,喂预览位的引擎)
         self._preview_stop: threading.Event | None = None
         self._preview_thread: threading.Thread | None = None
+        # 全局热键监听器(由入口挂上来)。热键是**全局**资源:
+        # 本进程不注销,别的实例就注册不上同一个组合键 —— 所以
+        # shutdown() 里要**第一个**停它,不能排在模型卸载后面。
+        self._hotkey = None
         # 两个插槽的引擎实例。预览位的引擎归预览线程所有(它负责 close),
         # 最终位的引擎只在停止录音时被喂完整音频、然后 close 出最终结果。
         self._preview_engine: StreamingEngine | None = None
@@ -186,6 +212,49 @@ class VoiceController:
         # 竞态窗口里迟到的取消靠 session 递增兜住)。
         self._session = 0
         self._cancelled = False
+
+    # ---------- 识别后端 ----------
+
+    def _default_backend_factory(self, kind: str, config: Config) -> ASRBackend:
+        """按后端名字造一颗后端(默认实现)。
+
+        两种后端实现同一个 ``ASRBackend`` 抽象,控制器只认那个接口。
+        """
+        if kind == BACKEND_DASHSCOPE:
+            return DashScopeBackend(
+                model=getattr(config, "dashscope_model", "") or None,
+                base_url=getattr(config, "dashscope_base_url", "") or None,
+                hotwords=config.hotwords,
+            )
+        return LocalASRBackend(
+            model_root=config.model_root,
+            model_tag=config.model,
+            language=config.language,
+            hotwords=config.hotwords,
+        )
+
+    def _make_backend(self, kind: str) -> ASRBackend:
+        """造一颗后端(走可注入的工厂)。"""
+        return self._backend_factory(kind, self.config)
+
+    def _backend_supports_preview(self) -> bool:
+        """当前后端支不支持实时预览。
+
+        网络后端**不支持**(整段请求,做不了逐句流式)。
+        用 getattr 兜底 —— 测试里的假引擎没有这个属性时按"支持"处理。
+        """
+        return bool(getattr(self.engine, "supports_preview", True))
+
+    @staticmethod
+    def _unload_backend(backend) -> None:
+        """把一个后端卸掉(本地释放显存 / 网络关会话)。"""
+        unload = getattr(backend, "unload", None)
+        if not callable(unload):
+            return
+        try:
+            unload()
+        except Exception as e:
+            log.debug("卸载后端失败: %s", e)
 
     # ---------- 事件订阅 ----------
 
@@ -217,9 +286,14 @@ class VoiceController:
 
     def _init_model(self) -> None:
         try:
-            self.engine.load(self.config.model)
-            self._emit(UIEvent(kind="info", text="模型就绪"))
-            self._emit(UIEvent(kind="model", model_tag=self.engine.model_tag))
+            # 后端换装和启动加载共用一把锁:不会交叉。
+            with self._backend_lock:
+                self.engine.load()
+                self._emit(UIEvent(kind="info", text="模型就绪"))
+                self._emit(UIEvent(kind="backend", text=self.backend_kind))
+                tag = getattr(self.engine, "model_tag", "")
+                if tag:
+                    self._emit(UIEvent(kind="model", model_tag=tag))
             # 模型好了但麦克风可能还在探测,两边都好了才算真正就绪
             if self.state == State.STARTING:
                 self._set_state(State.IDLE)
@@ -408,8 +482,15 @@ class VoiceController:
         线程只做一件事:不停地取录音增量喂给引擎。
         引擎自己决定什么时候出字(分句引擎切句就出,整段引擎定时重识别),
         控制器对"预览位上是哪颗引擎"一无所知。
+
+        **网络后端不跑预览**:兼容端点是整段请求,做不了"边说边出字"。
+        硬做(每隔几秒重发全量音频)只会烧配额、延迟越滚越大 —— 不做。
+        网络模式下的行为差异在面板上有明确说明,不是静默失效。
         """
         self._stop_preview()
+        if not self._backend_supports_preview():
+            log.info("当前后端(%s)不支持实时预览,跳过预览线程", self.backend_kind)
+            return
         pull = _make_chunk_puller(recorder)
         if pull is None:
             # 录音器拿不到音频(不是本项目的 Recorder)→ 没有预览可做
@@ -564,8 +645,13 @@ class VoiceController:
     # ---------- 模型切换 ----------
 
     def switch_model(self, model_tag: str) -> None:
-        """后台切换模型规格。"""
-        if model_tag == self.engine.model_tag and self.engine.loaded:
+        """后台切换模型规格(只对**本地**后端有意义)。"""
+        if self.backend_kind != BACKEND_LOCAL:
+            self._emit(UIEvent(kind="notice",
+                               text="网络后端不加载本地模型,切回本地后端才能换模型"))
+            return
+        if model_tag == getattr(self.engine, "model_tag", None) and \
+                getattr(self.engine, "loaded", False):
             return
 
         def job():
@@ -584,9 +670,106 @@ class VoiceController:
 
         threading.Thread(target=job, name="model-switch", daemon=True).start()
 
+    # ---------- 后端切换 ----------
+
+    def switch_backend(self, kind: str) -> None:
+        """后台切换识别后端(本地 ↔ 网络)。
+
+        **互斥**:同一时刻只留一个后端。切换的动作是:
+        造新的 → 加载新的 → 卸掉旧的 → 换引用。
+
+        顺序是有讲究的:**先把新的加载好**,失败了才敢卸旧的 ——
+        网络不可用(没配 API Key / 端点不通)时用户还能留在本地后端,
+        不至于两头都空。
+
+        旧后端被卸掉时,本地后端会把模型从显存里放掉
+        (``del model`` + ``torch.cuda.empty_cache()``)——
+        这正是"切到网络省显存"落地的地方。
+
+        **录音/识别中拒绝切换**:这一轮的最终位引擎持有旧后端的引用,
+        中途换掉会让识别出错或直接丢结果。拒绝时给用户一句提示。
+        """
+        kind = normalize_backend(kind)
+        if kind == self.backend_kind:
+            return
+        if self.state in (State.RECORDING, State.PROCESSING):
+            self._emit(UIEvent(kind="notice",
+                               text="录音中不能切换识别后端,请先结束这一轮"))
+            return
+        threading.Thread(target=self._switch_backend_job, args=(kind,),
+                         name="backend-switch", daemon=True).start()
+
+    def _switch_backend_job(self, kind: str) -> None:
+        """切换后端的实际动作(跑在后台线程里,不卡 UI)。"""
+        label = "网络" if kind == BACKEND_DASHSCOPE else "本地"
+        self._emit(UIEvent(kind="notice", text=f"正在切换到{label}后端 ..."))
+
+        with self._backend_lock:
+            old = self.engine
+            try:
+                new = self._make_backend(kind)
+                # 先把新后端加载好 —— 失败就留在旧后端
+                new.load()
+            except ASRError as e:
+                log.warning("切换后端失败: %s", e)
+                self._emit(UIEvent(kind="notice", text=f"切换失败:{e}"))
+                return
+            except Exception as e:
+                log.exception("切换后端异常: %s", e)
+                self._emit(UIEvent(kind="notice", text=f"切换失败:{e}"))
+                return
+
+            # 新后端就绪了,再把旧的卸掉(本地后端在这里释放显存)
+            self._unload_backend(old)
+            self.engine = new
+            self.backend_kind = kind
+
+        try:
+            self.config.asr_backend = kind
+            self.config.save()
+        except Exception as e:
+            log.debug("保存后端设置失败: %s", e)
+
+        self._emit(UIEvent(kind="backend", text=kind))
+        tag = getattr(self.engine, "model_tag", "")
+        if tag:
+            self._emit(UIEvent(kind="model", model_tag=tag))
+        # 预览开关跟着后端走:网络模式没有实时预览,胶囊的预览文字条
+        # 干脆收起来(别留一条空条在那儿)。切回本地时按配置恢复。
+        self._emit(UIEvent(kind="preview_enabled",
+                           text="0" if kind == BACKEND_DASHSCOPE
+                           else ("1" if self.config.show_preview else "0")))
+        if kind == BACKEND_DASHSCOPE:
+            self._emit(UIEvent(kind="notice",
+                               text="已切换到网络后端:不支持实时预览,"
+                                    "停止录音后一次性识别"))
+        else:
+            self._emit(UIEvent(kind="notice", text="已切换到本地后端"))
+        if self.state in (State.STARTING, State.ERROR):
+            self._set_state(State.IDLE)
+
     # ---------- 生命周期 ----------
 
+    def attach_hotkey(self, listener) -> None:
+        """把全局热键监听器挂上来 —— 退出时由 shutdown() 负责停它。
+
+        为什么不让入口自己管:退出有三条路(托盘菜单 / 面板按钮 /
+        Ctrl+C),每条都得停热键。挂在 controller 上,shutdown() 一处
+        收口,就不会漏。
+        """
+        self._hotkey = listener
+
     def shutdown(self) -> None:
+        # 热键**第一个**停:它是全局资源,占着不放的话,用户"退出后
+        # 马上重启"会因为注册冲突而失败(热键注销要等进程真正退出)。
+        # 也不能排在模型卸载后面 —— 那一步要好几秒。
+        hotkey = self._hotkey
+        if hotkey is not None:
+            self._hotkey = None
+            try:
+                hotkey.stop()
+            except Exception:
+                pass
         self._stop_preview()
         if self.recorder is not None:
             try:

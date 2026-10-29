@@ -18,6 +18,21 @@
          phase 类由 capsule.js 切换：recording / processing / done / error / cancelled
          胶囊本体（非按钮区）在「自定义」位置模式下是拖拽把手 -->
     <div class="recording-pill recording" id="pill" role="status" aria-label="语音输入状态">
+      <!-- 常驻悬浮球的图标。
+           悬浮球**不是另一个元素** —— 它就是这颗胶囊缩起来的样子:
+           待机时胶囊收成 40px 的正圆(见 capsule.css 的「常驻悬浮球」),
+           这个图标显示在球里;开始录音时整个胶囊横向拉长,
+           图标淡出,换成波形/计时/按钮。 -->
+      <span class="bar-orb" id="barOrb" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" x2="12" y1="19" y2="22" />
+        </svg>
+      </span>
+
       <!-- 取消：放弃这一轮,不识别不注入 -->
       <button class="bar-cancel" id="cancelBtn" type="button" aria-label="取消录音">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"

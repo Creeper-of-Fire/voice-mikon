@@ -13,9 +13,10 @@ Python 与前端之间的桥接契约(完整见同目录 ``BRIDGE.md``):
                 / setPreview / setResult / setError / setCancelled
                 / resetForRecording / setTheme
                 / setPositionMode / setPreviewEnabled
+                / setOrbMode / setHideDelay
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
                 / update_regions / move_capsule / begin_drag / end_drag
-                / copy_result
+                / copy_result / start_recording / move_orb
 
 胶囊出现在哪由三档决定(配置项 ``capsule_position``):
 
@@ -23,6 +24,36 @@ Python 与前端之间的桥接契约(完整见同目录 ``BRIDGE.md``):
           贴着光标出现,像输入法候选框
   bottom  固定在主屏工作区底部居中(原来的行为)
   custom  用户拖到哪就记在哪(相对所在工作区的逻辑偏移,换屏不飞)
+
+常驻悬浮球(配置项 ``floating_orb``,默认关)是这个窗口的**另一种形态**,
+不是另一个窗口 —— 而且也不是另一个元素:
+
+  屏幕上常驻一颗小球(麦克风图标)。点它 → 球**原地**展开成现在的
+  录音胶囊 → 开始录音;录完胶囊收回成球。拖球可以挪位置,松手记住。
+  关掉这个开关时行为和以前**一模一样**(按热键才弹胶囊)。
+
+  那颗球**就是这颗胶囊收窄成的正圆**(前端只有一颗元素,见
+  capsule.css 的「常驻悬浮球」一节):球和胶囊一样大(40px =
+  胶囊的高度),展开时是同一块矩形横向长开 —— 没有第二个元素、
+  没有接缝,也就不会出现"两个形状互相裁切"的问题(真机症状:
+  展开瞬间球的上半截被切出一条白线)。
+
+  球和胶囊共用同一个固定尺寸窗口,所以"球在哪"= "窗口摆哪":
+  球固定待在窗口的底边居中,胶囊也在底边居中 —— 展开时球"长成"
+  胶囊,位置不用挪。球的位置**独立记忆**(orb_geometry / orb_monitor),
+  和胶囊自定义档那套(capsule_geometry / capsule_monitor)互不干扰。
+
+  球的位置三档(配置项 ``orb_position``,设计由用户拍板):
+
+    follow  跟随输入光标 —— 光标真的聚焦在输入处才露脸,
+            贴着光标出现(像输入法候选框);位置不归用户管
+    pinned  记住的位置(可拖、持久化) —— 只在光标聚焦到输入处
+            才露脸,显隐和 follow 同一套一致性
+    custom  记住的位置(可拖、持久化),常驻露脸
+
+  pinned 和 custom **共用同一份** orb_geometry(位置都是用户拖出来
+  记住的),差别只在显隐;和胶囊的 capsule_position 是两套独立设计,
+  档位名相同也不代表含义相同。
 
 线程分工:
   主线程      webview.start() 的 GUI 消息循环(和面板共用一次 start)
@@ -70,7 +101,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import CAPSULE_POSITION_MODES, THEME_MODES
+from ..config import CAPSULE_POSITION_MODES, ORB_POSITION_MODES, THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32 import clipboard
@@ -97,8 +128,12 @@ from ..win32.monitors import (
 from .placement import (
     bottom_position,
     custom_position,
+    default_orb_position,
     encode_offset,
     follow_position,
+    orb_position_from_geometry,
+    orb_screen_position,
+    orb_window_position,
 )
 
 log = get_logger("ui.capsule")
@@ -146,6 +181,19 @@ HIDE_DELAY_CANCEL = 1.0   # 取消
 # 读到旧内容 —— 宁可多等几十毫秒,也不能把"没写进去"当成写成功了。
 CLIPBOARD_VERIFY_DELAY = 0.05
 
+# 常驻悬浮球:前端就绪后等这么久再让球露脸。
+# 窗口是固定尺寸的透明窗,必须等前端把"球"那一小块报上来、
+# Python 侧裁好命中区之后才能露脸 —— 否则那 512×260 的透明空白
+# 会把底下应用的点击全吃掉(前端的区域上报有 60ms 的尾沿节流)。
+ORB_SHOW_DELAY = 0.3
+
+# 跟随输入档的轮询间隔(秒)。
+#
+# 250ms:够跟手(光标一动,球最多晚四分之一秒跟过去),
+# 又不至于太密 —— UIA 那一级是 COM 调用,几十毫秒的开销,
+# 每秒跑四十次纯属烧 CPU。
+ORB_FOLLOW_INTERVAL = 0.25
+
 # 启动守卫:建窗后的这段时间里盯着窗口,别让 pywebview 的建窗副作用
 # 把它亮出来或者抢走焦点(见 _on_before_show 的说明)
 GUARD_SECONDS = 5.0
@@ -171,7 +219,10 @@ _STATE_NAMES = {
 # 会被切掉一圈,按钮可能点不中。
 REGION_MARGIN = 8
 
-# 前端上报的两块内容(顺序固定,并集的结果与顺序无关,但好读)
+# 前端上报的几块内容(顺序固定,并集的结果与顺序无关,但好读)
+#
+# textbar / pill  : "文字条 + 胶囊"。常驻悬浮球模式下,待机时那颗球
+#                    **就是**收窄的胶囊 —— 所以还是报 pill,没有第三块。
 _REGION_KEYS = ("textbar", "pill")
 
 
@@ -274,6 +325,24 @@ class _CapsuleApi:
         """
         return self._capsule._copy_result(text)
 
+    def start_recording(self) -> None:
+        """点悬浮球开始录音。
+
+        ⚠ 这一步踩的是**焦点陷阱**:鼠标点在 WebView2 的子窗口上会
+        激活整棵窗口树,前台被胶囊抢走 —— 那一轮识别完的文字就会贴到
+        胶囊自己身上,而不是用户的输入框。所以开始录音**之前**必须把
+        前台还给用户原先所在的窗口(见 ``_start_recording_from_orb``)。
+        """
+        self._capsule._start_recording_from_orb()
+
+    def move_orb(self, x: float, y: float) -> None:
+        """拖动悬浮球:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+
+        和 ``move_capsule`` 同一套约定(发绝对目标,天然不漂),但摆位
+        走的是"球"那套规则:球的位置会被夹回允许的范围,窗口跟着反推。
+        """
+        self._capsule._move_orb_abs(x, y)
+
 
 class VoiceCapsule:
     """录音胶囊悬浮窗。"""
@@ -302,6 +371,14 @@ class VoiceCapsule:
         # 胶囊当前是不是"该给用户看"。pywebview 建窗时会偷偷 Show 一次,
         # 守卫靠这个标志把那次偷偷的显示藏回去。
         self._want_visible = False
+        # 常驻悬浮球模式(配置项 floating_orb):开着时窗口常驻,
+        # 胶囊只是这个窗口的另一种形态。真相源是配置项本身。
+        # 球是不是已经就位(窗口该露着)。启动时前端还没报区域,
+        # 窗口不能先露脸 —— 那片透明空白会吃掉底下的点击。
+        self._orb_shown = False
+        # 用户当前所在的窗口(守卫动态跟踪)。点悬浮球开始录音时
+        # 要靠它把前台还回去 —— 见 _start_recording_from_orb。
+        self._last_foreground = 0
         # 启动守卫只起一次
         self._guard_started = False
 
@@ -309,6 +386,20 @@ class VoiceCapsule:
         # 定时器会把刚开始的胶囊又藏掉
         self._hide_timer: threading.Timer | None = None
         self._hide_lock = threading.Lock()
+        # "稍后让球露脸"的定时器(常驻模式)
+        self._orb_timer: threading.Timer | None = None
+        # 跟随输入档的轮询线程:盯着真光标,球跟着它走。
+        # 只在「常驻球 + 跟随输入/固定底部」时才有 —— 这两档都要
+        # 检测"光标聚焦在输入处没",只是 follow 挪位置、bottom 只管显隐。
+        self._follow_thread: threading.Thread | None = None
+        self._follow_lock = threading.Lock()
+        # 轮询线程的"代数":每次起/停线程都 +1,线程醒来发现代数变了
+        # 就立刻退出、不再动窗口 —— 切档时旧线程的"最后一次挪动"
+        # 不会覆盖新档位的摆位(切档"不生效"的根因就是这个竞态)。
+        self._follow_epoch = 0
+        # 前端报过命中区没有(SetWindowRgn 裁好窗口形状了)。
+        # 没裁好之前不能露脸 —— 那片透明空白会吃掉底下的点击。
+        self._orb_regions_ready = False
 
         # 跟随输入模式的定位信号点:按热键那一刻捕获一次,**这一轮
         # 录音内不再动**(位置可预期比位置聪明更重要)。
@@ -318,6 +409,8 @@ class VoiceCapsule:
         # 松手时统一还一次(抢来抢去会让 WebView2 的鼠标捕获不稳)
         self._dragging = False
         self._drag_lock = threading.Lock()
+        # 按下时的窗口位置:松手时对比一下,没动过就别去写配置
+        self._drag_start_rect: tuple[int, int, int, int] | None = None
 
         # fit(量高度 + resize)整套删掉了 —— 透明窗口一旦被 resize,
         # WebView2 的透明背景就失效(见 WIN_W / WIN_H 的说明)
@@ -367,10 +460,8 @@ class VoiceCapsule:
             if event.state == State.RECORDING:
                 # 新一轮录音:作废上一轮的隐藏定时器,把窗口亮起来。
                 # 先记下用户此刻所在的前台窗口 —— 它就是这一轮文字的
-                # 注入落点。此刻胶囊还没显示,前台必然是用户自己的窗口;
-                # 万一后面前台被胶囊抢走(点 ✓/✕ 的点击激活),
-                # 靠这个快照把它还回去。
-                self._target_hwnd = get_foreground_window()
+                # 注入落点。
+                self._snapshot_target_hwnd()
                 self._cancel_hide_timer()
                 # **显示之前**把定位信号捕获下来:要的是"按热键那一刻"
                 # 的光标位置,不是"画完胶囊再问"的稍晚一点的位置。
@@ -405,18 +496,53 @@ class VoiceCapsule:
             self._call_js("setPreview", event.text)
         elif kind == "result":
             # 识别完成且已注入:文字条定格最终结果
+            self._push_hide_delay(HIDE_DELAY_OK)
             self._call_js("setResult", event.text)
             self._schedule_hide(HIDE_DELAY_OK)
         elif kind == "error":
             # 错误**可能带着识别原文**(注入失败时):一起发给前端,
             # 前端据此显示全文,并给出「复制」按钮。
             payload = event.payload or ""
+            delay = HIDE_DELAY_ERROR_COPY if payload else HIDE_DELAY_ERROR
+            self._push_hide_delay(delay)
             self._call_js("setError", event.text, payload)
-            self._schedule_hide(HIDE_DELAY_ERROR_COPY if payload
-                                else HIDE_DELAY_ERROR)
+            self._schedule_hide(delay)
         elif kind == "cancelled":
+            self._push_hide_delay(HIDE_DELAY_CANCEL)
             self._call_js("setCancelled")
             self._schedule_hide(HIDE_DELAY_CANCEL)
+        elif kind == "orb_enabled" and event.text:
+            # 面板改了「常驻悬浮球」开关:球要么冒出来,要么收回去。
+            # 配置项才是真相源(面板是先存配置再推事件),这里只管反应。
+            enabled = event.text not in ("0", "")
+            self._call_js("setOrbMode", enabled)
+            if enabled:
+                # 前端还没就绪就先别露脸(命中区没裁好,大片透明空白
+                # 会吃掉底下的点击)—— 前端就绪时会自己安排露脸。
+                if self._gui_ready.is_set():
+                    self._show_orb()
+                # 跟随档:起轮询线程(球要跟着光标走)
+                self._start_follow_thread()
+            else:
+                self._hide_orb()
+        elif kind == "orb_position" and event.text:
+            # 面板改了悬浮球的位置档位(follow / pinned / custom)
+            mode = event.text
+            if mode != "follow":
+                # 先停轮询线程再摆位:线程可能正攥着一个刚捕获的锚点,
+                # 不停的话它醒来会把球又挪回光标处(或者藏掉),
+                # 新档位的摆位就被覆盖了 —— 那正是"切了档没反应"的根因。
+                self._stop_follow_thread()
+            # 前端要知道能不能拖:follow 的位置归光标,pinned/custom
+            # 的位置归用户(可拖)。
+            self._call_js("setOrbPosition", mode)
+            if mode == "follow":
+                self._start_follow_thread()
+            elif self._orb_enabled() and self._gui_ready.is_set():
+                # pinned / custom:摆到记忆的位置(没拖过就是右下角),
+                # 两档共用一份 orb_geometry。重新露脸 —— pinned 的显隐
+                # 接下来由轮询线程接管(没聚焦就收回去),custom 常驻。
+                self._show_orb()
         elif kind == "info":
             # 待机时的提示(模型就绪、麦克风名)不打扰用户 ——
             # 这时候胶囊本来就是隐藏的
@@ -471,6 +597,43 @@ class VoiceCapsule:
             return bool(getattr(self.controller.config, "show_preview", True))
         except Exception:
             return True
+
+    def _orb_enabled(self) -> bool:
+        """常驻悬浮球模式开没开(配置项 ``floating_orb``)。
+
+        默认**关** —— 关着时行为和老版本一模一样(按热键才弹胶囊),
+        老用户的体验一点不变。
+        """
+        try:
+            return bool(getattr(self.controller.config, "floating_orb", False))
+        except Exception:
+            return False
+
+    def _orb_position_mode(self) -> str:
+        """当前悬浮球的位置档位(follow / bottom / custom)。
+
+        读不到就按 follow(默认档):球跟着光标走是用户最常用的期待。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "orb_position",
+                               "follow") or "follow").strip().lower()
+        except Exception:
+            return "follow"
+        return mode if mode in ORB_POSITION_MODES else "follow"
+
+    def _push_hide_delay(self, seconds: float) -> None:
+        """告诉前端"这一轮结束后停多久再收起"(毫秒)。
+
+        常驻球模式下胶囊是**前端自己**收回球的(动效在前端做),
+        所以 Python 不能等隐藏定时器响了再回头调一次前端 ——
+        那是隐藏定时器线程去 evaluate_js,会和推送线程抢同一个
+        WebView2,顺序就乱了(见 BRIDGE.md)。
+
+        非常驻模式下前端用不着这个数,不用推。
+        """
+        if not self._orb_enabled():
+            return
+        self._call_js("setHideDelay", int(round(seconds * 1000)))
 
     # ---------- 前端桥接 ----------
 
@@ -529,11 +692,23 @@ class VoiceCapsule:
         # 位置模式与预览开关同理(面板那边改的,可能还堵在队列里)
         self._call_js("setPositionMode", self._position_mode())
         self._call_js("setPreviewEnabled", self._preview_enabled())
+        # 常驻球模式同理:前端得知道现在是"球形态"还是"胶囊形态"
+        self._call_js("setOrbMode", self._orb_enabled())
+        # 球的位置档位也得知道:跟随档下前端**不响应拖动**
+        # (球的位置由光标决定,拖了会被下一轮轮询拉回去)
+        self._call_js("setOrbPosition", self._orb_position_mode())
         if self._last_preview:
             self._call_js("setPreview", self._last_preview)
+        if self._orb_enabled():
+            # 常驻球:等前端把"球"那一小块报上来再露脸 ——
+            # 窗口是固定尺寸的,没裁形状之前那 512×260 的透明空白
+            # 会把底下应用的点击全吃掉。
+            self._schedule_show_orb()
+            # follow/pinned 档:起轮询线程(follow 挪位置,pinned 管显隐)
+            self._start_follow_thread()
         # 跟随输入模式**不在这里**摆位:那时候还没有"这一轮的信号点",
         # 摆出来的位置没有意义(等第一次录音时按光标摆)。
-        if self._position_mode() != "follow":
+        elif self._position_mode() != "follow":
             self._place()
 
     def _on_before_show(self) -> None:
@@ -591,6 +766,10 @@ class VoiceCapsule:
         # 窗口建得比事件晚(启动瞬间就按热键)时,这里补一次显示
         if self._state == State.RECORDING:
             self._show()
+        # 常驻球模式:前端就绪后会安排露脸(等命中区裁好),
+        # 这里只是兜底 —— 万一窗口建得比前端还晚
+        if self._orb_enabled() and self._gui_ready.is_set():
+            self._schedule_show_orb()
         # 启动守卫:盯着建窗后的头几秒,别让 pywebview 的建窗副作用
         # 把胶囊亮出来或者把焦点抢走
         self._start_guard()
@@ -627,8 +806,12 @@ class VoiceCapsule:
                 fg = get_foreground_window()
                 if fg and fg != hwnd:
                     last_fg = fg
+                # 动态跟踪用户当前所在的窗口:点悬浮球开始录音时
+                # 要靠它把前台还回去(见 _start_recording_from_orb)
+                self._last_foreground = last_fg
                 # 没人要求显示却露着脸 → 藏回去(pywebview 偷偷 Show 的残留)
-                if not self._want_visible and is_window_visible(hwnd):
+                if (not self._window_should_be_visible()
+                        and is_window_visible(hwnd)):
                     hide_window(hwnd)
                 elif (fg == hwnd and last_fg and last_fg != hwnd
                       and not self._is_dragging()):
@@ -681,17 +864,57 @@ class VoiceCapsule:
             return
         restore_foreground(self._focus_restore)
 
-    def _give_back_focus(self) -> None:
+    def _give_back_focus(self, target: int | None = None) -> None:
         """前台若是胶囊,还给它该在的窗口(这一轮的注入落点)。
 
         只在前台**确实是胶囊**时动手:用户点了 ✓/✕ 之后立刻切去
         别的窗口的话,前台已经不是胶囊,不能硬拽回录音时的窗口。
+
+        ``target`` 省略时用这一轮记下的注入落点;那一轮还没开始
+        (比如刚点完悬浮球)就退到守卫动态跟踪的用户窗口。
         """
         hwnd = self._native_handle()
-        if not hwnd or not self._target_hwnd:
+        if not hwnd:
+            return
+        if target is None:
+            target = self._target_hwnd
+        if not target or target == hwnd:
+            target = self._user_foreground()
+        if not target or target == hwnd:
             return
         if get_foreground_window() == hwnd:
-            restore_foreground(self._target_hwnd)
+            restore_foreground(target)
+
+    def _user_foreground(self) -> int:
+        """用户当前所在的窗口(0 = 不知道)。
+
+        守卫在动态跟踪它(录音中途用户切了窗口,跟的就是切换后的那个)。
+        守卫还没跑过的时候退回"问一次",但前提是前台**不是胶囊自己**。
+        """
+        hwnd = self._native_handle()
+        last = getattr(self, "_last_foreground", 0)
+        if last and last != hwnd:
+            return last
+        try:
+            fg = get_foreground_window()
+        except Exception:
+            return 0
+        if fg and fg != hwnd:
+            return fg
+        return 0
+
+    def _snapshot_target_hwnd(self) -> None:
+        """快照这一轮的注入落点(用户此刻所在的前台窗口)。
+
+        前台**已经是胶囊自己**时**不覆盖**:那说明这一轮是从胶囊上
+        开始的(点悬浮球 / 点 ✓),鼠标点击把 WebView2 的子窗口激活了。
+        这时候落点应该用之前记好的那个,覆盖成胶囊就等于让这一轮的
+        文字贴到胶囊自己身上。
+        """
+        hwnd = self._native_handle()
+        fg = get_foreground_window()
+        if fg and fg != hwnd:
+            self._target_hwnd = fg
 
     # ---------- 显隐 ----------
 
@@ -726,6 +949,10 @@ class VoiceCapsule:
 
     def _hide(self) -> None:
         self._want_visible = False
+        if self._orb_enabled():
+            # 常驻模式:窗口**不藏**(球还在那儿等着下一轮),
+            # 胶囊由前端自己收回球(动效在前端做)。
+            return
         hwnd = self._native_handle()
         if not hwnd:
             return
@@ -813,6 +1040,9 @@ class VoiceCapsule:
         hwnd = self._native_handle()
         if not hwnd:
             return
+        # 窗口形状裁好了 → 球可以露脸了(之前那片透明空白会吃掉
+        # 底下应用的点击)
+        self._orb_regions_ready = True
 
         scale = self._scale()
         physical: list[tuple[int, int, int, int]] = []
@@ -860,6 +1090,10 @@ class VoiceCapsule:
 
     def _place(self) -> None:
         """按当前模式摆胶囊。"""
+        if self._orb_enabled():
+            # 常驻模式:位置归**悬浮球**,胶囊在球的位置原地展开。
+            # 胶囊不跟着光标跑 —— 常驻的东西不该乱跑。
+            return
         mode = self._position_mode()
         if mode == "follow":
             self._place_follow()
@@ -868,26 +1102,29 @@ class VoiceCapsule:
         else:
             self._place_bottom()
 
-    def _place_follow(self) -> None:
-        """贴着输入光标摆(像输入法候选框)。
+    def _place_follow(self, anchor: Any = None) -> bool:
+        """贴着输入光标摆(像输入法候选框)。返回**摆成功没有**。
 
-        信号点取自这一轮录音开始时捕获的锚点;还没捕获到(比如
-        前端先就绪、用户还没录过音)就现在补捕获一次。实在一点
-        信号都拿不到,退回"主屏底部居中"。
+        ``anchor`` 给了就用给定的 —— 跟随档的轮询每轮自己取好锚点,
+        直接拿来摆。不给就用这一轮录音开始时捕获的那个:录音途中
+        胶囊不再乱跳(位置可预期比"位置聪明"更重要)。
+
+        实在一点信号都拿不到,退回"主屏底部居中"(胶囊的老兜底)。
         """
         hwnd = self._native_handle()
         if not hwnd:
-            return
-        if self._anchor is None:
-            self._capture_anchor()
-        anchor = self._anchor
+            return False
+        if anchor is None:
+            if self._anchor is None:
+                self._capture_anchor()
+            anchor = self._anchor
         if anchor is None:
             self._place_bottom()
-            return
+            return False
 
         size = self._window_size()
         if size is None:
-            return
+            return False
         win_w, win_h = size
 
         mon = monitor_at_point(anchor.x, anchor.y)
@@ -896,15 +1133,17 @@ class VoiceCapsule:
         else:
             area, scale = get_work_area(), self._scale()
         if area is None:
-            return
+            return False
 
         x, y = follow_position(anchor.x, anchor.y, win_w, win_h, area)
         log.debug("跟随输入: 锚点(%d, %d) → 窗口(%d, %d)",
                   anchor.x, anchor.y, x, y)
         try:
             move_window_to(hwnd, int(x), int(y))
+            return True
         except Exception as e:
             log.debug("摆胶囊位置失败: %s", e)
+            return False
 
     def _place_bottom(self) -> None:
         """摆到工作区底部居中(原来的行为)。
@@ -961,6 +1200,397 @@ class VoiceCapsule:
             move_window_to(hwnd, int(position[0]), int(position[1]))
         except Exception as e:
             log.debug("摆胶囊位置失败: %s", e)
+
+    # ---------- 常驻悬浮球 ----------
+
+    def _window_should_be_visible(self) -> bool:
+        """窗口此刻该不该露着。
+
+        三种"该露着":常驻球模式(球已经露脸了)、这一轮的胶囊正在显示,
+        或者跟随档下这一刻真的找到了真光标。
+
+        非常驻模式还是老规矩:_want_visible 说了算。
+        """
+        if self._orb_enabled():
+            return bool(getattr(self, "_orb_shown", False)) or self._want_visible
+        return self._want_visible
+
+    def _schedule_show_orb(self) -> None:
+        """等前端把"球"那一小块报上来再露脸。
+
+        窗口是**固定尺寸**的透明窗,没裁形状之前那 512×260 的透明
+        空白会把底下应用的点击全吃掉 —— 球露脸之前必须先裁好。
+
+        已经排上队就别再排:跟随档的轮询每 250ms 就会来问一次,
+        每次都"取消旧的、排个新的"的话,这个 0.3s 的定时器永远等不到
+        (250 < 300),球就永远露不了脸。
+        """
+        with self._hide_lock:
+            if getattr(self, "_orb_timer", None) is not None:
+                return      # 已经排上了,别反复重启
+            timer = threading.Timer(ORB_SHOW_DELAY, self._show_orb)
+            timer.daemon = True
+            self._orb_timer = timer
+        timer.start()
+
+    def _cancel_orb_timer(self) -> None:
+        """作废"稍后露脸"的定时器。"""
+        with self._hide_lock:
+            timer, self._orb_timer = getattr(self, "_orb_timer", None), None
+        if timer is not None:
+            timer.cancel()
+
+    def _show_orb(self, anchor: Any = None) -> None:
+        """把球亮出来(常驻模式):摆好位置 + 显示窗口(不抢焦点)。
+
+        ``anchor`` 是跟随档已经取好的真光标;不给就现取一个。
+        跟随档取不到光标 → **不露脸**(球只在光标真的聚焦着时才有意义)。
+        """
+        self._cancel_orb_timer()
+        if not self._place_orb(anchor):
+            # 跟随档:此刻没有真光标 → 球先收着
+            self._hide_orb()
+            return
+        # 先记"该露着":守卫在同一瞬间看到"没人要求显示"会把球藏回去
+        self._orb_shown = True
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        try:
+            set_tool_window_style(hwnd)
+            set_no_activate_tree(hwnd)
+            show_window_no_activate(hwnd)
+            bring_to_top(hwnd)
+        except Exception as e:
+            log.debug("显示悬浮球失败: %s", e)
+
+    def _hide_orb(self) -> None:
+        """把球收回去(关掉常驻模式,或跟随档下光标不见了)。"""
+        self._cancel_orb_timer()
+        self._orb_shown = False
+        if self._want_visible:
+            # 正在录音:这一轮的胶囊还得留着,不能凭空消失
+            return
+        self._cancel_hide_timer()
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        try:
+            hide_window(hwnd)
+        except Exception as e:
+            log.debug("隐藏悬浮球失败: %s", e)
+
+    def _place_orb(self, anchor: Any = None) -> bool:
+        """把窗口摆到球该在的位置,返回**摆成功没有**。
+
+        两路(三档共用):
+
+        - follow:位置由**光标**决定(取不到光标就摆不了,返回 False)
+        - pinned / custom:摆到**记忆的位置**(没拖过就是工作区右下角),
+          两档共用同一份 orb_geometry —— 差别只在显隐(pinned 只在
+          光标聚焦到输入处露脸,custom 常驻),摆位完全一样
+
+        球固定待在窗口的**底边居中**处,所以"摆窗口"就是"摆球":
+        先算出球该在的屏幕坐标,再反推窗口左上角。
+        """
+        mode = self._orb_position_mode()
+        if mode == "follow":
+            if anchor is None:
+                anchor = self._capture_follow_anchor()
+            if anchor is None:
+                return False
+            return self._place_follow(anchor)
+
+        hwnd = self._native_handle()
+        if not hwnd:
+            return False
+
+        size = self._window_size()
+        if size is None:
+            return False
+        win_w, win_h = size
+
+        mon = self._saved_orb_monitor()
+        if mon is None:
+            mon = primary_monitor()
+        if mon is None:
+            return False
+        area = mon.work_area
+        scale = mon.scale
+
+        position = orb_position_from_geometry(
+            self._saved_orb_geometry(), area, scale, win_w, win_h)
+        if position is None:
+            # 还没拖过:给个合理的默认值(工作区右下角)
+            ox, oy = default_orb_position(area, scale)
+            position = orb_window_position(ox, oy, win_w, win_h, scale, area)
+        if position is None:
+            return False
+        try:
+            move_window_to(hwnd, int(position[0]), int(position[1]))
+            return True
+        except Exception as e:
+            log.debug("摆悬浮球位置失败: %s", e)
+            return False
+
+    # ---------- 跟随输入档(球跟着光标走) ----------
+
+    def _start_follow_thread(self) -> None:
+        """起位置轮询线程(幂等)。
+
+        「常驻球 + follow/pinned」才有意义:这两档都要检测
+        "光标聚焦在输入处没"来决定显隐,follow 还要多挪位置。
+        custom 常驻,没什么可轮询的 —— 切档时由 ``orb_position``
+        事件负责起停。
+        """
+        if not self._orb_enabled():
+            return
+        if self._orb_position_mode() not in ("follow", "pinned"):
+            return
+        # 锁/线程属性可能还没建(测试里绕过 __init__ 造对象)——
+        # 拿不到就地补一个,别让这一步把整个前端就绪流程带崩。
+        lock = getattr(self, "_follow_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._follow_lock = lock
+        with lock:
+            thread = getattr(self, "_follow_thread", None)
+            epoch_now = getattr(self, "_follow_epoch", 0)
+            if thread is not None and thread.is_alive():
+                if getattr(thread, "_orb_epoch", -1) == epoch_now:
+                    return      # 就是当前档位的线程,复用
+                # 换代残留的旧线程:它醒来发现代数变了就退,等它让位
+                thread.join(timeout=1.0)
+                if thread.is_alive():
+                    return      # 还没退干净,这轮放弃(下次事件会再试)
+            self._follow_epoch = epoch_now + 1
+            epoch = self._follow_epoch
+            thread = threading.Thread(target=self._follow_loop,
+                                      args=(epoch,),
+                                      name="ui-orb-follow", daemon=True)
+            thread._orb_epoch = epoch
+            self._follow_thread = thread
+            thread.start()
+
+    def _stop_follow_thread(self) -> None:
+        """停掉位置轮询线程(切到 custom 档时)。
+
+        线程可能正攥着一个刚捕获的锚点(UIA 那一问要几十到几百毫秒):
+        直接改配置的话,它醒来会把球又挪回光标处、或者把球藏掉,
+        把新档位的摆位覆盖掉 —— 那就是用户看到的"切了档没反应"。
+
+        所以这里把代数 +1(线程醒来即退),再 join 一小会儿:等到线程
+        真正退出后,调用方紧接着的 ``_show_orb`` 摆位就是最终位置。
+        """
+        lock = getattr(self, "_follow_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._follow_epoch = getattr(self, "_follow_epoch", 0) + 1
+            thread = getattr(self, "_follow_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def _follow_loop(self, epoch: int) -> None:
+        """位置轮询循环。``epoch`` 是起线程时领到的代数。
+
+        生命周期:代数变了(被新一代线程顶替)、档位不属于
+        follow/pinned、或者常驻球关了,就退出 ——
+        下一轮 ``_start_follow_thread`` 会重新起一个。
+        """
+        while not self._destroyed:
+            if epoch != self._follow_epoch:
+                break
+            try:
+                if (not self._orb_enabled()
+                        or self._orb_position_mode() not in ("follow",
+                                                             "pinned")):
+                    break
+                self._follow_tick(epoch)
+            except Exception as e:
+                log.debug("跟随轮询出错: %s", e)
+            time.sleep(ORB_FOLLOW_INTERVAL)
+
+    def _follow_tick(self, epoch: int) -> None:
+        """一轮轮询:找到真光标就按档位反应,找不到就收起球。
+
+        ``epoch`` 是本线程的代数:UIA 捕获是一笔慢调用,醒来后
+        代数变了就立刻收手 —— 这次的结果作废,绝不再动窗口
+        (不然会盖掉切档后的摆位)。
+
+        两条边界的按档分派:
+
+        - follow:找到光标 → 挪过去;找不到 → 收球
+        - pinned:找到光标 → 露脸(位置在记忆处,不挪);找不到 → 收球
+
+        共同的三条边界:
+
+        1. **录音中不藏** —— 胶囊正在录,窗口必须留着;
+        2. **录音中不挪** —— 展开的胶囊在原地待着就够了,
+           位置可预期比"位置聪明"更重要;
+        3. 第一次露脸要走"等命中区裁好"那条路(``_schedule_show_orb``),
+           否则那 512×260 的透明空白会吃掉底下应用的点击。
+        """
+        if epoch != self._follow_epoch:
+            return
+        if not self._orb_enabled():
+            return
+        if self._want_visible:
+            # 正在录音:胶囊留着,也不挪
+            return
+
+        anchor = self._capture_follow_anchor()
+        if epoch != self._follow_epoch:
+            # 捕获的这几百毫秒里切了档:这次的结果是旧档位的,
+            # 用它动窗口会跟新档位的摆位打架
+            return
+        if anchor is None:
+            # 没有真光标 → 球收起来(不在输入框里就别杵在那儿)
+            self._hide_orb()
+            return
+
+        if self._orb_position_mode() == "pinned":
+            # 记住的位置:显隐归光标管,位置不挪。
+            # 摆位在 _show_orb → _place_orb 里做(记忆的位置)。
+            if self._orb_shown:
+                return
+        elif self._orb_shown:
+            # 跟随档已经露着脸了 → 只挪位置
+            self._place_follow(anchor)
+            return
+
+        if self._orb_regions_ready:
+            # 命中区裁好了 → 可以直接露脸
+            self._show_orb(anchor)
+            return
+
+        # 还没裁好 → 排一次"稍后露脸"(别反复重启,见 _schedule_show_orb)
+        self._schedule_show_orb()
+
+    def _capture_follow_anchor(self) -> Any:
+        """位置轮询档(follow / pinned)取**真光标**(uia / caret / edit 三级)。
+
+        后两级(鼠标位置、前台窗口中心)说的不是光标 —— 拿它们冒充,
+        球就会在"用户只是把鼠标挪过来"的时候也冒出来。pinned 档也要
+        这个判定:有真光标才露脸,和 follow 档同一套一致性。
+
+        ``edit`` 这一级是"焦点在可编辑输入框里,但没有字符可定位"
+        (空输入框)—— 位置退化成输入框的左下角,见 caret.py。
+
+        前台是胶囊自己时直接放弃:这时候问出来的"光标"是胶囊自己的
+        (WebView2 里也有文本),拿来摆位只会把自己算到眼前。
+        """
+        hwnd = self._native_handle()
+        try:
+            fg = get_foreground_window()
+        except Exception:
+            fg = 0
+        if hwnd and fg == hwnd:
+            return None
+        try:
+            anchor = capture_anchor(foreground_hwnd=fg or 0,
+                                    exclude_hwnd=hwnd or 0,
+                                    require_caret=True)
+        except Exception as e:
+            log.debug("跟随档取光标失败: %s", e)
+            return None
+        if anchor is None or anchor.kind not in ("uia", "caret", "edit"):
+            return None
+        return anchor
+
+    def _move_orb_abs(self, x: float, y: float) -> None:
+        """拖动悬浮球:窗口左上角 → (x, y) 逻辑像素。
+
+        前端每次都从 mousedown 起点算绝对目标发过来(不发增量)——
+        某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
+
+        摆位走"球"那套规则:球的位置会被夹回允许的范围(纵向尤其严 ——
+        球的上方要留给展开后的胶囊),窗口跟着反推。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        try:
+            scale = self._current_scale()
+            size = self._window_size()
+            if size is None:
+                return
+            win_w, win_h = size
+            win_x = int(round(float(x) * scale))
+            win_y = int(round(float(y) * scale))
+            # 球在窗口的底边居中处:先算球的屏幕坐标,再夹范围
+            ox, oy = orb_screen_position(win_x, win_y, win_w, win_h, scale)
+            mon = monitor_at_point(ox, oy)
+            area = mon.work_area if mon is not None else get_work_area()
+            if area is None:
+                return
+            nx, ny = orb_window_position(ox, oy, win_w, win_h, scale, area)
+            move_window_to(hwnd, int(nx), int(ny))
+        except Exception as e:
+            log.debug("移动悬浮球失败: %s", e)
+
+    def _save_orb_position(self) -> None:
+        """记住悬浮球的位置(相对所在工作区的逻辑偏移)。
+
+        存的是**球**的偏移,不是窗口的:球是用户真正盯着的那一小块。
+        存相对量而不是绝对坐标:换缩放率、换显示器都不飞。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        rect = get_window_rect(hwnd)
+        if rect is None:
+            return
+        mon = self._monitor_at_window()
+        if mon is None:
+            return
+        ox, oy = orb_screen_position(rect[0], rect[1], rect[2] - rect[0],
+                                      rect[3] - rect[1], mon.scale)
+        geometry = encode_offset(ox, oy, mon.work_area, mon.scale)
+        try:
+            config = self.controller.config
+            config.orb_geometry = geometry
+            config.orb_monitor = mon.device
+            config.save()
+        except Exception as e:
+            log.debug("保存悬浮球位置失败: %s", e)
+            return
+        log.debug("记住悬浮球位置: %s @ %s", geometry, mon.device)
+
+    def _saved_orb_geometry(self) -> str:
+        """上次记忆的悬浮球位置(``"dx,dy"``)。"""
+        try:
+            return str(getattr(self.controller.config, "orb_geometry", "") or "")
+        except Exception:
+            return ""
+
+    def _saved_orb_monitor(self) -> Any:
+        """上次记忆位置时所在的那块显示器(设备名对不上就返回 None)。"""
+        try:
+            device = str(getattr(self.controller.config, "orb_monitor", "") or "")
+        except Exception:
+            return None
+        if not device:
+            return None
+        return monitor_by_device(device)
+
+    def _start_recording_from_orb(self) -> None:
+        """点悬浮球开始录音。
+
+        ⚠ **焦点陷阱**:鼠标点在 WebView2 的子窗口上会激活整棵窗口树,
+        前台被胶囊抢走。注入靠"粘贴到前台窗口",所以**先把前台还给
+        用户**,再开始录音 —— 否则这一轮识别完的文字会贴到胶囊自己
+        身上,而不是用户的输入框里。那是功能级的致命 bug,不是观感问题。
+        """
+        target = self._user_foreground()
+        if target:
+            self._give_back_focus(target)
+            # 这一轮的注入落点:先记下来,别等开始录音时再猜
+            self._target_hwnd = target
+        try:
+            self.controller.start_recording()
+        except Exception as e:
+            log.debug("点悬浮球开始录音失败: %s", e)
 
     def _window_size(self) -> tuple[int, int] | None:
         """窗口当前的**物理**像素尺寸。
@@ -1029,7 +1659,7 @@ class VoiceCapsule:
             log.debug("移动胶囊失败: %s", e)
 
     def _begin_drag(self) -> None:
-        """用户开始拖胶囊。
+        """用户开始拖胶囊/悬浮球。
 
         拖动期间守卫**不**抢回焦点:鼠标点在 WebView2 子窗口上会把
         前台激活到胶囊,守卫每 150ms 还一次的话,焦点来回跳会拖垮
@@ -1037,16 +1667,52 @@ class VoiceCapsule:
         """
         with self._drag_lock:
             self._dragging = True
+        # 记下起手位置:松手时对比一下,没挪过就别去写配置
+        try:
+            self._drag_start_rect = get_window_rect(self._native_handle())
+        except Exception:
+            self._drag_start_rect = None
 
     def _end_drag(self) -> None:
         """用户松手:归还焦点 + 记住位置。"""
         with self._drag_lock:
             self._dragging = False
+        start_rect = getattr(self, "_drag_start_rect", None)
+        self._drag_start_rect = None
+        if self._orb_enabled():
+            # 悬浮球:这一轮还没开始,没有"注入落点"可言 ——
+            # 该还给的是用户**此刻**所在的窗口(守卫动态跟踪的),
+            # 不能用上一轮记下的那个(用户早就切到别的窗口去了)。
+            self._give_back_focus(self._user_foreground())
+            # 拖过才记位置(点一下没动就别去写配置)。
+            #
+            # ⚠ pinned / custom **记**(两档共用一份 orb_geometry,
+            # 位置归用户管);follow **不记** —— 它的位置由光标决定,
+            # 轮询线程一直在挪窗口,这里的"挪过"是程序挪的,不是用户
+            # 拖的 —— 写进配置只会把一个莫名其妙的位置存成
+            # "用户自定义的位置"。
+            if (self._orb_position_mode() in ("pinned", "custom")
+                    and self._orb_moved(start_rect)):
+                self._save_orb_position()
+            return
         # 前台若被这次点击激活到了胶囊上,还回这一轮录音的落点 ——
         # 不还的话,后面注入的文字会发给胶囊自己。
         self._give_back_focus()
         if self._position_mode() == "custom":
             self._save_capsule_position()
+
+    def _orb_moved(self, start_rect: Any) -> bool:
+        """这一下拖动有没有真的挪过位置。
+
+        点悬浮球(想开始录音)和拖悬浮球(想挪位置)走的是同一套按下/
+        松手流程 —— 靠"有没有真的动过"区分,免得点一下也写一次配置。
+        """
+        if start_rect is None:
+            return True     # 没记录(理论上不该发生)→ 当作拖过
+        rect = get_window_rect(self._native_handle())
+        if rect is None:
+            return False
+        return rect[:2] != start_rect[:2]
 
     def _save_capsule_position(self) -> None:
         """记住当前胶囊位置(相对所在工作区的逻辑偏移)。
@@ -1124,6 +1790,7 @@ class VoiceCapsule:
             return
         self._destroyed = True
         self._cancel_hide_timer()
+        self._cancel_orb_timer()
         try:
             self._window.destroy()
         except Exception as e:

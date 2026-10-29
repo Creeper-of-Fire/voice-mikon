@@ -7,10 +7,16 @@
 |---|---|---|
 | UIA ``TextPattern`` | 现代应用(Chrome / VSCode / Office / Electron) | 慢(几十毫秒),要 comtypes |
 | ``GetGUIThreadInfo`` 的 ``rcCaret`` | 传统 Edit 控件(记事本等) | 极快 |
+| UIA 的**可编辑输入框矩形** | **空输入框**(光标在,但没字符可定位) | 慢,要 comtypes |
 | ``GetCursorPos`` | 谁都能用,但指的是**鼠标**不是光标 | 极快 |
 | 前台窗口矩形 | 兜底:只知道窗口在哪 | 极快 |
 
-所以这里做**四级回退**:从最准的往下试,拿到谁用谁。
+所以这里做**五级回退**:从最准的往下试,拿到谁用谁。
+
+但"定位信号"和"真光标"不是一回事:最后两级说的根本不是光标
+(鼠标位置、前台窗口中心)。要判断"光标是不是真的聚焦在输入框里",
+只能认前三级 —— ``capture_anchor(..., require_caret=True)`` 就是
+这个开关:都拿不到就返回 None,不做降级。
 
 UIA 那级需要 ``comtypes``(可选依赖 ``pip install -e ".[uia]"``)。
 没装、或者调用失败,就直接降到下一级 —— 功能少一档,不该让整个
@@ -317,6 +323,144 @@ def get_caret_rect_gui(foreground_hwnd: int = 0) -> tuple[int, int, int, int] | 
         return None
 
 
+# ---------------- 第 2.5 级:焦点在可编辑输入框里 ----------------
+
+def _uia_rect_to_bounds(rect) -> tuple[int, int, int, int] | None:
+    """UIA 的 ``BoundingRectangle`` → ``(left, top, right, bottom)``。
+
+    comtypes 给的可能是 ``(l, t, w, h)`` 的元组,也可能是带
+    ``.left/.top/.width/.height`` 的结构 —— 两种都认。
+    """
+    if rect is None:
+        return None
+    try:
+        left, top = float(rect.left), float(rect.top)
+        width, height = float(rect.width), float(rect.height)
+        if width <= 0 or height <= 0:
+            return None
+        return int(left), int(top), int(left + width), int(top + height)
+    except Exception:
+        pass
+    try:
+        vals = [float(v) for v in rect]
+    except Exception:
+        return None
+    if len(vals) != 4:
+        return None
+    left, top, width, height = vals
+    if width <= 0 or height <= 0:
+        return None
+    return int(left), int(top), int(left + width), int(top + height)
+
+
+def _uia_property(element, UIA, property_id, name):
+    """取 UIA 接口上的一个当前属性值。
+
+    首选 ``GetCurrentPropertyValue`` —— 这是 UIA 最标准的一条路,所有
+    元素都有。
+
+    ⚠ comtypes 生成的接口把属性的 getter 映射成 ``CurrentXxx``
+    (``element.CurrentControlType``),**不是** ``element.ControlType``,
+    也不是 ``element.Current.ControlType`` —— 后两种写法会直接
+    AttributeError(实测踩过:``.Current`` 会被 comtypes 的属性补丁器
+    打成 KeyError)。
+    """
+    try:
+        return element.GetCurrentPropertyValue(property_id)
+    except Exception:
+        pass
+    try:
+        return getattr(element, "Current" + name)
+    except Exception:
+        pass
+    try:
+        return getattr(element, name)
+    except Exception:
+        raise AttributeError(name)
+
+
+def _is_editable_text(element, UIA) -> bool:
+    """这个焦点控件是不是**能打字进去**的文本控件。
+
+    判据:
+      - ControlType 是 Edit(传统输入框 / 多行框 / 浏览器 input);
+      - 或者它有 ValuePattern 且不是只读 —— 这一条兜住 VSCode 的
+        Monaco 编辑器(它是 Document 类型)和各种搜索框。
+    """
+    try:
+        control_type = _uia_property(
+            element, UIA, UIA.UIA_ControlTypePropertyId, "ControlType")
+    except Exception:
+        control_type = None
+    try:
+        edit_id = UIA.UIA_EditControlTypeId
+    except Exception:
+        edit_id = None
+
+    value_pattern = None
+    try:
+        value_pattern = element.GetCurrentPattern(UIA.UIA_ValuePatternId)
+    except Exception:
+        value_pattern = None
+
+    def _writable() -> bool:
+        if value_pattern is None:
+            return True      # 没有 ValuePattern → 没法说它只读
+        try:
+            return not bool(_uia_property(
+                value_pattern, UIA, UIA.UIA_ValueIsReadOnlyPropertyId,
+                "IsReadOnly"))
+        except Exception:
+            return True
+
+    if edit_id is not None and control_type == edit_id:
+        return _writable()
+    # 不是 Edit 类型,但有可写的 ValuePattern → 也是文本输入控件
+    return value_pattern is not None and _writable()
+
+
+def get_focused_edit_rect_uia() -> tuple[int, int, int, int] | None:
+    """焦点是不是一个**可编辑的输入框**?是的话返回它的屏幕矩形。
+
+    为什么需要这一级:**空输入框里拿不到光标矩形**。
+
+    - UIA 那级靠"把插入点扩到所在字符"反推光标 —— 空框里没有字符
+      可以扩,直接失败;
+    - 传统控件那级靠 ``GUI_CARETVISIBLE`` —— 空框里 caret 不可见。
+
+    但"光标确实在输入框里"这件事是真的,只是没有字符可以定位。
+    这时候把球判成"不在输入框里"(藏起来)就很怪:用户明明点了输入框,
+    球却消失了,非要敲个字才回来(实测踩过)。
+
+    所以这里单独给一级:认"焦点在可编辑输入框",位置退化成输入框的
+    左下角 —— 和有字符时球所在的位置是同一个方向(贴着输入框下沿)。
+    """
+    UIA = _uia_module()
+    if UIA is None:
+        return None
+    iuia = _uia_automation(UIA)
+    if iuia is None:
+        return None
+    try:
+        element = iuia.GetFocusedElement()
+    except Exception:
+        return None
+    if element is None:
+        return None
+    try:
+        if not _is_editable_text(element, UIA):
+            return None
+    except Exception:
+        return None
+    try:
+        bounds = _uia_rect_to_bounds(_uia_property(
+            element, UIA, UIA.UIA_BoundingRectanglePropertyId,
+            "BoundingRectangle"))
+    except Exception:
+        return None
+    return bounds
+
+
 # ---------------- 第 3 级:鼠标 ----------------
 
 def get_cursor_point() -> tuple[int, int] | None:
@@ -333,7 +477,8 @@ def get_cursor_point() -> tuple[int, int] | None:
 # ---------------- 回退链 ----------------
 
 def capture_anchor(foreground_hwnd: int = 0,
-                   exclude_hwnd: int = 0) -> Anchor | None:
+                   exclude_hwnd: int = 0,
+                   require_caret: bool = False) -> Anchor | None:
     """按"越准越优先"的顺序取一个定位信号点。
 
     顺序:UIA 光标 → 传统控件光标 → 鼠标 → 前台窗口矩形。
@@ -341,6 +486,18 @@ def capture_anchor(foreground_hwnd: int = 0,
 
     ``exclude_hwnd`` 是要**排除**的窗口句柄(一般传胶囊自己的):
     前台窗口要是自己,那锚点毫无意义(会算到自己脑袋上)。
+
+    ``require_caret=True`` 时只认"真光标":UIA / 传统控件光标之外,
+    还有**空输入框兜底**那级(焦点在可编辑输入框里但没有字符可定位,
+    位置取输入框左下角,``kind="edit"``)。后两级(鼠标位置、前台窗口
+    中心)说的根本不是"光标"——
+    鼠标在哪跟光标在哪没有必然关系(用户可能只是把鼠标挪过来看了一眼),
+    前台窗口中心更是只知道"窗口在哪"。
+    要求"真光标"时,这几级都拿不到就返回 None,**不做降级**。
+
+    常驻悬浮球的「跟随输入 / 固定底部」两档靠这个开关判断
+    "光标是不是真的聚焦在一个输入框里" —— 拿鼠标位置冒充光标,
+    球就会满屏乱跳。
     """
     point = get_caret_point_uia()
     if point is not None:
@@ -351,6 +508,19 @@ def capture_anchor(foreground_hwnd: int = 0,
         left, _top, _right, bottom = rect
         # 取底边:胶囊贴在文字**下面**(输入法候选框的位置)
         return Anchor(int(left), int(bottom), "caret")
+
+    if require_caret:
+        # 只要真光标:后两级(鼠标位置 / 前台窗口中心)不算数,
+        # 拿不到就当"没有光标"。
+        #
+        # 但**空输入框**是例外:光标确实在输入框里,只是没字符可定位。
+        # 那一级认"焦点在可编辑输入框",位置取输入框的左下角 ——
+        # 否则用户一点空白输入框球就消失,非敲个字才回来(实测踩过)。
+        rect = get_focused_edit_rect_uia()
+        if rect is not None:
+            left, _top, _right, bottom = rect
+            return Anchor(int(left), int(bottom), "edit")
+        return None
 
     point = get_cursor_point()
     if point is not None:

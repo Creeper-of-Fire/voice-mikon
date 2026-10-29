@@ -190,6 +190,10 @@ body {
   overflow-y: auto;
   user-select: text;
   -webkit-user-select: text;
+  /* 球模式的收起/展开:只淡入淡出,**不位移** ——
+     位移靠 transform,而 transform 会让上报的命中区和视觉形状错位
+     (见 .recording-pill 上面的说明)。 */
+  transition: opacity .2s ease;
 }
 
 .textbar-text {
@@ -234,8 +238,15 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 相对定位:.bar-orb(球形态的图标)靠 inset:0 绝对居中在胶囊里。
+     绝对定位的包含块是**padding box**,所以图标正好落在胶囊的几何
+     中心上(见文末「常驻悬浮球」一节)。 */
+  position: relative;
   width: fit-content;
   max-width: 480px;
+  /* 球形态的宽度下限:内容全是 display:none 时 fit-content 可能
+     比球还窄,那样收出来的就不是个球了。40 = 胶囊的高度 = 球直径。 */
+  min-width: 40px;
   height: 40px;
   margin: 0 auto;
   padding: 4px;
@@ -244,8 +255,42 @@ body {
   background: var(--deep);
   border: 1px solid var(--stroke);
   border-radius: 999px;
+  /* 内容一律裁在胶囊里。球→胶囊的形变期间这个尤其重要:
+     宽度还没长开时,里面淡入的波形/按钮不能溢出到胶囊外面
+     (否则会看到一堆控件挤在半路的一条窄条里)。 */
+  overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+  /* 球 ↔ 胶囊的形变过渡(见文末「常驻悬浮球」一节)。
+     *
+     * ⚠ 这里**不能有 transform**:窗口的命中区(SetWindowRgn)是按
+     * 上报的矩形裁的,transform 会让"视觉形状"和"上报的矩形"错位,
+     * 描边两端就被切掉(真机症状:展开瞬间球的上半截多一条白线)。
+     * 宽度靠 max-width 过渡 —— 实际宽度 = min(fit-content, max-width),
+     * 从 40px 长到内容宽度,每一帧的布局尺寸就是那一帧的视觉尺寸,
+     * 上报的矩形永远和看到的一致。
+   *
+   * **颜色快褪、形状慢拉** —— 这两条各管各的阶段:
+   *   0~100ms  控件就位(淡入极短,肉眼看就是"它本来就在那儿")
+   *   0~180ms  红色迅速褪成深色(球变成"胶囊的样子")
+   *   0~800ms 深色胶囊慢慢横向长开,控件随宽度一点点被"露"出来
+   *
+   * 控件**不再**等胶囊拉满才淡入。之前的版本是"先拉出一条空胶囊、
+   * 再啪地冒出控件",用户嫌展开后挺空的;而且颜色褪得快之后,
+   * 红底上也不会有半透明控件浮着(那才是上一版被否的观感)。
+   *
+   * 形状这一段刻意拉得很长(.8s):它只是"录音开始了"的一个视觉提示,
+   * 慢慢长开比"啪"地弹出来舒服得多。 */
+  transition:
+    opacity .2s ease,
+    max-width .8s cubic-bezier(.25, .85, .3, 1),
+    border-radius .8s cubic-bezier(.25, .85, .3, 1),
+    background-color .18s ease-out,
+    border-color .18s ease-out,
+    color .18s ease-out;
+  /* 过渡的 delay 按上面 transition 的属性顺序一一对应(6 个对 6 个,
+     数量对不上整条声明就作废)。 */
+  transition-delay: 0s, 0s, 0s, 0s, 0s, 0s;
 }
 
 .recording-pill button {
@@ -285,6 +330,21 @@ body {
   flex: 0 0 auto;
   /* 滑出左边的条直接裁掉 —— 胶囊窄，不能让条子跑到计时数字那边 */
   overflow: hidden;
+  /* 左侧渐隐：条子滚到左边缘时**自己**逐渐变透明。
+     这里用 mask，而不是"拿一块底色盖上去" ——
+     盖的做法有个躲不掉的硬伤:盖子的颜色是 var(--deep),是**静态**的,
+     而球展开成胶囊时底色正从红褪成深,红底上就会凭空多出一块
+     深色(浅色主题下是白色)渐变块 —— 那就是真机看到的丑陋残影。
+     mask 改的是条子自己的 alpha,底色怎么变都跟它无关。 */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 10px);
+  -webkit-mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-image: linear-gradient(90deg, transparent 0%, #000 10px);
+  /* size / repeat 必须写死:渐变图没有固有尺寸,默认的 auto/repeat
+     在部分渲染器上会把它当成 10px 宽的小图平铺 —— 波形区于是变成
+     一条条忽明忽暗的条纹,条子几乎看不见。 */
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
 }
 
 /* 一根条：固定 3px 宽，底对齐（从底部往上长），
@@ -307,18 +367,6 @@ body {
   color: var(--wave-dim);
 }
 
-/* 左侧渐隐：滑出视口的条在左边缘淡出，而不是被硬切一刀 */
-.waveform::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 10px;
-  pointer-events: none;
-  background: linear-gradient(90deg, var(--deep) 0%, transparent 100%);
-}
-
 /* 状态文字（OpenType 的 bar-label）
    CJK 字形在 em 盒里偏低,往上顶 1px 才是视觉居中 */
 .bar-label {
@@ -333,6 +381,9 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
   color: var(--fg);
+  /* 不许被压扁:球形态下胶囊只有 40px 宽,内容被 overflow 裁掉就裁掉,
+     但别把字挤成竖排 —— 挤扁的宽度会让 fit-content 算出乱七八糟的值。 */
+  flex-shrink: 0;
 }
 
 /* 计时（本项目自有：OpenType 的胶囊没有计时） */
@@ -383,6 +434,16 @@ body {
 
 /* ---------------- 阶段切换 ---------------- */
 
+/* 胶囊里各个子元素也要跟着淡入淡出。
+   球形态下它们全是 opacity:0(见文末「常驻悬浮球」),展开时要**慢慢**
+   淡进来 —— 没有这条过渡的话,它们会在球还没长开时"啪"地一下出现,
+   被 overflow 裁在一条窄条里,看着像凭空冒出来的控件。
+   淡入**延迟**到胶囊长开一半之后:形变期间只让"形状"动,别同时让
+   "内容"也动 —— 两件事叠在一起,透明窗口上容易糊成一片残影。 */
+.recording-pill > * {
+  transition: opacity .2s ease;
+}
+
 /* 录音中：波形 + 计时，右侧是结束钮 */
 .recording-pill.recording .waveform { display: block; }
 .recording-pill.recording .bar-timer { display: inline; }
@@ -403,3 +464,158 @@ body {
 .recording-pill.cancelled .icon-loader { display: block; }
 .recording-pill.done .icon-check { display: block; }
 .recording-pill.error .icon-info { display: block; }
+
+/* ---------------- 常驻悬浮球 = 胶囊的圆形态 ---------------- */
+
+/* 悬浮球**不是另一个元素** —— 它就是这颗胶囊**收起来**的样子。
+ *
+ * 为什么这么做(这是本项目踩过的一个真机 bug 的正解):
+ * 早先球是一个独立的 DOM 元素,和胶囊各占一块,展开时球淡出、胶囊长出。
+ * 两者**尺寸不一致**(球 56px、胶囊 40px 高),于是展开那一瞬间,
+ * 窗口的命中区(SetWindowRgn,按上报矩形裁)把球的上半截切掉一条 ——
+ * 看起来就是"球冠上多了一道白线"。
+ *
+ * 现在只有一个元素:球 = 胶囊收窄到 40px 的正圆。
+ *   - 球和胶囊**一样大**(40 = 胶囊的高度),横向长开时轨迹严丝合缝;
+ *   - 只有一个可见形状,不存在"两个形状互相裁切"这回事;
+ *   - 形变期间**没有 transform**,布局尺寸 = 视觉尺寸,
+ *     上报的命中区永远和看到的对得上。
+ *
+ * 尺寸/位置必须和 placement.py 的 ORB_SIZE / ORB_INSET_Y 对上:
+ * Python 侧靠"窗口位置 + 这两个常量"反推球在屏幕上的位置。 */
+.bar-orb {
+  position: absolute;
+  /* 包含块是胶囊的 padding box,正好比 border box 小一圈(各 1px)——
+     居中之后图标落在胶囊的几何中心上。 */
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--wave-fg);
+  opacity: 0;
+  pointer-events: none;
+  /* 展开时它要让位给胶囊里的控件 —— 快一点(.07s):
+     胶囊拉开的头几十毫秒里它还杵在正中间,会跟左边的取消钮挤在一起。 */
+  transition: opacity .07s ease;
+}
+
+body.orb-mode.orb-idle .bar-orb {
+  opacity: 1;
+  pointer-events: auto;
+  /* 收起时它**晚一点**出来:胶囊要先收得差不多了、底色也要先褪回红
+     (麦克风是深色图标,红底上才看得清),免得在一个细长条中间杵着个图标。 */
+  transition-delay: .76s;
+}
+
+/* 麦克风图标:极轻的呼吸,示意"随时能说话"。
+   只动 opacity —— 透明窗口上不许用 box-shadow(会渲染成灰带)。 */
+body.orb-mode.orb-idle .bar-orb svg {
+  animation: orb-breathe 2.8s ease-in-out infinite;
+}
+
+@keyframes orb-breathe {
+  0%, 100% { opacity: .72; }
+  50% { opacity: 1; }
+}
+
+/* 球形态:胶囊收成 40px 的正圆。
+   底色用**录音红** --wave(胶囊的 ✓ 按钮也是它):球常驻在屏幕角落,
+   必须一眼就能找到 —— 深底 + 浅色描边的球太低调,用户会"忘了它在",
+   然后去按热键。红底 + 深色图标对比也够(深浅两套主题下
+   --wave-fg 都是深色,图标在红底上一致清晰)。 */
+body.orb-mode.orb-idle .recording-pill {
+  max-width: 40px;
+  border-radius: 20px;
+  background-color: var(--wave);
+  /* 红底上再压一圈半透明白边:把球从背景里"托"出来一点,
+     浅色主题下尤其需要(白底 + 白边会糊)。 */
+  border-color: rgba(255, 255, 255, 0.28);
+  color: var(--wave-fg);
+  cursor: grab;
+}
+
+/* 球形态下的悬停反馈。
+ *
+ * ⚠ **不能用 `filter: brightness()`** —— 展开动画期间鼠标还悬在球上,
+ * 这个滤镜会一直作用在**正在变形**的胶囊上。filter 会把元素提升成
+ * 离屏合成层,在 WebView2 的透明窗口上就是一层灰底 + 重影(真机症状:
+ * 展开时留下一片难看的残影)。所以改成换底色 —— 纯颜色过渡,
+ * 不碰合成层。
+ *
+ * 顺带一提:这个坑和"透明窗口上不能有 box-shadow / backdrop-filter"
+ * 是同一类问题 —— 凡是会在透明窗口上造出额外图层的效果,都得躲开。 */
+body.orb-mode.orb-idle .recording-pill:hover {
+  background-color: #ff6b6b;
+}
+
+/* 球形态下胶囊里的其它东西(波形/计时/按钮/状态文字)一律藏掉 ——
+   只留那颗麦克风图标。 */
+body.orb-mode.orb-idle .recording-pill > *:not(.bar-orb) {
+  opacity: 0;
+  pointer-events: none;
+  transition-delay: 0s;
+  /* 收起时内容先快速淡掉,胶囊再慢慢收回去 —— 两件事别挤在同一瞬间。 */
+  transition-duration: .12s;
+}
+
+/* 展开态:内容**立刻**就位,不等到胶囊拉满。
+   元素本来就固定排在胶囊里,胶囊一边拉宽一边把它们"露"出来 ——
+   比"先拉出一条空胶囊、再啪地冒出控件"自然得多。
+   淡入保留但压到 .1s,只为消掉切换瞬间的一帧硬跳。 */
+body.orb-mode.orb-expanded .recording-pill > *:not(.bar-orb) {
+  opacity: 1;
+  transition-delay: 0s;
+  transition-duration: .1s;
+}
+
+/* 展开态:胶囊拉回正常宽度与配色(过渡见 .recording-pill 的 transition)。
+   颜色**立刻**开始褪(快褪),形状慢慢拉 —— 见 .recording-pill 的说明。 */
+body.orb-mode.orb-expanded .recording-pill {
+  max-width: 480px;
+  border-radius: 999px;
+  background-color: var(--deep);
+  border-color: var(--stroke);
+  color: var(--fg);
+  transition-delay: 0s, 0s, 0s, 0s, 0s, 0s;
+}
+
+/* 收起时颜色**晚一点**变回红 —— 等胶囊缩得差不多了再变,
+   最后落定的就是那颗红球。 */
+body.orb-mode.orb-idle .recording-pill {
+  transition-delay: 0s, 0s, 0s, .58s, .58s, .58s;
+}
+
+/* 球形态下文字条整块淡出(命中区另算,见 capsule.js 的 measureRegions)。 */
+body.orb-mode.orb-idle .textbar {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 文字条跟着一起就位 —— 它在胶囊**外面**,是独立的一条,
+   不存在"半透明控件浮在红底上"那种混杂,不用等胶囊。 */
+body.orb-mode.orb-expanded .textbar {
+  opacity: 1;
+  transition-delay: 0s;
+}
+
+/* 跟随档:球的位置由光标决定,**拖不动** —— 光标形状也别给出
+   "能拖"的假象(`.can-drag` 那条 move 也要压掉)。
+   pinned/custom 的位置归用户管,照常给 grab 光标。 */
+body.orb-mode.orb-follow.orb-idle .recording-pill {
+  cursor: default;
+}
+
+body.orb-mode.orb-dragging .recording-pill {
+  cursor: grabbing;
+}
+
+/* 动效降级 */
+@media (prefers-reduced-motion: reduce) {
+  .recording-pill,
+  .textbar,
+  .bar-orb {
+    transition: none !important;
+  }
+  .bar-orb svg {
+    animation: none !important;
+  }
+}

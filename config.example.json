@@ -2,6 +2,9 @@
   "hotkey": "ctrl+alt+space",
   "model": "0.6B",
   "model_root": "D:\\Dev\\Environments\\models",
+  "asr_backend": "local",
+  "dashscope_model": "qwen3-asr-flash",
+  "dashscope_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "input_device": null,
   "device_name_hints": [
     "USB PnP Audio",
@@ -29,6 +32,10 @@
   "show_preview": true,
   "capsule_geometry": "",
   "capsule_monitor": "",
+  "floating_orb": false,
+  "orb_position": "follow",
+  "orb_geometry": "",
+  "orb_monitor": "",
   "log_file": "",
   "log_level": "INFO"
 }

@@ -1,7 +1,11 @@
-"""Qwen3-ASR 识别引擎封装。
+"""Qwen3-ASR 识别引擎封装(**本地后端**)。
 
 模型常驻显存,按热键时零等待。0.6B / 1.7B 两个尺寸可运行时切换
 (切换会重新加载模型,耗时几秒)。
+
+这是 ``ASRBackend`` 的**本地实现**(见 ``asr/base.py``)——
+和网络后端 ``DashScopeBackend`` 可互换,控制器只认那个抽象接口。
+热词(context biasing)的逻辑在基类里,两个后端共用。
 """
 
 from __future__ import annotations
@@ -12,18 +16,15 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import load_hotwords_file
 from ..logging_setup import get_logger
-from ..paths import hotwords_path
+from .base import ASRBackend, ASRError
 
 log = get_logger("asr")
 
-
-class ASRError(Exception):
-    """模型加载或推理失败。"""
+__all__ = ["ASREngine", "LocalASRBackend", "ASRError"]
 
 
-class ASREngine:
+class ASREngine(ASRBackend):
     """封装 Qwen3ASRModel,支持热切换模型规格。
 
     热词有**两个来源**,识别时合并(去重):
@@ -37,16 +38,12 @@ class ASREngine:
                  language: str | None = None,
                  hotwords: list[str] | None = None,
                  hotwords_file: Path | None = None):
+        super().__init__(hotwords=hotwords, hotwords_file=hotwords_file)
         self.model_root = Path(model_root)
         self.model_tag = model_tag
         self.language = language
-        self.hotwords = list(hotwords or [])
         self._model = None
         self._lock = threading.Lock()
-        # 词表文件热加载(mtime 缓存,文件变了才重读)
-        self._hotwords_file = Path(hotwords_file) if hotwords_file else hotwords_path()
-        self._hw_file_mtime: float | None = None
-        self._hw_file_words: list[str] = []
 
     # ---------- 模型 ----------
 
@@ -97,49 +94,30 @@ class ASREngine:
             raise ASRError(f"不支持的模型规格: {model_tag}")
         return self.load(model_tag)
 
-    # ---------- 推理 ----------
+    def unload(self) -> None:
+        """卸载模型,**把显存还给系统**。
 
-    def _effective_hotwords(self) -> list[str]:
-        """合并两个来源的热词:构造时传入的 + 词表文件的。
+        切到网络后端时走这条路 —— 本地模型常驻显存是几 GB,
+        不卸掉的话"切到网络省显存"就是空话。
 
-        词表文件**每次识别时**检查 mtime —— 文件变了就重读,
-        所以 ``data/hotwords.txt`` 改完立即生效,不用重启程序。
-        文件不存在/读不了是正常情况(只用传入的列表),不报错。
+        ``del self._model`` 只是让 Python 的引用计数归零;
+        ``torch.cuda.empty_cache()`` 才是真的把缓存块还给驱动
+        (否则显存占用数字不会立刻降下来)。
         """
-        words = [w.strip() for w in self.hotwords if w and w.strip()]
+        with self._lock:
+            model = self._model
+            self._model = None
+        del model
         try:
-            mtime = self._hotwords_file.stat().st_mtime
-            if mtime != self._hw_file_mtime:
-                self._hw_file_words = load_hotwords_file(self._hotwords_file)
-                self._hw_file_mtime = mtime
-                if self._hw_file_words:
-                    log.info("词表文件已(重)加载:%s(%d 词)",
-                             self._hotwords_file, len(self._hw_file_words))
-        except OSError:
-            # 文件不存在或不可访问 —— 不是错误
-            pass
-        seen = set(words)
-        for w in self._hw_file_words:
-            if w not in seen:
-                seen.add(w)
-                words.append(w)
-        return words
+            import torch
 
-    def _build_context(self) -> str:
-        """把热词拼成识别提示(context biasing)。
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            # 释放缓存失败不影响功能(模型引用已经断了)
+            log.debug("释放显存缓存失败: %s", e)
 
-        官方把这个通道叫 **Context Biasing**:可以传任意文本
-        (API 上限 10000 token),让模型在**音频模糊时优先选这些词** ——
-        公司名、产品代号、医疗术语、领域黑话都靠它校准。
-
-        格式用官方 HF 版的写法 ``"Vocabulary: a, b, c."``:
-        模型在 SFT 阶段就是用这种格式训练上下文偏置的,
-        格式对上了才吃得到那份偏置,自己编一句提示效果会打折。
-        """
-        words = self._effective_hotwords()
-        if not words:
-            return ""
-        return "Vocabulary: " + ", ".join(words) + "."
+    # ---------- 推理 ----------
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000,
                    language: str | None = None) -> str:
@@ -177,26 +155,8 @@ class ASREngine:
         log.info("识别完成 %.1fs 音频 / %.1fs 耗时: %s", dur, time.time() - t0, text)
         return text
 
-    @staticmethod
-    def _to_float32(audio: np.ndarray) -> np.ndarray:
-        """把音频统一成 [-1, 1] 的 float32(单声道)。
-
-        录音器给的是 int16,但 librosa(重采样用)只吃浮点。
-        已经在 [-1, 1] 范围的浮点原样保留。
-        """
-        arr = np.asarray(audio)
-        # 注意顺序:**先记住原始 dtype**,再混音。
-        # mean 会把 int16 提升成 float64,之后再判断"是不是整数"
-        # 就永远判不到了 —— 那样 int16 的刻度(±32768)会被当成
-        # 已经归一化的浮点,直接 clip 成 ±1(全幅方波)。
-        was_int = np.issubdtype(arr.dtype, np.integer)
-        if arr.ndim > 1:
-            arr = arr.mean(axis=-1)
-        arr = arr.astype(np.float32)
-        if was_int:
-            # int16 的刻度是 ±32768,除完正好落在 ±1
-            arr = arr / 32768.0
-        return np.clip(arr, -1.0, 1.0)
+    # ``_to_float32`` 在基类 ``ASRBackend`` 里(网络后端也要用同一套
+    # int16 → [-1,1] float32 的换算,踩坑点也就守在一处)。
 
     def transcribe_file(self, path: str | Path, language: str | None = None) -> str:
         """识别音频文件。"""
@@ -209,3 +169,8 @@ class ASREngine:
         text = results[0].text if results else ""
         log.info("识别完成 %s / %.1fs 耗时: %s", path, time.time() - t0, text)
         return text
+
+
+# 本地后端的"说明性"别名:和 ``DashScopeBackend`` 并列时读起来更清楚。
+# 类本身还是 ``ASREngine``(名字沿用旧代码,少改一圈引用)。
+LocalASRBackend = ASREngine

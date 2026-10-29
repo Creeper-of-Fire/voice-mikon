@@ -247,14 +247,37 @@ def test_before_show_disables_pywebview_transparent_hack():
     assert cap._window.transparent is False
 
 
-def test_guard_does_not_steal_focus_while_recording():
-    """录音时用户可能正要点胶囊上的 ✕ / ✓,那时焦点在胶囊上是故意的。"""
+def test_guard_hides_the_window_when_nobody_wants_it():
+    """守卫的"该露着"判断:非常驻模式下还是老规矩 —— 没人要求显示就藏回去。
+
+    这一条原来写的是"断言自己刚赋的值"(恒真、零覆盖),换成了真正
+    盯住守卫判断依据的断言。
+    """
     cap = _make_capsule()
-    cap._state = State.RECORDING
+    cap.controller = types.SimpleNamespace(config=FakeConfig())
+
+    cap._want_visible = False
+    assert cap._window_should_be_visible() is False
+
     cap._want_visible = True
-    # 守卫只在"没人要求显示"时藏窗口、在"没在录音"时抢回焦点
-    assert cap._want_visible is True
-    assert cap._state == State.RECORDING
+    assert cap._window_should_be_visible() is True
+
+
+def test_guard_keeps_the_ball_visible_in_orb_mode():
+    """常驻球模式:球一直杵在那儿,守卫不能把它藏回去。
+
+    "_want_visible" 的语义这时变了 —— "该露着"由球的模式决定,
+    而不是"这一轮胶囊正在显示"。
+    """
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(floating_orb=True))
+
+    # 球还没就位(前端还没报命中区)时,窗口不能先露脸
+    cap._orb_shown = False
+    assert cap._window_should_be_visible() is False
+
+    cap._orb_shown = True
+    assert cap._window_should_be_visible() is True
 
 
 # ---------------- 窗口尺寸 ----------------
@@ -289,12 +312,17 @@ class _FakeController:
     def __init__(self):
         self.stopped = 0
         self.cancelled = 0
+        self.started = 0
 
     def stop_recording(self):
         self.stopped += 1
 
     def cancel_recording(self):
         self.cancelled += 1
+
+    def start_recording(self):
+        self.started += 1
+        return True
 
 
 def test_recording_snapshots_target_hwnd(monkeypatch):
@@ -539,13 +567,17 @@ class FakeConfig:
     """
 
     def __init__(self, theme="auto", capsule_position="follow",
-                 show_preview=True):
+                 show_preview=True, floating_orb=False, orb_position="follow"):
         self.theme = theme
         self.hotkey = "ctrl+alt+space"
         self.capsule_position = capsule_position
         self.show_preview = show_preview
+        self.floating_orb = floating_orb
+        self.orb_position = orb_position
         self.capsule_geometry = ""
         self.capsule_monitor = ""
+        self.orb_geometry = ""
+        self.orb_monitor = ""
         self.saves = 0
 
     def save(self):
@@ -1335,3 +1367,617 @@ def test_capsule_new_recording_clears_the_copy_state():
     assert "recording" in data["pill"]
     # 上一轮的原文被清空了(只剩占位符)
     assert data["textbar"] == "正在聆听…"
+
+
+# ---------------- 常驻悬浮球 ----------------
+#
+# 悬浮球和胶囊是**同一个窗口**的两种形态。这一组盯的是:
+#   - 焦点陷阱:点球开始录音时必须先把前台还给用户
+#   - 位置记忆:拖球松手记住的是**球**的位置
+#   - 点击/拖动的分界(前端那部分在下面的 node harness 里验)
+
+
+def _orb_capsule(orb_position="follow"):
+    """开着常驻球模式、带一个假句柄的胶囊。"""
+    cap = _make_region_capsule()
+    cap.controller = types.SimpleNamespace(
+        config=FakeConfig(floating_orb=True, orb_position=orb_position))
+    return cap
+
+
+def test_orb_mode_is_off_by_default():
+    """默认关:老用户看到的还是"按热键才弹胶囊"。"""
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig())
+
+    assert cap._orb_enabled() is False
+
+
+def test_frontend_ready_pushes_the_orb_mode():
+    """前端晚就绪时要补推一次常驻球模式。"""
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(floating_orb=True))
+
+    cap._on_frontend_ready()
+
+    assert "setOrbMode" in cap._window.methods()
+
+
+def test_orb_click_restores_the_focus_before_recording(monkeypatch):
+    """点悬浮球开始录音:**先**把前台还给用户,再开始录音。
+
+    这是焦点陷阱:鼠标点在 WebView2 的子窗口上会激活整棵窗口树,
+    前台被胶囊抢走。注入靠"粘贴到前台窗口",不还回去的话,这一轮
+    识别完的文字会贴到胶囊自己身上,而不是用户的输入框里。
+    """
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _orb_capsule()
+    ctrl = _FakeController()
+    cap.controller = ctrl
+    cap._last_foreground = 4321        # 用户原来所在的窗口
+
+    restored = []
+    monkeypatch.setattr(cap_mod, "get_foreground_window", lambda: 777)
+    monkeypatch.setattr(cap_mod, "restore_foreground",
+                        lambda target: restored.append(target))
+    # 记下"开始录音"发生时,前台已经归还了几次
+    order = []
+    original_start = ctrl.start_recording
+
+    def start():
+        order.append(("start", len(restored)))
+        original_start()
+
+    monkeypatch.setattr(ctrl, "start_recording", start)
+
+    cap_mod._CapsuleApi(cap).start_recording()
+
+    assert restored == [4321]
+    # 归还焦点在前,开始录音在后
+    assert order == [("start", 1)]
+    assert ctrl.started == 1
+    # 注入落点也记下了 —— 文字要贴到用户那个窗口
+    assert cap._target_hwnd == 4321
+
+
+def test_orb_drag_end_saves_the_orb_position(monkeypatch):
+    """拖球松手:记住**球**的位置(相对工作区的逻辑偏移 + 显示器设备名)。
+
+    只有**自定义档**才记 —— 跟随档下球的位置由光标决定,轮询线程
+    一直在挪窗口,那个"挪过"不是用户拖的。
+    """
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _orb_capsule(orb_position="custom")
+    # 窗口摆在 (100, 200),物理 512×260,缩放 1.0
+    monkeypatch.setattr(cap_mod, "get_window_rect",
+                        lambda hwnd: (100, 200, 612, 460))
+    monkeypatch.setattr(VoiceCapsule, "_monitor_at_window",
+                        lambda self: types.SimpleNamespace(
+                            work_area=(0, 0, 1920, 1040),
+                            scale=1.0,
+                            device="\\\\.\\DISPLAY1"))
+
+    cap_mod._CapsuleApi(cap).end_drag()
+
+    # 球在窗口的底边居中处:左边 = 100 + (512-40)//2 = 336,
+    #                     下边 = 460 - (10 + 40) = 410
+    assert cap.controller.config.orb_geometry == "336,410"
+    assert cap.controller.config.orb_monitor == "\\\\.\\DISPLAY1"
+    assert cap.controller.config.saves == 1
+
+
+def test_orb_click_without_movement_does_not_save_the_position(monkeypatch):
+    """点一下(没拖动)不该写配置 —— 位置没变,存了也是白存。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _orb_capsule()
+    monkeypatch.setattr(cap_mod, "get_window_rect",
+                        lambda hwnd: (100, 200, 612, 460))
+
+    cap_mod._CapsuleApi(cap).begin_drag()
+    cap_mod._CapsuleApi(cap).end_drag()
+
+    assert cap.controller.config.orb_geometry == ""
+    assert cap.controller.config.saves == 0
+
+
+def test_orb_drag_that_moved_saves_the_position(monkeypatch):
+    """真的挪过了才存位置。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _orb_capsule(orb_position="custom")
+    rect = [(100, 200, 612, 460)]
+    monkeypatch.setattr(cap_mod, "get_window_rect", lambda hwnd: rect[0])
+    monkeypatch.setattr(VoiceCapsule, "_monitor_at_window",
+                        lambda self: types.SimpleNamespace(
+                            work_area=(0, 0, 1920, 1040),
+                            scale=1.0,
+                            device="\\\\.\\DISPLAY1"))
+
+    cap_mod._CapsuleApi(cap).begin_drag()      # 起手位置
+    rect[0] = (150, 260, 662, 520)             # 窗口被挪走了
+    cap_mod._CapsuleApi(cap).end_drag()
+
+    assert cap.controller.config.orb_geometry != ""
+    assert cap.controller.config.saves == 1
+
+
+def test_orb_hide_keeps_the_window_visible(monkeypatch):
+    """常驻模式:一轮结束后胶囊收成球,窗口**不藏**(球还在等着)。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _orb_capsule()
+    cap._want_visible = True
+    hidden = []
+    monkeypatch.setattr(cap_mod, "hide_window",
+                        lambda hwnd: hidden.append(hwnd) or True)
+
+    cap._hide()
+
+    assert cap._want_visible is False
+    assert hidden == []            # 窗口没被藏
+
+
+def test_capsule_hide_hides_the_window_outside_orb_mode(monkeypatch):
+    """非常驻模式:老规矩 —— 一轮结束就藏窗口。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_region_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig())
+    hidden = []
+    monkeypatch.setattr(cap_mod, "hide_window",
+                        lambda hwnd: hidden.append(hwnd) or True)
+
+    cap._hide()
+
+    assert hidden == [777]
+
+
+def test_orb_toggle_event_shows_and_hides_the_ball(monkeypatch):
+    """面板拨开关 → 胶囊把球显示出来 / 收回去。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_region_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig())
+    shown = []
+    monkeypatch.setattr(VoiceCapsule, "_show_orb",
+                        lambda self: shown.append("show") or True)
+    monkeypatch.setattr(VoiceCapsule, "_hide_orb",
+                        lambda self: shown.append("hide") or True)
+
+    cap.handle_event(UIEvent(kind="orb_enabled", text="1"))
+    cap.handle_event(UIEvent(kind="orb_enabled", text="0"))
+
+    assert shown == ["show", "hide"]
+    assert "setOrbMode" in cap._window.methods()
+
+
+def test_hide_delay_is_pushed_only_in_orb_mode():
+    """常驻模式:前端自己收起胶囊,所以 Python 要把"停多久"告诉它。"""
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig())
+
+    cap.handle_event(UIEvent(kind="result", text="你好"))
+    assert "setHideDelay" not in cap._window.methods()
+
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(floating_orb=True))
+    cap.handle_event(UIEvent(kind="result", text="你好"))
+    assert "setHideDelay" in cap._window.methods()
+
+
+# ---------------- 常驻悬浮球:前端(node 跑真实 JS) ----------------
+
+
+def test_capsule_orb_click_starts_recording():
+    """点球(位移在阈值内)→ 开始录音,不动位置。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 102, "screenY": 201},
+        {"op": "mouse", "type": "mouseup", "screenX": 102, "screenY": 201},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "start_recording" in names
+    assert "move_orb" not in names
+
+
+def test_capsule_orb_drag_moves_without_recording():
+    """拖球(超过阈值)→ 挪位置,不开始录音。
+
+    跟随档下球**拖不动**(位置由光标决定),所以要先切到自定义档。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setOrbPosition", "args": ["custom"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 150, "screenY": 260},
+        {"op": "mouse", "type": "mouseup", "screenX": 150, "screenY": 260},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "move_orb" in names
+    assert "start_recording" not in names
+    moves = [c for c in data["calls"] if c["name"] == "move_orb"]
+    # 绝对目标位置:起点窗口位置(0,0) + 鼠标位移
+    assert moves[0]["args"] == [50, 60]
+
+
+def test_capsule_orb_drag_threshold_is_five_pixels():
+    """阈值:位移 5px 以内算点击,超过 5px 算拖动。"""
+    click = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setOrbPosition", "args": ["custom"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 105, "screenY": 200},
+        {"op": "mouse", "type": "mouseup", "screenX": 105, "screenY": 200},
+    ])
+    names = [c["name"] for c in click["calls"]]
+    assert "start_recording" in names
+    assert "move_orb" not in names
+
+    drag = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setOrbPosition", "args": ["custom"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 106, "screenY": 200},
+        {"op": "mouse", "type": "mouseup", "screenX": 106, "screenY": 200},
+    ])
+    names = [c["name"] for c in drag["calls"]]
+    assert "move_orb" in names
+    assert "start_recording" not in names
+
+
+def test_capsule_orb_follow_mode_is_not_draggable():
+    """跟随档:球**拖不动** —— 位置由光标决定,拖了也会被拉回去。
+
+    但**点击**仍然要能开始录音 —— 球就是录音入口,这个不能砍。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setOrbPosition", "args": ["follow"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 150, "screenY": 260},
+        {"op": "mouse", "type": "mouseup", "screenX": 150, "screenY": 260},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "move_orb" not in names, "跟随档下不该挪球"
+    assert "start_recording" not in names, "挪了就不该当成点击"
+
+
+def test_capsule_orb_follow_mode_click_starts_recording():
+    """跟随档:点一下(没拖)照样开始录音。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setOrbPosition", "args": ["follow"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mouseup", "screenX": 100, "screenY": 200},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "start_recording" in names
+
+
+def test_capsule_orb_ignores_clicks_when_the_mode_is_off():
+    """常驻模式关着:球不可点,更不该触发录音。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mouseup", "screenX": 100, "screenY": 200},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "start_recording" not in names
+
+
+def test_capsule_orb_expanded_pill_does_not_start_a_new_recording():
+    """展开成胶囊后再点它:不能又开一轮录音,也不该按下就当拖拽。
+
+    展开态的胶囊不是拖拽把手(位置归球)。要是按下就调 begin_drag,
+    守卫在按住期间**不归还前台** —— 按住不放的话前台就留在胶囊上,
+    用户的键盘输入会打到胶囊里(功能级问题,不是观感问题)。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setState", "args": ["recording"]},
+        {"op": "advance", "ms": 100},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mouseup", "screenX": 100, "screenY": 200},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "start_recording" not in names
+    assert "begin_drag" not in names
+
+
+def test_capsule_orb_expands_into_the_pill_when_recording():
+    """常驻模式:开始录音 → 球展开成胶囊。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "resetForRecording", "args": []},
+    ])
+
+    assert "orb-mode" in data["body"]
+    assert "orb-expanded" in data["body"]
+    assert "orb-idle" not in data["body"]
+
+
+def test_capsule_orb_collapses_back_to_the_ball_after_the_hide_delay():
+    """一轮结束 → 停够时间 → 收回成球(继续常驻等下一轮)。"""
+    steps = [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setHideDelay", "args": [1500]},
+        {"op": "call", "fn": "resetForRecording", "args": []},
+        {"op": "call", "fn": "setResult", "args": ["你好"]},
+    ]
+
+    still = _run_js_harness("capsule_js_harness.js",
+                            steps + [{"op": "advance", "ms": 1000}])
+    assert "orb-expanded" in still["body"]
+
+    done = _run_js_harness("capsule_js_harness.js",
+                           steps + [{"op": "advance", "ms": 2000}])
+    assert "orb-idle" in done["body"]
+    assert "orb-expanded" not in done["body"]
+
+
+def test_capsule_orb_reports_only_the_ball_as_the_hit_region():
+    """常驻模式待机:命中区只有球那一小块 —— 大片空白不能吃底下的点击。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "advance", "ms": 100},
+    ])
+
+    reports = [c["args"][0] for c in data["calls"] if c["name"] == "update_regions"]
+    assert reports
+    last = reports[-1]
+    # 球**就是**收窄的胶囊:命中区报的是那颗 40×40 的球
+    # (位置和展开态的胶囊同轴 —— 都在窗口底边居中)
+    assert last["pill"] == [170, 120, 40, 40]
+    assert last["textbar"][2] == 0
+
+
+def test_capsule_orb_reports_the_pill_when_expanded():
+    """展开成胶囊后:命中区回到"文字条 + 胶囊"。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "resetForRecording", "args": []},
+        {"op": "advance", "ms": 100},
+    ])
+
+    reports = [c["args"][0] for c in data["calls"] if c["name"] == "update_regions"]
+    assert reports
+    last = reports[-1]
+    assert last["pill"][2] > 0
+
+
+# ---------------- 面板前端:常驻悬浮球开关 ----------------
+
+
+def test_panel_orb_toggle_notifies_python():
+    """拨悬浮球开关:本地立刻生效 + 通知 Python 存档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "toggle", "id": "orbToggle", "checked": True}])
+
+    assert data["orb"] is True
+    orbs = [c for c in data["calls"] if c["name"] == "set_orb"]
+    assert orbs and orbs[0]["args"] == [True]
+
+
+def test_panel_orb_switch_follows_python():
+    """Python 推 setOrbEnabled(true) → 开关拨到开。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setOrbEnabled", "args": [True]}])
+
+    assert data["orb"] is True
+
+
+def test_panel_orb_position_click_notifies_python():
+    """拨球的位置档位:本地立刻生效 + 通知 Python 存档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "click", "group": "orbPositionSeg", "index": 2}])
+
+    assert data["active"]["orbPosition"] == "custom"
+    calls = [c for c in data["calls"] if c["name"] == "set_orb_position"]
+    assert calls and calls[0]["args"] == ["custom"]
+
+
+def test_panel_orb_position_pinned_click_notifies_python():
+    """「记住位置」档:点它同样本地生效 + 通知 Python。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "click", "group": "orbPositionSeg", "index": 1}])
+
+    assert data["active"]["orbPosition"] == "pinned"
+    calls = [c for c in data["calls"] if c["name"] == "set_orb_position"]
+    assert calls and calls[0]["args"] == ["pinned"]
+
+
+def test_panel_orb_position_follows_python():
+    """Python 推 setOrbPosition('custom') → 档位拨到自定义。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setOrbPosition", "args": ["custom"]}])
+
+    assert data["active"]["orbPosition"] == "custom"
+
+
+def test_panel_orb_position_follows_python_to_pinned():
+    """Python 推 setOrbPosition('pinned') → 档位拨到记住位置。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setOrbPosition", "args": ["pinned"]}])
+
+    assert data["active"]["orbPosition"] == "pinned"
+
+
+def test_set_orb_position_saves_config_and_pushes_to_both_windows():
+    """面板改球的位置档位:存配置 → 推面板前端 → 推胶囊。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_orb_position("custom")
+
+    assert panel.controller.config.orb_position == "custom"
+    assert panel.controller.config.saves == 1
+
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert "setOrbPosition" in panel._window.methods()   # 面板前端
+    assert sink.events[-1].kind == "orb_position"         # 胶囊
+
+
+def test_set_orb_position_rejects_unknown_mode():
+    """写坏的档位不能传下去 —— 按 follow 处理。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_orb_position("solarized")
+
+    assert panel.controller.config.orb_position == "follow"
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert sink.events[-1].text == "follow"
+
+
+def test_panel_orb_switch_hides_the_unused_position_row():
+    """球开 → 只显示「球位置」;球关 → 只显示「位置」。
+
+    两个选项同屏但只有一个生效(常驻球开着时胶囊的位置由球决定),
+    是被点名的设计混乱 —— 现在任何时刻屏幕上只有起作用的那个。
+    """
+    on = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setOrbEnabled", "args": [True]}])
+    assert on["rows"] == {"position": True, "orbPosition": False}
+
+    off = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setOrbEnabled", "args": [False]}])
+    assert off["rows"] == {"position": False, "orbPosition": True}
+
+
+def test_panel_rows_default_to_the_orb_off_layout():
+    """初始(球关):「位置」显示、「球位置」隐藏 —— 和 HTML 初始一致。"""
+    data = _run_js_harness("panel_js_harness.js", [])
+    assert data["rows"] == {"position": False, "orbPosition": True}
+
+
+# ---------------- 动效与命中区:描边被裁掉的坑 ----------------
+#
+# 展开/收起动效期间,胶囊带着 CSS transform(translateY / scale)。
+# getBoundingClientRect() 会把 transform 算进去 —— 量到的是"动画中"的
+# 矩形。Python 侧按它裁窗口(SetWindowRgn),等于按变形后的形状去裁,
+# 胶囊描边的两端就被切掉了;动画停下来后又没人重报,裁形就永久停在
+# 那个错位状态(实测:上下边线在两端断开)。
+#
+# 所以 rectOf 必须量**未变换**的矩形(offset* 系列不受 transform 影响),
+# 并且动效结束时再补报一次。
+
+
+def test_region_report_ignores_css_transform():
+    """胶囊带着 transform 时,上报的命中区仍是**未变形**的矩形。
+
+    这条守护的是"胶囊描边在两端断开"那个真机 bug:
+    按变形后的矩形裁窗口,描边两端就被 SetWindowRgn 切掉了。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        # 给胶囊挂上展开动效里的 transform:缩小 10% + 下移 14px
+        {"op": "setTransform", "target": "pill", "scale": 0.9, "dy": 14},
+        {"op": "call", "fn": "setState", "args": ["recording"]},
+        {"op": "advance", "ms": 200},
+    ])
+
+    reports = [c["args"][0] for c in data["calls"] if c["name"] == "update_regions"]
+    assert reports, "应该上报过命中区"
+    # 未变形的胶囊:180×40 @ (100,120)
+    assert reports[-1]["pill"] == [100, 120, 180, 40]
+
+
+def test_region_report_ignores_transform_on_the_ball_shaped_pill():
+    """球形态的胶囊也一样:带着 scale 时,上报的仍是静止尺寸的球。
+
+    球现在**就是**收窄的胶囊,所以这条守护的是"整颗胶囊带 transform 时,
+    命中区仍然和视觉形状一致" —— 量到变形后的矩形,描边就会被
+    SetWindowRgn 切掉(真机症状:球的上半截多一条白线)。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "setTransform", "target": "pill", "scale": 1.28},
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "advance", "ms": 200},
+    ])
+
+    reports = [c["args"][0] for c in data["calls"] if c["name"] == "update_regions"]
+    assert reports
+    assert reports[-1]["pill"] == [170, 120, 40, 40]
+
+
+def test_the_hit_region_is_reported_while_the_shape_morphs():
+    """球 ↔ 胶囊的形变期间要**持续**上报命中区。
+
+    形变是 0.3s 的宽度过渡,期间布局宽度每帧都在变。只在头尾各报
+    一次的话,中间那 0.3s 里窗口形状停在"球"那一小块,胶囊多出来的
+    那部分点不到(会穿透到底下的应用)。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "advance", "ms": 200},
+    ])
+
+    reports = _region_reports(data)
+    assert len(reports) >= 3, "形变期间要持续上报命中区"
+    # 球形态下报的一定是那颗 40×40 的球
+    assert reports[-1]["pill"] == [170, 120, 40, 40]
+
+
+def test_expanding_reports_the_region_again_after_the_motion():
+    """展开动效结束后要**再报一次**命中区。
+
+    动效期间上报的是过渡中的形状;停下来之后没人重报,
+    窗口形状就永远停在错位状态(实测:描边两端断着)。
+    """
+    before = len(_region_reports(_run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setState", "args": ["recording"]},
+        {"op": "advance", "ms": 100},
+    ])))
+
+    # 动效停下来(定时器兜底:520ms > delay .12s + duration .28s)
+    after = len(_region_reports(_run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "call", "fn": "setState", "args": ["recording"]},
+        {"op": "advance", "ms": 100},
+        {"op": "advance", "ms": 600},
+    ])))
+
+    assert after > before, "动效结束后必须再报一次命中区"
+
+
+def test_transition_end_triggers_a_region_report():
+    """transitionend 也要触发重报 —— 动效真正停下来的那一刻。
+
+    定时器只是兜底(prefers-reduced-motion 下压根没有 transitionend)。
+    """
+    before = len(_region_reports(_run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "advance", "ms": 200},
+    ])))
+
+    after = len(_region_reports(_run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setOrbMode", "args": [True]},
+        {"op": "advance", "ms": 200},
+        {"op": "fireTransitionEnd", "target": "pill"},
+    ])))
+
+    assert after > before, "transitionend 必须触发一次命中区重报"
+
+
+def _region_reports(data: dict) -> list:
+    """从 harness 输出里挑出所有命中区上报。"""
+    return [c["args"][0] for c in data["calls"] if c["name"] == "update_regions"]

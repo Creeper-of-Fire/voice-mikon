@@ -5,11 +5,13 @@
     ParameterError: Audio data must be floating-point)
   - int16 转 float32 后刻度要正确(除 32768,落在 ±1)
   - 空音频不报错
+  - 卸载模型要真的把引用断掉(切到网络后端时释放显存靠它)
 """
 
 import numpy as np
 import pytest
 
+from qwen3_voice.asr.base import ASRBackend
 from qwen3_voice.asr.engine import ASREngine
 
 
@@ -152,9 +154,55 @@ def test_hotwords_file_missing_is_fine(tmp_path):
     assert e._build_context() == "Vocabulary: X."
 
 
-def test_hotwords_file_comments_ignored(tmp_path):
-    """词表文件里的注释行和空行不算词。"""
-    f = tmp_path / "hotwords.txt"
-    f.write_text("# 注释\n\nA\n# 又一条\n", encoding="utf-8")
-    e = ASREngine(model_root="dummy", hotwords_file=f)
-    assert e._build_context() == "Vocabulary: A."
+# 词表文件里"注释行/空行不算词"这条解析语义归 ``tests/test_hotwords.py``
+# 管(``load_hotwords_file`` 才是解析它的地方);
+# 这里只管"引擎怎么把词表和列表合并成 context"。
+
+
+# ---------------- 后端抽象 ----------------
+
+def test_local_backend_implements_the_common_interface(engine):
+    """本地后端属于统一抽象 —— 控制器才敢把它和网络后端互换。"""
+    assert isinstance(engine, ASRBackend)
+    for name in ("transcribe", "load", "unload"):
+        assert callable(getattr(engine, name))
+    assert isinstance(engine.loaded, bool)
+
+
+def test_local_backend_supports_preview(engine):
+    """本地后端支持实时预览(分句 + 逐句识别)。"""
+    assert engine.supports_preview is True
+
+
+def test_unload_releases_the_model(engine):
+    """卸载要真的把模型引用断掉 —— 切到网络后端时靠它释放显存。"""
+    engine._model = object()
+    assert engine.loaded is True
+
+    engine.unload()
+
+    assert engine.loaded is False
+    assert engine._model is None
+
+
+def test_unload_without_model_is_safe(engine):
+    """没加载就卸载也不该炸。"""
+    engine.unload()
+    assert engine.loaded is False
+
+
+def test_hotword_context_is_identical_for_both_backends(tmp_path):
+    """本地和网络后端拼出来的热词上下文**必须一模一样**。
+
+    本地走 qwen_asr 的 context 参数,网络走 system prompt ——
+    格式不同的话,同一个词表在两种后端上的效果就不可比了。
+    """
+    from qwen3_voice.asr.network import DashScopeBackend
+
+    local = ASREngine(model_root="dummy", hotwords=["Qwen3-ASR", "终极真身"],
+                      hotwords_file=tmp_path / "no_hotwords.txt")
+    net = DashScopeBackend(hotwords=["Qwen3-ASR", "终极真身"],
+                            hotwords_file=tmp_path / "no_hotwords.txt")
+
+    assert local._build_context() == net._build_context()
+    assert local._build_context() == "Vocabulary: Qwen3-ASR, 终极真身."

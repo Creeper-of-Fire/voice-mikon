@@ -134,7 +134,17 @@ els.positionSeg = makeSegGroup('positionSeg', [
   { 'data-position-mode': 'bottom', value: 'bottom' },
   { 'data-position-mode': 'custom', value: 'custom' }
 ]);
+/* 悬浮球的位置档位:跟随输入 / 记住位置 / 常驻 三档 */
+els.orbPositionSeg = makeSegGroup('orbPositionSeg', [
+  { 'data-orb-position': 'follow', value: 'follow' },
+  { 'data-orb-position': 'pinned', value: 'pinned' },
+  { 'data-orb-position': 'custom', value: 'custom' }
+]);
 els.previewToggle = makeEl('previewToggle');
+els.orbToggle = makeEl('orbToggle');
+/* 「位置 / 球位置」两行(互斥显示,跟悬浮球开关联动) */
+els.positionRow = makeEl('positionRow');
+els.orbPositionRow = makeEl('orbPositionRow');
 
 const htmlAttrs = {};
 
@@ -164,6 +174,10 @@ global.pywebview = {
       calls.push({ name: 'set_capsule_position', args: [mode] });
     },
     set_preview: (on) => { calls.push({ name: 'set_preview', args: [on] }); },
+    set_orb: (on) => { calls.push({ name: 'set_orb', args: [on] }); },
+    set_orb_position: (mode) => {
+      calls.push({ name: 'set_orb_position', args: [mode] });
+    },
     close_panel: () => { calls.push({ name: 'close_panel', args: [] }); },
     quit_app: () => { calls.push({ name: 'quit_app', args: [] }); }
   }
@@ -233,7 +247,13 @@ process.stdout.write(JSON.stringify({
   active: {
     model: activeOf(els.modelSeg, 'data-model'),
     theme: activeOf(els.themeSeg, 'data-theme-mode'),
-    position: activeOf(els.positionSeg, 'data-position-mode')
+    position: activeOf(els.positionSeg, 'data-position-mode'),
+    orbPosition: activeOf(els.orbPositionSeg, 'data-orb-position')
   },
-  preview: !!els.previewToggle.checked
+  preview: !!els.previewToggle.checked,
+  orb: !!els.orbToggle.checked,
+  rows: {
+    position: !!els.positionRow.hidden,
+    orbPosition: !!els.orbPositionRow.hidden
+  }
 }));

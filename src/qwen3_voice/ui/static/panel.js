@@ -8,10 +8,12 @@
  *
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
  *   Python → JS : window.__qwen.setState / setModel / setHotkey / setTheme
- *                 / setCapsulePosition / setPreviewEnabled
+ *                 / setCapsulePosition / setPreviewEnabled / setOrbEnabled
+ *                 / setOrbPosition / setBackend / setNotice
  *   JS → Python : window.pywebview.api.ready / switch_model / get_snapshot
  *                 / move_window / close_panel / quit_app / set_theme
- *                 / set_capsule_position / set_preview
+ *                 / set_capsule_position / set_preview / set_orb
+ *                 / set_orb_position / switch_backend
  */
 (function () {
   'use strict';
@@ -27,6 +29,17 @@
   // 胶囊位置档位：follow = 跟随输入光标,bottom = 固定底部,custom = 自定义
   var POSITION_MODES = ['follow', 'bottom', 'custom'];
 
+  // 识别后端：local = 本地模型,dashscope = 网络 API（互斥）
+  var BACKENDS = ['local', 'dashscope'];
+
+  // 网络模式下的行为差异说明 —— 必须写出来，不能静默失效
+  var NETWORK_HINT =
+    '网络后端不支持实时预览：停止录音后一次性识别，' +
+    '延迟取决于网络；本地模型此时已卸载，不占显存。';
+
+  // 提示语自动消失的时间（毫秒）
+  var NOTICE_MS = 8000;
+
   // Python 还没推热键时的兜底文案
   var DEFAULT_HOTKEY = 'Ctrl+Alt+Space';
 
@@ -38,10 +51,14 @@
     hotkey: '',             // 当前热键（原始字符串，不含"热键"前缀）
     theme: 'auto',          // 当前主题档位
     position: 'follow',     // 当前胶囊位置档位
-    preview: true           // 实时预览文字条是否显示
+    preview: true,          // 实时预览文字条是否显示
+    orb: false,             // 常驻悬浮球是否打开
+    orbPosition: 'follow',  // 悬浮球位置档位(follow / custom)
+    backend: 'local'        // 当前识别后端
   };
 
   var el = {};             // DOM 缓存
+  var noticeTimer = 0;     // 提示语自动消失的定时器
 
   /* ==================== 小工具 ==================== */
 
@@ -203,6 +220,120 @@
     }
   }
 
+  /* 常驻悬浮球开关:打开后屏幕上常驻一颗小球,点它开始录音,
+   * 拖它挪位置;关掉后回到"按热键才弹胶囊"的老样子。 */
+  function applyOrb(enabled) {
+    ensureDom();
+    ui.orb = !!enabled;
+    if (el.orbToggle) {
+      el.orbToggle.checked = ui.orb;
+    }
+    applyPositionRows();
+  }
+
+  /* 「位置」(胶囊)和「球位置」两行**互斥显示**。
+   *
+   * 常驻球开着时,胶囊的位置由球决定,"位置"那三档根本不起作用 ——
+   * 与其让两个选项同屏、只有一个生效,不如任何时刻只显示起作用的
+   * 那一个。球开 → 显示「球位置」;球关 → 显示「位置」。 */
+  function applyPositionRows() {
+    if (el.positionRow) {
+      el.positionRow.hidden = ui.orb;
+    }
+    if (el.orbPositionRow) {
+      el.orbPositionRow.hidden = !ui.orb;
+    }
+  }
+
+  /* 悬浮球的位置档位:follow(跟着输入光标) / pinned(记住的位置,
+   * 聚焦才显) / custom(记住的位置,常驻)。
+   *
+   * 和胶囊的「位置」是两套独立设计(档位名不同、含义不同):
+   * pinned 和 custom 共用一份记住的位置,差别只在显隐 ——
+   * pinned 只在光标真的聚焦到输入处时露脸,custom 一直在。 */
+  function applyOrbPosition(mode) {
+    ensureDom();
+    var known = ['follow', 'pinned', 'custom'];
+    var m = known.indexOf(mode) >= 0 ? mode : 'follow';
+    ui.orbPosition = m;
+
+    if (el.orbPositionSeg) {
+      var items = el.orbPositionSeg.querySelectorAll('.seg-item');
+      for (var i = 0; i < items.length; i++) {
+        var isActive = items[i].getAttribute('data-orb-position') === m;
+        items[i].classList.toggle('is-active', isActive);
+      }
+    }
+  }
+
+  /* 识别后端:local(本地模型)/ dashscope(网络 API)。
+   *
+   * 两者**互斥**:切到网络会卸载本地模型(释放显存),切回来再重新加载。
+   * 网络模式下:
+   *   - "模型"那一档置灰 —— 本地模型根本没加载,调它没有意义
+   *   - "预览"开关置灰 —— 网络端点是整段请求,做不了逐句实时预览
+   * 两处都必须**明确告诉用户**,不能静默失效。 */
+  function applyBackend(kind) {
+    ensureDom();
+    var k = BACKENDS.indexOf(kind) >= 0 ? kind : 'local';
+    ui.backend = k;
+
+    if (el.backendSeg) {
+      var items = el.backendSeg.querySelectorAll('.seg-item');
+      for (var i = 0; i < items.length; i++) {
+        var isActive = items[i].getAttribute('data-backend') === k;
+        items[i].classList.toggle('is-active', isActive);
+      }
+    }
+
+    var isNet = (k === 'dashscope');
+
+    if (el.modelRow) {
+      el.modelRow.classList.toggle('is-disabled', isNet);
+    }
+    if (el.modelSeg) {
+      var mItems = el.modelSeg.querySelectorAll('.seg-item');
+      for (var j = 0; j < mItems.length; j++) {
+        mItems[j].disabled = isNet;
+      }
+    }
+    if (el.previewRow) {
+      el.previewRow.classList.toggle('is-disabled', isNet);
+    }
+    if (el.previewToggle) {
+      el.previewToggle.disabled = isNet;
+    }
+    if (el.hint) {
+      el.hint.textContent = isNet ? NETWORK_HINT : '';
+      if ('hidden' in el.hint) {
+        el.hint.hidden = !isNet;
+      }
+    }
+  }
+
+  /* 提示语(切换后端的进展/拒绝/失败)。过一会儿自己淡掉,
+   * 不占地方也不挡住用户点别的。 */
+  function applyNotice(text) {
+    ensureDom();
+    if (!el.notice) {
+      return;
+    }
+    var s = text == null ? '' : String(text);
+    el.notice.textContent = s;
+    if (noticeTimer) {
+      clearTimeout(noticeTimer);
+      noticeTimer = 0;
+    }
+    if (s) {
+      noticeTimer = setTimeout(function () {
+        if (el.notice) {
+          el.notice.textContent = '';
+        }
+        noticeTimer = 0;
+      }, NOTICE_MS);
+    }
+  }
+
   /* ==================== 拖动 ==================== */
 
   /* 拖动 = 发**绝对目标位置**,不是增量:
@@ -361,6 +492,48 @@
         callApi('set_preview', on);
       });
     }
+
+    // 常驻悬浮球开关
+    if (el.orbToggle) {
+      el.orbToggle.addEventListener('change', function () {
+        var on = !!el.orbToggle.checked;
+        applyOrb(on);                 // 先本地生效，Python 随后会用 setOrbEnabled 校正
+        callApi('set_orb', on);
+      });
+    }
+
+    // 悬浮球的位置档位
+    if (el.orbPositionSeg) {
+      el.orbPositionSeg.addEventListener('click', function (e) {
+        var item = e.target && e.target.closest ? e.target.closest('.seg-item') : null;
+        if (!item) {
+          return;
+        }
+        var mode = item.getAttribute('data-orb-position');
+        if (!mode) {
+          return;
+        }
+        applyOrbPosition(mode);   // 先本地高亮，Python 随后会用 setOrbPosition 校正
+        callApi('set_orb_position', mode);
+      });
+    }
+
+    // 识别后端切换（本地 ↔ 网络）。切换在 Python 侧的后台线程里做，
+    // 成功后 Python 会用 setBackend 校正档位。
+    if (el.backendSeg) {
+      el.backendSeg.addEventListener('click', function (e) {
+        var item = e.target && e.target.closest ? e.target.closest('.seg-item') : null;
+        if (!item) {
+          return;
+        }
+        var kind = item.getAttribute('data-backend');
+        if (!kind) {
+          return;
+        }
+        applyBackend(kind);   // 先本地高亮，Python 随后会用 setBackend 校正
+        callApi('switch_backend', kind);
+      });
+    }
   }
 
   /* ==================== 对外接口 ==================== */
@@ -384,6 +557,18 @@
     },
     setPreviewEnabled: function (enabled) {
       applyPreview(enabled);
+    },
+    setOrbEnabled: function (enabled) {
+      applyOrb(enabled);
+    },
+    setOrbPosition: function (mode) {
+      applyOrbPosition(mode);
+    },
+    setBackend: function (kind) {
+      applyBackend(kind);
+    },
+    setNotice: function (text) {
+      applyNotice(text);
     }
   };
 
@@ -395,11 +580,20 @@
     el.titlebar = $('titlebar');
     el.closeBtn = $('closeBtn');
     el.quitBtn = $('quitBtn');
+    el.backendSeg = $('backendSeg');
+    el.modelRow = $('modelRow');
     el.modelSeg = $('modelSeg');
     el.themeSeg = $('themeSeg');
     el.positionSeg = $('positionSeg');
+    el.previewRow = $('previewRow');
     el.previewToggle = $('previewToggle');
+    el.orbToggle = $('orbToggle');
+    el.positionRow = $('positionRow');
+    el.orbPositionRow = $('orbPositionRow');
+    el.orbPositionSeg = $('orbPositionSeg');
     el.hotkey = $('hotkeyLabel');
+    el.hint = $('backendHint');
+    el.notice = $('notice');
   }
 
   // Python 可能在 DOMContentLoaded 之前就推状态，这里做惰性绑定兜底
@@ -418,6 +612,9 @@
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
     applyCapsulePosition('follow');   // 同理:setCapsulePosition 会推真实档位
     applyPreview(true);               // 同理:setPreviewEnabled 会推真实值
+    applyOrb(false);                  // 同理:setOrbEnabled 会推真实值
+    applyOrbPosition('follow');       // 同理:setOrbPosition 会推真实档位
+    applyBackend('local');            // 同理:setBackend 会推真实后端
 
     bindEvents();
 

@@ -1,6 +1,8 @@
 """语音识别引擎。"""
 
-from .engine import ASRError, ASREngine
+from .base import ASRBackend, ASRError
+from .engine import ASREngine, LocalASRBackend
+from .network import DashScopeBackend
 from .streaming import (
     FullPassEngine,
     PreviewEngineKind,
@@ -10,8 +12,11 @@ from .streaming import (
 )
 
 __all__ = [
+    "ASRBackend",
     "ASRError",
     "ASREngine",
+    "LocalASRBackend",
+    "DashScopeBackend",
     "FullPassEngine",
     "PreviewEngineKind",
     "SentencePreviewEngine",

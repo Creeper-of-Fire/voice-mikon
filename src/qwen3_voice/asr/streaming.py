@@ -32,7 +32,7 @@ from typing import Callable, Iterator
 import numpy as np
 
 from ..logging_setup import get_logger
-from .engine import ASREngine
+from .base import ASRBackend
 
 log = get_logger("asr.stream")
 
@@ -88,9 +88,9 @@ class StreamingEngine(abc.ABC):
     线程安全这些共用的东西都放在这里。
     """
 
-    def __init__(self, engine: ASREngine, sample_rate: int = 16000):
+    def __init__(self, engine: ASRBackend, sample_rate: int = 16000):
         """
-        ``engine``   底层的整段识别器(``ASREngine`` 或任何有
+        ``engine``   底层的整段识别器(``ASRBackend`` 或任何有
                      ``transcribe(audio, sample_rate)`` 的对象)
         ``sample_rate`` 喂进来的音频的采样率 —— 必须是**音频的实际采样率**
                      (设备原生率),重采样由 qwen_asr 内部做。
@@ -171,7 +171,7 @@ class StreamingEngine(abc.ABC):
 class FullPassEngine(StreamingEngine):
     """整段引擎:feed 只攒 chunk,close() 时一次性全量识别。
 
-    包装现有的 ``ASREngine.transcribe(audio, rate)``,
+    包装现有的 ``ASRBackend.transcribe(audio, rate)``,
     **最终位用的就是它** —— 所以最终注入的文字和以前完全一样,
     一个字都不会因为预览层改了而变。
 
@@ -183,7 +183,7 @@ class FullPassEngine(StreamingEngine):
       - 给(预览位):按节奏重识别并回调
     """
 
-    def __init__(self, engine: ASREngine, sample_rate: int = 16000,
+    def __init__(self, engine: ASRBackend, sample_rate: int = 16000,
                  partial: Callable[[str], None] | None = None,
                  refresh_seconds: float = FULL_PASS_REFRESH_SECONDS,
                  refresh_factor: float = FULL_PASS_REFRESH_FACTOR,
@@ -289,7 +289,7 @@ class SentencePreviewEngine(StreamingEngine):
     真出现重复了再说。
     """
 
-    def __init__(self, engine: ASREngine, sample_rate: int = 16000,
+    def __init__(self, engine: ASRBackend, sample_rate: int = 16000,
                  partial: Callable[[str], None] | None = None,
                  silence_rms: float = VAD_SILENCE_RMS,
                  silence_seconds: float = SENTENCE_SILENCE_SECONDS,
@@ -439,7 +439,7 @@ class SentencePreviewEngine(StreamingEngine):
 
 
 def make_preview_engine(kind: PreviewEngineKind | str,
-                        engine: ASREngine, sample_rate: int = 16000,
+                        engine: ASRBackend, sample_rate: int = 16000,
                         partial: Callable[[str], None] | None = None) -> StreamingEngine:
     """按 kind 造一颗预览引擎。
 

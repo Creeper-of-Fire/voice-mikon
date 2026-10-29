@@ -158,13 +158,27 @@ function makeEl(id) {
     handlers: {},
     isButton: false,
     parent: null,           // 事件冒泡链(按钮的父级是胶囊)
+    // 模拟中的 CSS transform:{scale, dx, dy}。
+    // 真实浏览器里它会让 getBoundingClientRect() 的返回值缩放/偏移,
+    // 但 offset* 系列**不受影响** —— capsule.js 的 rectOf 正是靠这个
+    // 区别,量出"未变换"的矩形(见 capsule.js 里 rectOf 的说明)。
+    _transform: null,
     addEventListener: (type, fn) => { el.handlers[type] = fn; },
     appendChild: (child) => { el.children.push(child); },
     getBoundingClientRect: () => rectOf(el),
-    offsetWidth: 0,
     // 拖拽时用来判断"点的是不是按钮"(点在 ✕/✓ 上不触发拖动)
     closest: (sel) => (sel === 'button' && el.isButton ? el : null)
   };
+  // offset* 系列:布局尺寸/位置,不受 transform 影响。
+  // 真实浏览器里 capsule.js 的 rectOf 优先用这一组 ——
+  // getBoundingClientRect() 会把 transform 算进去,量到的是"动画中"的
+  // 矩形,Python 按它裁窗口(SetWindowRgn)会把胶囊描边的两端切掉。
+  Object.defineProperties(el, {
+    offsetWidth: { get() { return rectOf(el, true).width; } },
+    offsetHeight: { get() { return rectOf(el, true).height; } },
+    offsetLeft: { get() { return rectOf(el, true).left; } },
+    offsetTop: { get() { return rectOf(el, true).top; } }
+  });
   // 写 textContent = 清掉子节点:波形区靠 `textContent = ''` 清场,
   // 假 DOM 得跟上,不然旧条会越积越多
   Object.defineProperty(el, 'textContent', {
@@ -178,21 +192,50 @@ function makeEl(id) {
 }
 
 /* 文字条的宽度跟着文字长度变,胶囊的宽度跟着阶段变 ——
- * 这样"报上去的是不是**最新**一次测量"才测得出来 */
-function rectOf(el) {
+ * 这样"报上去的是不是**最新**一次测量"才测得出来。
+ *
+ * layout=true 时返回**未变换**的矩形(offset* 系列该拿到的值);
+ * 否则返回**带 transform** 的矩形 —— 真实浏览器里
+ * getBoundingClientRect() 就是这个语义。 */
+function rectOf(el, layout) {
+  let r;
   if (el.id === 'textbar') {
     const text = (els.textbarText && els.textbarText.textContent) || '';
-    return { left: 40, top: 20, width: 100 + text.length * 10, height: 40 };
-  }
-  if (el.id === 'pill') {
+    r = { left: 40, top: 20, width: 100 + text.length * 10, height: 40 };
+  } else if (el.id === 'pill') {
     const recording = el.classList.contains('recording');
-    return { left: 100, top: 120, width: recording ? 180 : 120, height: 40 };
+    if (bodyClasses.contains('orb-mode') && bodyClasses.contains('orb-idle')) {
+      // 球形态:胶囊收成 40×40 的正圆 —— 和展开态**同一横坐标**
+      // (窗口底边居中,见 placement.py 的 orb_inset_x)。
+      // 展开态胶囊是 (100,120,180,40),中心 x = 190 → 球 = (170,120,40,40)。
+      r = { left: 170, top: 120, width: 40, height: 40 };
+    } else {
+      r = { left: 100, top: 120, width: recording ? 180 : 120, height: 40 };
+    }
+  } else {
+    r = { left: 0, top: 0, width: 0, height: 0 };
   }
-  return { left: 0, top: 0, width: 0, height: 0 };
+  if (layout || !el._transform) {
+    return r;
+  }
+  // 带上 transform:scale 绕中心缩放 + translate 偏移 ——
+  // 跟浏览器对 transform 的处理一致(translate 不缩放描边宽度)。
+  const t = el._transform;
+  const s = t.scale == null ? 1 : t.scale;
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const w = r.width * s;
+  const h = r.height * s;
+  return {
+    left: cx - w / 2 + (t.dx || 0),
+    top: cy - h / 2 + (t.dy || 0),
+    width: w,
+    height: h
+  };
 }
 
 ['textbar', 'textbarText', 'pill', 'waveform', 'barLabel', 'barTimer',
-  'cancelBtn', 'okBtn', 'copyBtn'].forEach((id) => { els[id] = makeEl(id); });
+  'cancelBtn', 'okBtn', 'copyBtn', 'barOrb'].forEach((id) => { els[id] = makeEl(id); });
 // ✕ / ✓ / 复制 是按钮:拖拽时点它们不能触发拖动
 els.cancelBtn.isButton = true;
 els.okBtn.isButton = true;
@@ -201,6 +244,8 @@ els.copyBtn.isButton = true;
 els.cancelBtn.parent = els.pill;
 els.okBtn.parent = els.pill;
 els.copyBtn.parent = els.pill;
+// 球形态的图标住在胶囊**里面**(球就是收窄的胶囊,不是另一个元素)
+els.barOrb.parent = els.pill;
 
 global.window = global;
 global.setTimeout = setTimeoutFake;
@@ -258,6 +303,14 @@ global.pywebview = {
     },
     move_capsule: (x, y) => {
       calls.push({ name: 'move_capsule', args: [x, y] });
+      return true;
+    },
+    move_orb: (x, y) => {
+      calls.push({ name: 'move_orb', args: [x, y] });
+      return true;
+    },
+    start_recording: () => {
+      calls.push({ name: 'start_recording', args: [] });
       return true;
     },
     begin_drag: () => { calls.push({ name: 'begin_drag', args: [] }); },
@@ -321,6 +374,26 @@ async function main() {
     } else if (step.op === 'setCopyResult') {
       // 「复制」按钮调 Python 的返回值:成功(true)还是失败(false)
       copyResultValue = !!step.value;
+    } else if (step.op === 'setTransform') {
+      // 给某个元素挂上 CSS transform —— 用来复现"动效期间量到的
+      // 矩形是变形过的"这个真机 bug(见 capsule.js 里 rectOf 的说明)。
+      const el = els[step.target];
+      if (!el) {
+        throw new Error('没有这个元素: ' + step.target);
+      }
+      el._transform = (step.scale == null && !step.dx && !step.dy)
+        ? null
+        : { scale: step.scale, dx: step.dx || 0, dy: step.dy || 0 };
+    } else if (step.op === 'fireTransitionEnd') {
+      // 触发某个元素的 transitionend —— 动效停下来时前端要重报命中区
+      const el = els[step.target];
+      if (!el) {
+        throw new Error('没有这个元素: ' + step.target);
+      }
+      const fn = el.handlers.transitionend;
+      if (typeof fn === 'function') {
+        fn({ type: 'transitionend', target: el });
+      }
     } else if (step.op === 'fire') {
       const fn = listeners[step.event];
       if (typeof fn === 'function') {

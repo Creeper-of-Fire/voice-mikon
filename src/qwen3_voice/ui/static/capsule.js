@@ -22,9 +22,10 @@
  *                 / setPreview / setResult / setError / setCancelled
  *                 / resetForRecording / setTheme
  *                 / setPositionMode / setPreviewEnabled
+ *                 / setOrbMode / setOrbPosition / setHideDelay
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
  *                 / update_regions / move_capsule / begin_drag / end_drag
- *                 / copy_result
+ *                 / copy_result / start_recording / move_orb
  */
 (function () {
   'use strict';
@@ -93,7 +94,12 @@
     positionMode: 'follow', // 胶囊位置档位（只有 custom 模式允许拖动）
     previewEnabled: true,   // 实时预览文字条是否显示
     errorPayload: '',       // 错误态里可复制的原文(注入失败时带着识别文本)
-    copying: false          // 复制进行中(防连点)
+    copying: false,         // 复制进行中(防连点)
+    orbMode: false,         // 常驻悬浮球模式(球形态 ↔ 胶囊形态)
+    expanded: false,        // 球有没有展开成胶囊
+    orbPosition: 'follow',  // 球的位置档位(follow / pinned / custom)
+    orbDraggable: false,    // 只有 follow 不能拖(pinned/custom 的位置归用户管)
+    hideDelay: 1500         // 一轮结束后停多久再收回球(毫秒,Python 推的)
   };
 
   var el = {};              // DOM 缓存
@@ -204,23 +210,51 @@
     if (!r || (r.width <= 0 && r.height <= 0)) {
       return [0, 0, 0, 0];
     }
+    /* 位置和尺寸都取 offset* —— 它们是**布局**尺寸/位置,不受 transform 影响。
+     *
+     * getBoundingClientRect() 会把 transform 一起算进去,量到的是
+     * "动画中"的矩形;Python 侧按它裁窗口(SetWindowRgn),等于按缩小
+     * 后的形状去裁 —— 描边的两端就被切掉了(实测:上下边线在两端断开)。
+     *
+     * 球 ↔ 胶囊的形变现在**没有 transform**(宽度靠 max-width 过渡),
+     * 所以布局尺寸 = 视觉尺寸;但仍取 offset*:万一以后给谁加回
+     * transform,这条规矩就是最后一道保险。
+     *
+     * html/body 都没有 margin 也没有 border,offsetParent 就是视口原点,
+     * offsetLeft/offsetTop 与视口坐标一致。
+     * 拿不到 offset*(老浏览器、测试用的假 DOM)时退回 getBoundingClientRect。 */
+    var w = node.offsetWidth || r.width;
+    var h = node.offsetHeight || r.height;
+    var x = (typeof node.offsetLeft === 'number') ? node.offsetLeft : r.left;
+    var y = (typeof node.offsetTop === 'number') ? node.offsetTop : r.top;
     // 只留两位小数:再多只是给 Python 添乱
     return [
-      Math.round(r.left * 100) / 100,
-      Math.round(r.top * 100) / 100,
-      Math.round(r.width * 100) / 100,
-      Math.round(r.height * 100) / 100
+      Math.round(x * 100) / 100,
+      Math.round(y * 100) / 100,
+      Math.round(w * 100) / 100,
+      Math.round(h * 100) / 100
     ];
   }
 
   function measureRegions() {
+    // 常驻球模式下:待机时窗口里只有"球"那一小块可见 —— 而球**就是**
+    // 胶囊收窄后的样子(40×40),所以命中区报胶囊那一块就够了。
+    //
+    // 文字条报全 0:待机时它虽然还占着布局(opacity:0),但那一块
+    // 是透明的,不能吃底下应用的点击。
+    if (ui.orbMode && !ui.expanded) {
+      return {
+        textbar: [0, 0, 0, 0],
+        pill: rectOf(el.pill)
+      };
+    }
     return {
       textbar: rectOf(el.textbar),
       pill: rectOf(el.pill)
     };
   }
 
-  // 把两块内容的矩形上报给 Python。
+  // 把可见内容的矩形上报给 Python。
   // 节流用"尾沿触发":60ms 内的多次变化合并成一次,而且**最后一次一定
   // 发得出去**(不是掐头)—— 少发一次,窗口形状就停在旧尺寸上。
   function reportRegions() {
@@ -229,7 +263,7 @@
       return;
     }
     var payload = measureRegions();
-    // 页面还没排版(两块内容的尺寸全 0)时不上报:那不是"内容隐藏",
+    // 页面还没排版(可见内容的尺寸全 0)时不上报:那不是"内容隐藏",
     // 是"还没量准",报上去会把可见内容裁没了
     if (payload.textbar[2] <= 0 && payload.textbar[3] <= 0
         && payload.pill[2] <= 0 && payload.pill[3] <= 0) {
@@ -243,6 +277,75 @@
       return;   // 已经在等尾沿了,这次变化跟下一次一起发
     }
     regionTimer = window.setTimeout(reportRegions, REGION_THROTTLE_MS);
+  }
+
+  /* 动效**结束**后要重新量一次命中区。
+   *
+   * 为什么:展开/收起期间胶囊带着 transform(translateY / scale),
+   * getBoundingClientRect() 会把 transform 一起算进去 —— 量到的是
+   * "动画中"的矩形。Python 侧按这个矩形裁窗口(SetWindowRgn),
+   * 等于按缩小 10% 的形状去裁,胶囊描边的两端就被切掉了。
+   * 更糟的是动画停下来之后**没人再上报**,裁形就永久停在那个
+   * 错位状态 —— 实测展开后胶囊上下边线在两端断开。
+   *
+   * 两道保险:
+   *   1. transitionend —— 动画真正停下来的那一刻重报;
+   *   2. 定时器兜底 —— prefers-reduced-motion 下 transition 是 none,
+   *      压根不会触发 transitionend,只能靠定时器。
+   *
+   * 1060ms:形变最长是 .8s(球拉成胶囊),留够余量。 */
+  var REGION_REPORT_AFTER_MOTION_MS = 1060;
+
+  function scheduleRegionReportAfterMotion() {
+    window.setTimeout(reportRegions, REGION_REPORT_AFTER_MOTION_MS);
+  }
+
+  /* 形变期间要**持续**上报命中区。
+   *
+   * 球 ↔ 胶囊是同一个元素长开:宽度在 0.8s 里从 40px 变到 ~190px。
+   * 过渡期间布局宽度每帧都在变(浏览器会重排),命中区也得跟着变 ——
+   * 只在头尾各报一次的话,中间那 0.8s 里窗口形状停在"球"那一小块,
+   * 胶囊多出来的那部分点不到(会穿透到底下的应用)。
+   *
+   * 50ms 一次:够跟得上,又不会把 SetWindowRgn 打成幻灯片。 */
+  var MORPH_REPORT_MS = 50;
+  /* 形变最长 .8s(CSS 里的 max-width 过渡),这个兜底必须比它长 ——
+     早先是 .3s 的过渡配 .45s 的兜底,正好卡在边上。 */
+  var MORPH_REPORT_MAX_MS = 1060;
+  var morphTimer = 0;
+  var morphStopTimer = 0;
+
+  function startMorphReport() {
+    stopMorphReport();
+    morphTimer = window.setInterval(reportRegions, MORPH_REPORT_MS);
+    // 兜底:过渡最长 .8s,1.06s 之后无论如何都停(别让定时器一直跑)
+    morphStopTimer = window.setTimeout(stopMorphReport, MORPH_REPORT_MAX_MS);
+  }
+
+  function stopMorphReport() {
+    if (morphTimer) {
+      window.clearInterval(morphTimer);
+      morphTimer = 0;
+    }
+    if (morphStopTimer) {
+      window.clearTimeout(morphStopTimer);
+      morphStopTimer = 0;
+    }
+  }
+
+  // 动效停下来时重报命中区(见 scheduleRegionReportAfterMotion 的说明)。
+  // 只认**自己**身上的 transitionend —— 事件会冒泡,子元素(按钮)的
+  // 过渡冒上来不算。
+  function bindMotionEnd(node) {
+    if (!node || typeof node.addEventListener !== 'function') {
+      return;
+    }
+    node.addEventListener('transitionend', function (e) {
+      if (e && e.target && e.target !== node) {
+        return;
+      }
+      reportRegions();
+    });
   }
 
   /* ==================== 主题 ==================== */
@@ -294,6 +397,239 @@
       el.textbarText.textContent = '';
     }
     scheduleRegionReport();
+  }
+
+  /* ==================== 常驻悬浮球 ==================== */
+
+  /* 悬浮球和胶囊是**同一个窗口**里的两种形态,而且是**同一个元素**:
+     球就是这颗胶囊收窄成 40px 的正圆(见 capsule.css 的「常驻悬浮球」)。
+     待机时点它 → 胶囊原地横向长开 → 开始录音;录完收回成球,
+     继续常驻等下一轮。
+     常驻模式关掉时,这一整段都不生效(按热键才弹胶囊的老样子)。
+
+     位置:跟随档下球跟着输入光标走;记住位置档在用户拖出来的地方
+    露脸(光标聚焦到输入处才出现);常驻档一直在(两档共用那个
+    记住的位置)。 */
+
+  // 点击与拖动的分界:按下后位移超过这么多**逻辑**像素才算拖动。
+  //
+  // e.screenX/Y 就是 CSS 像素(= 逻辑像素),5px 的意思就是"手抖一下"。
+  // 太小:想点击却被当成拖动,球不响应;太大:想拖动却触发了录音。
+  var ORB_DRAG_THRESHOLD = 5;
+
+  var orbDrag = {
+    pressing: false,
+    dragging: false,
+    startScreenX: 0,
+    startScreenY: 0,
+    startWinX: 0,
+    startWinY: 0
+  };
+
+  // 球形态 ↔ 胶囊形态。动效全在 CSS 里(见 capsule.css 的 orb-mode 一节),
+  // 这里只切 class。
+  function setExpanded(expanded) {
+    ui.expanded = !!expanded;
+    if (document.body) {
+      // 只有常驻球模式才有"球形态 / 胶囊形态"两个 class ——
+      // 非常驻模式下胶囊一直就是胶囊,不该带上 orb-idle。
+      if (ui.orbMode) {
+        document.body.classList.toggle('orb-expanded', ui.expanded);
+        document.body.classList.toggle('orb-idle', !ui.expanded);
+      } else {
+        document.body.classList.remove('orb-expanded');
+        document.body.classList.remove('orb-idle');
+        stopMorphReport();
+      }
+    }
+    // 形状变了 → 命中区要重报。
+    if (ui.orbMode) {
+      // 形变是 0.8s 的宽度过渡,期间宽度一直在变,所以要**持续**上报,
+      // 不能只在头尾报一次(见 startMorphReport)。
+      startMorphReport();
+    }
+    scheduleRegionReport();
+    scheduleRegionReportAfterMotion();
+    // 波形条:收起时立刻停(看不见,白烧 CPU);
+    // 展开时**等形变落定**再启动 —— 条子在动 + 胶囊在变宽,
+    // 两件事叠在一起,在透明窗口上容易糊成一片残影。
+    if (ui.orbMode) {
+      if (ui.expanded) {
+        scheduleWaveformStart();
+      } else {
+        stopBars();
+        barsRunning = false;
+      }
+    }
+  }
+
+  /* 展开后什么时候启动波形条。
+   *
+   * 形变期间胶囊在变宽,这时条子也在动 —— 两件事叠在一起,
+   * 在 WebView2 的透明窗口上容易糊成一片。所以等形变落定
+   * (80% + 余量)再启动条子。
+   *
+   * 注意:**条子本身早就生成好了**(resetForRecording 里先生成),
+   * 占好了宽度 —— 胶囊的宽度一次到位,不会在动画启动前后再跳一截。
+   * 这里延后的只是"条子开始动"这件事。 */
+  var WAVEFORM_START_DELAY_MS = 620;
+
+  function scheduleWaveformStart() {
+    stopBars();
+    barsRunning = false;
+    window.setTimeout(function () {
+      // 这期间可能已经取消录音了(点错了/又按了热键)
+      if (ui.phase === 'recording') {
+        // 条子应该早就生成好了(占宽度);万一没有,补生成一次。
+        if (!pool.length) {
+          resetLevelBars();
+        } else {
+          startBars();
+        }
+        barsRunning = true;
+      }
+    }, WAVEFORM_START_DELAY_MS);
+  }
+
+  /* 球的位置档位(follow / pinned / custom)。
+   *
+   * 只有 follow 档不响应拖动 —— pinned/custom 的位置都归用户管
+   * (共用一份持久化的 orb_geometry),拖了会记住。follow 的位置由
+   * 光标决定,拖了也会被拉回去:直接不响应,光标形状也跟着改掉,
+   * 别给出"能拖"的假象(orb-follow class 给 CSS 压 cursor 用)。 */
+  var ORB_POSITION_MODES = ['follow', 'pinned', 'custom'];
+
+  function applyOrbPosition(mode) {
+    var m = ORB_POSITION_MODES.indexOf(mode) >= 0 ? mode : 'follow';
+    ui.orbPosition = m;
+    ui.orbDraggable = (m !== 'follow');
+    if (document.body) {
+      document.body.classList.toggle('orb-follow', m === 'follow');
+    }
+  }
+
+  function applyOrbMode(enabled) {
+    ui.orbMode = !!enabled;
+    if (document.body) {
+      document.body.classList.toggle('orb-mode', ui.orbMode);
+    }
+    if (!ui.orbMode) {
+      // 关掉常驻模式:回到"按热键才弹胶囊"的老样子
+      cancelCollapse();
+      setExpanded(false);
+      return;
+    }
+    // 开着:球在,胶囊收着(正在录音就展开)
+    setExpanded(ui.state === 'recording');
+    // 命中区立刻重报一次(球的形状和胶囊完全不同,不能等节流)
+    reportRegions();
+  }
+
+  // 一轮结束后停一会儿再收回球。停多久由 Python 推过来
+  // (setHideDelay):错误带着原文时要停 12 秒,让用户有时间点「复制」。
+  var collapseTimer = 0;
+
+  function cancelCollapse() {
+    if (collapseTimer) {
+      window.clearTimeout(collapseTimer);
+      collapseTimer = 0;
+    }
+  }
+
+  function scheduleCollapse() {
+    if (!ui.orbMode) {
+      return;
+    }
+    cancelCollapse();
+    collapseTimer = window.setTimeout(function () {
+      collapseTimer = 0;
+      // 录音中不许收:新一轮刚开始就被上一轮的定时器收掉,胶囊就没了
+      if (ui.orbMode && ui.state !== 'recording') {
+        setExpanded(false);
+      }
+    }, ui.hideDelay);
+  }
+
+  function onOrbMouseDown(e) {
+    if (!ui.orbMode || e.button !== 0) {
+      return;
+    }
+    // 点在按钮上(展开态的 ✕ / ✓ / 复制)不算拖球
+    if (e.target && e.target.closest && e.target.closest('button')) {
+      return;
+    }
+    orbDrag.pressing = true;
+    orbDrag.dragging = false;
+    orbDrag.startScreenX = e.screenX;
+    orbDrag.startScreenY = e.screenY;
+    // 窗口在屏幕上的位置:拖动的基准点(和面板/胶囊同一套机制)
+    orbDrag.startWinX = window.screenX;
+    orbDrag.startWinY = window.screenY;
+    if (ui.orbDraggable) {
+      // 自定义档才真的拖:挂 mousemove 实时挪球,并通知 Python "开始拖"
+      // (按下到松手这段时间里守卫别抢回焦点 —— 焦点来回跳会拖垮
+      //  WebView2 的鼠标捕获,拖到一半就断了)
+      document.addEventListener('mousemove', onOrbMouseMove, false);
+      callApi('begin_drag');
+    }
+    // 跟随档**不挂 mousemove** —— 那里压根没有"拖动"这回事
+    // (位置由光标决定,拖了也拖不动),跟胶囊在跟随档下
+    // 干脆不响应拖动是一个道理。pinned/custom 都可拖。
+    //
+    // 但 mouseup 两种情况都要听:点球开始录音这个功能不能因为
+    // "不能拖"就一起没了。
+    document.addEventListener('mouseup', onOrbMouseUp, false);
+    e.preventDefault();
+  }
+
+  function onOrbMouseMove(e) {
+    if (!orbDrag.pressing) {
+      return;
+    }
+    var dx = e.screenX - orbDrag.startScreenX;
+    var dy = e.screenY - orbDrag.startScreenY;
+    if (!orbDrag.dragging) {
+      // 阈值内还只是"可能手抖":不算拖动
+      if (Math.sqrt(dx * dx + dy * dy) <= ORB_DRAG_THRESHOLD) {
+        return;
+      }
+      orbDrag.dragging = true;
+      if (document.body) {
+        document.body.classList.add('orb-dragging');
+      }
+    }
+    // 发**绝对目标位置**,不是增量:某一次 IPC 丢了也不漂
+    callApi('move_orb', orbDrag.startWinX + dx, orbDrag.startWinY + dy);
+  }
+
+  function onOrbMouseUp(e) {
+    if (!orbDrag.pressing) {
+      return;
+    }
+    orbDrag.pressing = false;
+    document.removeEventListener('mousemove', onOrbMouseMove, false);
+    document.removeEventListener('mouseup', onOrbMouseUp, false);
+    if (document.body) {
+      document.body.classList.remove('orb-dragging');
+    }
+    var wasDragging = orbDrag.dragging;
+    orbDrag.dragging = false;
+    if (!wasDragging && !ui.orbDraggable && e) {
+      // 不可拖的档位没有"拖动"这回事,但**按着划走**也不算"点球" ——
+      // 否则用户随手一划就莫名其妙开始录音。
+      // 这里现算一下起终点的位移,超过阈值就当没点。
+      var dx = e.screenX - orbDrag.startScreenX;
+      var dy = e.screenY - orbDrag.startScreenY;
+      wasDragging = Math.sqrt(dx * dx + dy * dy) > ORB_DRAG_THRESHOLD;
+    }
+    // 松手:归还焦点(点球那一下把前台激活到胶囊了)
+    callApi('end_drag');
+    if (!wasDragging && !ui.expanded) {
+      // 阈值内松手 = 点球 → 开始录音
+      // (Python 那边会先把前台还给用户,否则文字会贴到胶囊自己身上)
+      // 展开态下不触发:那时松手只是"点了一下胶囊",不能再开一轮录音。
+      callApi('start_recording');
+    }
   }
 
   /* ==================== 胶囊阶段 ==================== */
@@ -385,6 +721,11 @@
         ui.errorPayload = '';
         if (el.pill) {
           el.pill.classList.remove('can-copy');
+        }
+        if (ui.orbMode) {
+          // 常驻球:拿到了就立刻收成球,不用等那一轮的超时
+          cancelCollapse();
+          setExpanded(false);
         }
       } else {
         setCopyHint('复制失败,再试一次');
@@ -632,10 +973,22 @@
   };
 
   function onDragStart(e) {
-    if (ui.positionMode !== 'custom') {
+    if (e.button !== 0) {
       return;
     }
-    if (e.button !== 0) {
+    // 常驻球模式:只有**球形态**(未展开)才响应按下 ——
+    // 展开后的胶囊不参与拖动:位置归球,想挪位置先收回球再拖。
+    //
+    // 展开态还响应按下会有个副作用:按下就调 begin_drag,守卫在按住
+    // 期间**不归还前台** —— 按住不放的话前台就留在胶囊上,
+    // 用户的键盘输入会打到胶囊里(功能级问题)。
+    if (ui.orbMode) {
+      if (!ui.expanded) {
+        onOrbMouseDown(e);
+      }
+      return;
+    }
+    if (ui.positionMode !== 'custom') {
       return;
     }
     // 点在 ✕ / ✓ 按钮上时不触发拖动
@@ -731,6 +1084,11 @@
       ui.state = state;
       if (state === 'recording') {
         setPhase('recording');
+        cancelCollapse();
+        if (ui.orbMode) {
+          // 常驻球:球原地展开成胶囊
+          setExpanded(true);
+        }
       } else if (state === 'processing') {
         setPhase('processing');
       } else {
@@ -768,6 +1126,7 @@
         writeText(text == null ? '' : String(text), 'normal');
       }
       setPhase('done');
+      scheduleCollapse();
     },
     setError: function (message, payload) {
       var msg = message == null ? '' : String(message);
@@ -796,12 +1155,14 @@
         // 预览关着:错误文案进胶囊的 label 位(一行截断即可)
         setPhase('error', msg);
       }
+      scheduleCollapse();
     },
     setCancelled: function () {
       if (ui.previewEnabled) {
         writeText('已取消', 'cancelled');
       }
       setPhase('cancelled');
+      scheduleCollapse();
     },
     resetForRecording: function () {
       // 新一轮录音:清掉上一轮的文案与配色
@@ -817,6 +1178,11 @@
         el.pill.classList.remove('can-copy');
       }
       setPhase('recording');
+      cancelCollapse();
+      if (ui.orbMode) {
+        // 常驻球:新一轮开始 → 球展开成胶囊
+        setExpanded(true);
+      }
     },
     setTheme: function (mode) {
       // 主题档位:面板改的。Python 侧会在每次录音开始前再补推一次,
@@ -830,6 +1196,20 @@
     setPreviewEnabled: function (enabled) {
       // 预览开关:面板改的。
       applyPreviewEnabled(enabled);
+    },
+    setOrbMode: function (enabled) {
+      // 常驻悬浮球模式:面板改的(启动时也会推一次)。
+      applyOrbMode(enabled);
+    },
+    setOrbPosition: function (mode) {
+      // 球的位置档位(follow / custom):面板改的,Python 侧也会推一次。
+      // 跟随档下球不可拖(位置由光标决定)。
+      applyOrbPosition(mode);
+    },
+    setHideDelay: function (ms) {
+      // 一轮结束后停多久再收回球(毫秒)。
+      var v = Number(ms);
+      ui.hideDelay = (isFinite(v) && v >= 0) ? v : 1500;
     }
   };
 
@@ -846,6 +1226,12 @@
     el.cancelBtn = $('cancelBtn');
     el.okBtn = $('okBtn');
     el.copyBtn = $('copyBtn');
+    el.barOrb = $('barOrb');
+
+    // 参与球↔胶囊动效的两个元素 —— 动效停下来时要重报命中区
+    // (见 scheduleRegionReportAfterMotion 的说明)。
+    bindMotionEnd(el.pill);
+    bindMotionEnd(el.textbar);
   }
 
   // Python 可能在 DOMContentLoaded 之前就推状态，这里做惰性绑定兜底
@@ -865,6 +1251,8 @@
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
     applyPositionMode('follow');   // 同理:setPositionMode 会推真实档位
     applyPreviewEnabled(true);      // 同理:setPreviewEnabled 会推真实值
+    applyOrbMode(false);             // 同理:setOrbMode 会推真实值
+    applyOrbPosition('follow');       // 同理:setOrbPosition 会推真实值
 
     bindEvents();
 

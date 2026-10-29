@@ -4,6 +4,7 @@
 验证的是状态流转和事件派发,那些逻辑最容易出错。
 """
 
+import re
 import time
 import threading
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from qwen3_voice.asr.base import ASRError
 from qwen3_voice.config import Config
 from qwen3_voice.core.controller import State, UIEvent, VoiceController
 
@@ -240,12 +242,32 @@ def test_state_labels():
 
 
 def test_toggle_switches_recording(controller):
+    """热键 toggle:待机 → 录音 → 再按一次 → 停止。
+
+    之前这条只断言 ``state in (RECORDING, IDLE)`` —— 恒真,什么都没验。
+    现在验的是**流转方向**:按一次进录音,再按一次出录音。
+    """
     controller.state = State.IDLE
     controller.recorder = FakeRecorder()
     controller.recorder.start = lambda: True
+
     controller.toggle_recording()
-    # start_recording 会新建 Recorder,这里只验证状态流转方向
-    assert controller.state in (State.RECORDING, State.IDLE)
+    assert controller.state is State.RECORDING
+
+    # 再按一次:停止录音(音频太短 → 回到待机)
+    controller.toggle_recording()
+    assert controller.state is State.IDLE
+
+
+def test_toggle_is_ignored_while_processing(controller):
+    """识别中按热键不开始新一轮录音。
+
+    识别线程还在跑,这时候插进去一轮会把两轮的音频搅在一起。
+    """
+    controller.state = State.PROCESSING
+    controller.toggle_recording()
+    assert controller.state is State.PROCESSING
+    assert controller.recorder_devices == []
 
 
 # ---------------- 取消 ----------------
@@ -398,3 +420,312 @@ def test_successful_injection_emits_result_without_error(controller):
     result = next(e for e in events if e.kind == "result")
     assert result.text == "你好世界"
     assert result.payload == ""
+
+
+# ---------------- 后端切换(本地 ↔ 网络) ----------------
+
+class FakeBackend:
+    """假的识别后端(和 ``ASRBackend`` 同一个接口)。
+
+    鸭子类型就够 —— 控制器不检查类型,只看方法在不在。
+    """
+
+    def __init__(self, kind="local", fail_load=False, supports_preview=True):
+        self.kind = kind
+        self.fail_load = fail_load
+        self.supports_preview = supports_preview
+        self.model_tag = "0.6B"
+        self.loaded = False
+        self.unloaded = False
+        self.calls = []
+
+    def load(self):
+        if self.fail_load:
+            raise ASRError(f"{self.kind} 后端加载失败")
+        self.loaded = True
+        return 0.01
+
+    def unload(self):
+        self.unloaded = True
+        self.loaded = False
+
+    def transcribe(self, audio, sample_rate=16000, language=None):
+        self.calls.append((len(audio), sample_rate))
+        return f"{self.kind} 识别结果"
+
+
+class StreamingRecorder(FakeRecorder):
+    """带增量接口的假录音器 —— 有它预览线程才起得来。"""
+
+    def __init__(self, audio=None):
+        super().__init__(audio=audio)
+        self._sent = False
+
+    def drain_chunks(self):
+        if self._sent:
+            return np.zeros((0,), dtype=np.int16)
+        self._sent = True
+        return np.ones(1600, dtype=np.int16) * 5000
+
+
+@pytest.fixture
+def backend_controller(tmp_path, monkeypatch):
+    """一个后端可切换的控制器。
+
+    ``config.save()`` 会写到 ``data/config.json`` —— 那是**用户真实的
+    配置文件**,测试不能碰。所以把配置路径指到临时目录。
+    """
+    monkeypatch.setenv("QWEN3_VOICE_CONFIG", str(tmp_path / "config.json"))
+
+    made: list[FakeBackend] = []
+
+    def factory(kind, config):
+        backend = FakeBackend(kind=kind,
+                              supports_preview=(kind != "dashscope"))
+        made.append(backend)
+        return backend
+
+    cfg = Config(model_root=str(tmp_path), silence_rms=0.0001)
+    ctrl = VoiceController(cfg, injector=lambda *a, **k: True,
+                           recorder_factory=lambda c, d=None: StreamingRecorder(),
+                           backend_factory=factory)
+    ctrl._init_model = lambda: None
+    ctrl._init_mic = lambda: None
+    ctrl.made = made
+    return ctrl
+
+
+def test_backend_defaults_to_local(backend_controller):
+    """默认后端是本地(离线、零等待)。"""
+    assert backend_controller.backend_kind == "local"
+
+
+def test_switch_backend_replaces_the_engine(backend_controller):
+    """切到网络:换引擎、卸旧后端、记配置、发事件。"""
+    old = backend_controller.engine
+    events = []
+    backend_controller.subscribe(events.append)
+
+    backend_controller.switch_backend("dashscope")
+
+    assert wait_for(lambda: any(e.kind == "backend" for e in events))
+    assert backend_controller.backend_kind == "dashscope"
+    assert backend_controller.engine is not old
+    # 旧后端被卸掉了(本地后端在这里释放显存)
+    assert old.unloaded is True
+    assert backend_controller.config.asr_backend == "dashscope"
+    assert any(e.kind == "backend" and e.text == "dashscope" for e in events)
+
+
+def test_switch_backend_back_to_local(backend_controller):
+    """切回本地:一样是"换引擎 + 卸旧后端"。"""
+    backend_controller.switch_backend("dashscope")
+    assert wait_for(lambda: backend_controller.backend_kind == "dashscope")
+
+    net = backend_controller.engine
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_backend("local")
+    assert wait_for(lambda: any(e.kind == "backend" and e.text == "local"
+                                 for e in events))
+    assert backend_controller.backend_kind == "local"
+    assert net.unloaded is True
+    assert backend_controller.config.asr_backend == "local"
+
+
+def test_switch_backend_is_rejected_while_recording(backend_controller):
+    """录音中不能换后端 —— 最终位引擎还握着旧后端的引用。"""
+    backend_controller.state = State.RECORDING
+    old = backend_controller.engine
+
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_backend("dashscope")
+
+    assert backend_controller.backend_kind == "local"
+    assert backend_controller.engine is old
+    assert any(e.kind == "notice" and "不能切换" in e.text for e in events)
+
+
+def test_switch_backend_is_rejected_while_processing(backend_controller):
+    """识别中同样拒绝换后端。"""
+    backend_controller.state = State.PROCESSING
+
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_backend("dashscope")
+
+    assert backend_controller.backend_kind == "local"
+    assert any(e.kind == "notice" and "不能切换" in e.text for e in events)
+
+
+def test_failed_switch_keeps_the_old_backend(backend_controller):
+    """新后端加载失败 → 留在旧后端(网络不可用时还能用本地)。"""
+    old = backend_controller.engine
+
+    def failing_factory(kind, config):
+        if kind == "dashscope":
+            return FakeBackend(kind=kind, fail_load=True)
+        return FakeBackend(kind=kind)
+
+    backend_controller._backend_factory = failing_factory
+
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_backend("dashscope")
+
+    assert wait_for(lambda: any(e.kind == "notice" and "切换失败" in e.text
+                                 for e in events))
+    assert backend_controller.backend_kind == "local"
+    assert backend_controller.engine is old
+    assert old.unloaded is False
+
+
+def test_switch_model_is_rejected_for_network_backend(backend_controller):
+    """网络后端不加载本地模型,换模型规格没有意义。"""
+    backend_controller.switch_backend("dashscope")
+    assert wait_for(lambda: backend_controller.backend_kind == "dashscope")
+
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_model("1.7B")
+
+    assert any(e.kind == "notice" and "本地" in e.text for e in events)
+
+
+def test_network_backend_does_not_start_the_preview_thread(backend_controller):
+    """网络模式不跑预览线程(整段请求,做不了逐句流式)。"""
+    backend_controller.switch_backend("dashscope")
+    assert wait_for(lambda: backend_controller.backend_kind == "dashscope")
+
+    backend_controller.start_recording()
+    assert backend_controller._preview_thread is None
+
+
+def test_local_backend_still_starts_the_preview_thread(backend_controller):
+    """本地模式的预览线程照旧(不能被网络模式带坏)。"""
+    backend_controller.start_recording()
+    assert backend_controller._preview_thread is not None
+
+
+def test_switching_to_network_disables_the_preview_bar(backend_controller):
+    """切到网络:预览文字条收起来(网络模式没有实时预览)。"""
+    events = []
+    backend_controller.subscribe(events.append)
+
+    backend_controller.switch_backend("dashscope")
+
+    assert wait_for(lambda: any(e.kind == "preview_enabled"
+                                 and e.text == "0" for e in events))
+
+
+def test_switching_back_to_local_restores_the_preview_setting(backend_controller):
+    """切回本地:预览开关按配置恢复(用户原来的偏好不丢)。"""
+    backend_controller.config.show_preview = True
+    backend_controller.switch_backend("dashscope")
+    assert wait_for(lambda: backend_controller.backend_kind == "dashscope")
+
+    events = []
+    backend_controller.subscribe(events.append)
+    backend_controller.switch_backend("local")
+
+    assert wait_for(lambda: any(e.kind == "preview_enabled"
+                                 and e.text == "1" for e in events))
+
+
+def test_network_backend_without_key_does_not_break_the_app(tmp_path, monkeypatch):
+    """没配 API Key:启动会报错,但控制器还活着,还能切回本地。
+
+    这是"网络后端的存在不能拖垮整个应用"的兜底。
+    """
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setenv("QWEN3_VOICE_CONFIG", str(tmp_path / "config.json"))
+
+    cfg = Config(model_root=str(tmp_path), asr_backend="dashscope")
+    ctrl = VoiceController(cfg, injector=lambda *a, **k: True,
+                           recorder_factory=lambda c, d=None: FakeRecorder())
+    ctrl._init_mic = lambda: None
+
+    events = []
+    ctrl.subscribe(events.append)
+    ctrl._init_model()
+
+    assert ctrl.state == State.ERROR
+    assert any("DASHSCOPE_API_KEY" in e.text for e in events)
+
+    # 还能切回本地(用假后端,不去真加载模型)
+    ctrl._backend_factory = lambda kind, config: FakeBackend(kind=kind)
+    ctrl.switch_backend("local")
+    assert wait_for(lambda: ctrl.state == State.IDLE)
+    assert ctrl.backend_kind == "local"
+
+
+# ---------------- 桥接契约(BRIDGE.md 与实现逐字对齐) ----------------
+#
+# BRIDGE.md 是前后端桥接契约的**唯一权威来源** —— 方法名两边必须逐字一致。
+# 这里把契约表和真实实现对一遍:文档改了实现没改(或者反过来),
+# 立刻在这里报出来,而不是等到用户点了按钮才发现没反应。
+
+_STATIC_DIR = (Path(__file__).resolve().parent.parent
+               / "src" / "qwen3_voice" / "ui" / "static")
+_BRIDGE_MD = (Path(__file__).resolve().parent.parent
+              / "src" / "qwen3_voice" / "ui" / "BRIDGE.md")
+
+
+def _bridge_panel_tables() -> tuple[list[str], list[str]]:
+    """从 BRIDGE.md 的**面板**小节里抽出两组方法名。
+
+    只读面板小节 —— 胶囊那一节是别人的,格式变了也不该影响这里。
+    """
+    doc = _BRIDGE_MD.read_text(encoding="utf-8")
+    section = doc[doc.index("# 面板窗口"):doc.index("# 胶囊窗口")]
+
+    py2js: list[str] = []
+    js2py: list[str] = []
+    mode: list[str] | None = None
+    for line in section.splitlines():
+        if line.startswith("## Python → JS"):
+            mode = py2js
+            continue
+        if line.startswith("## JS → Python"):
+            mode = js2py
+            continue
+        if line.startswith("## ") or line.startswith("### "):
+            mode = None
+            continue
+        if mode is None:
+            continue
+        m = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if m:
+            mode.append(m.group(1))
+    return py2js, js2py
+
+
+def test_bridge_doc_lists_the_backend_methods():
+    """契约表里必须有新加的后端相关方法。"""
+    py2js, js2py = _bridge_panel_tables()
+    names = {e.split("(")[0] for e in py2js} | {e.split("(")[0] for e in js2py}
+    assert "__qwen.setBackend" in names
+    assert "__qwen.setNotice" in names
+    assert "switch_backend" in names
+
+
+def test_bridge_doc_matches_the_frontend():
+    """契约里的 Python → JS 方法,前端必须真的实现。"""
+    py2js, _ = _bridge_panel_tables()
+    js_src = (_STATIC_DIR / "panel.js").read_text(encoding="utf-8")
+    for entry in py2js:
+        name = entry.split("(")[0].replace("__qwen.", "")
+        assert f"{name}: function" in js_src, \
+            f"BRIDGE.md 写了 {entry},但 panel.js 里没有 {name}"
+
+
+def test_bridge_doc_matches_the_python_side():
+    """契约里的 JS → Python 方法,Python 侧必须真的暴露。"""
+    from qwen3_voice.ui.panel import _PanelApi
+
+    _, js2py = _bridge_panel_tables()
+    for entry in js2py:
+        name = entry.split("(")[0]
+        assert callable(getattr(_PanelApi, name, None)), \
+            f"BRIDGE.md 写了 {entry},但 _PanelApi 里没有 {name}"

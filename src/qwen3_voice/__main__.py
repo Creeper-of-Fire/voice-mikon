@@ -31,6 +31,31 @@ from .win32.dpi import set_dpi_awareness
 from .win32.hotkey import HotkeyError, HotkeyListener
 
 
+def _spawn_restart(logger) -> None:
+    """以分离方式拉起一个新的自身实例(重启的第二步)。
+
+    调用时机有讲究:必须在**全部清理之后**(热键已注销、窗口已销毁、
+    模型已卸载)—— 新实例一上来就要注册同一个热键、往同一块显存里
+    加载模型,任何一样没让位都会撞车。所以它放在 main() 的最后,
+    而不是托盘回调里。
+
+    分离(DETACHED_PROCESS):新进程不继承控制台、不挂在旧进程上 ——
+    旧进程退出后它照常活,终端里 Ctrl+C 也只影响旧进程。
+    """
+    import subprocess
+
+    flags = 0
+    if sys.platform == "win32":
+        flags = (subprocess.DETACHED_PROCESS
+                 | subprocess.CREATE_NEW_PROCESS_GROUP)
+    try:
+        subprocess.Popen([sys.executable, "-m", "qwen3_voice"],
+                         creationflags=flags, close_fds=True)
+        logger.info("重启:已拉起新实例")
+    except Exception as e:
+        logger.error("重启失败,请手动启动程序: %s", e)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 
@@ -94,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         controller.toggle_recording()
 
     hotkey = HotkeyListener(config.hotkey, on_hotkey)
+    # 挂到 controller 上:退出时由 shutdown() 第一个停它(全局资源,
+    # 拖到最后会让"退出后马上重启"注册失败)。
+    controller.attach_hotkey(hotkey)
     try:
         hotkey.start()
     except HotkeyError as e:
@@ -113,13 +141,21 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        hotkey.stop()
+        # controller.shutdown() 里第一件事就是停热键 —— 它是全局资源,
+        # 必须在进程真正退出之前就注销掉,否则"退出后马上重启"会
+        # 因为热键还被占着而注册失败。
         controller.shutdown()
+        hotkey.stop()   # 幂等兜底(shutdown 里已经停过)
         # 两个窗口都要销毁:pywebview 的主循环要等所有窗口都没了才返回,
         # 只关一个的话进程会变成"托盘没了但还活着"的僵尸
         panel.destroy()
         capsule.destroy()
         logger.info("退出")
+
+    # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、
+    # 窗口已销毁、模型已卸载),现在拉新实例才不会撞车
+    if getattr(tray, "restart_requested", False):
+        _spawn_restart(logger)
     return 0
 
 

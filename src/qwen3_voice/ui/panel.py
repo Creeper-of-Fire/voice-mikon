@@ -12,8 +12,12 @@ Python 与前端之间是双向桥接,方法名两边必须严格对齐
 (完整契约见同目录的 ``BRIDGE.md``):
 
   Python → JS   window.__qwen.setState / setModel / setHotkey / setTheme
+                / setCapsulePosition / setPreviewEnabled / setOrbEnabled
+                / setBackend / setNotice
   JS → Python   window.pywebview.api.ready / switch_model / get_snapshot
                 / move_window / close_panel / quit_app / set_theme
+                / set_capsule_position / set_preview / set_orb
+                / switch_backend
 
 线程分工:
   主线程      调 webview.start() 并等它返回(winforms 后端会把 GUI
@@ -43,8 +47,8 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import CAPSULE_POSITION_MODES, THEME_MODES
-from ..core.controller import State, UIEvent, VoiceController
+from ..config import CAPSULE_POSITION_MODES, ORB_POSITION_MODES, THEME_MODES
+from ..core.controller import BACKEND_KINDS, State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32.api import (
     get_foreground_window,
@@ -67,16 +71,23 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 #
 # 尺寸跟 panel.css 的排版对上了:
 #   卡片外边距 6+6 + 卡片描边 1+1 + 标题栏 32+1 + 内容区 8+10
-#   + 模型行 32 + 行距 8 + 主题行 32 + 行距 8
-#   + 位置行 32 + 行距 8 + 预览行 32 + 行距 8 + 页脚 25 = 252
+#   + 后端行 32 + 行距 8 + 模型行 32 + 行距 8 + 主题行 32 + 行距 8
+#   + 悬浮球行 32 + 行距 8 + 位置行/球位置行 32(互斥,同一槽位)
+#   + 行距 8 + 预览行 32 + 行距 8 + 页脚 25 = 372
 # (内容再高一点也装得下 —— .panel 是 min-height,装不下时会长高,
-#  _fit_window 量到 scrollHeight 会把窗口跟着放大。)
+#  _fit_window 量到 scrollHeight 会把窗口跟着放大。
+#  网络模式下的"后端说明"和"操作提示"也是同理,长了窗口自己会长。)
+#
+# 「位置」(胶囊)和「球位置」两行**互斥显示**(前端 applyPositionRows):
+# 常驻球开着时胶囊的位置由球决定,「位置」不起作用 —— 任何时刻只显示
+# 起作用的那个。行数因此随悬浮球开关变,高度由 _fit_window 量实际内容
+# 自适应(开关联动后 _refit_soon 会补一次 fit);BASE_H 是全行显示的上限。
 #
 # 宽度 320:多出来的 60px 给"位置"那行的三段控件 ——
 # "跟随输入 / 固定底部 / 自定义"是 11 个中文字,260px 装不下,
 # 挤成一团反而看不清。宽度是固定值,不参与自适应。
 BASE_W = 320
-BASE_H = 252
+BASE_H = 372
 
 # 页面加载完成前的窗口底色(占位):跟最终会显示的那套主题一致,
 # 免得深色主题下闪一下白。真正的配色由 CSS 决定,这里只管"开场"。
@@ -344,6 +355,14 @@ class _PanelApi:
     def switch_model(self, tag: str) -> None:
         self._panel.controller.switch_model(tag)
 
+    def switch_backend(self, kind: str) -> None:
+        """切换识别后端(local / dashscope)。
+
+        切换在后台线程里做(不卡 UI);录音/识别中会被拒绝,
+        拒绝时控制器发一个 ``notice`` 事件,面板显示那句话。
+        """
+        self._panel.controller.switch_backend(kind)
+
     def set_theme(self, mode: str) -> None:
         """切换主题档位(auto / light / dark)。"""
         self._panel._set_theme(mode)
@@ -355,6 +374,14 @@ class _PanelApi:
     def set_preview(self, enabled: bool) -> None:
         """开关录音时的实时预览文字条。"""
         self._panel._set_preview(enabled)
+
+    def set_orb(self, enabled: bool) -> None:
+        """开关常驻悬浮球。"""
+        self._panel._set_orb(enabled)
+
+    def set_orb_position(self, mode: str) -> None:
+        """切换悬浮球的位置档位(follow / pinned / custom)。"""
+        self._panel._set_orb_position(mode)
 
     def get_snapshot(self) -> dict:
         return self._panel._snapshot()
@@ -463,7 +490,7 @@ class VoicePanel:
     def handle_event(self, event: UIEvent) -> None:
         """控制器事件 → 面板前端。
 
-        面板瘦身后只关心三样东西:状态、模型、热键。
+        面板瘦身后只关心几样东西:状态、模型、后端、热键。
         电平/计时/预览/结果都归胶囊窗口了。
         """
         if event.kind == "state" and event.state is not None:
@@ -471,12 +498,26 @@ class VoicePanel:
             self._call_js("setState", self._state_name())
         elif event.kind == "model" and event.model_tag:
             self._call_js("setModel", event.model_tag)
+        elif event.kind == "backend" and event.text:
+            self._call_js("setBackend", event.text)
+        elif event.kind == "notice" and event.text:
+            # 面板发起的操作(比如切后端)的进展/拒绝/失败提示。
+            # 单独一个通道:胶囊不认这个事件类型,所以录音中拒绝切换
+            # 不会把胶囊的错误条点亮、也不会把正在录的胶囊藏掉。
+            self._call_js("setNotice", event.text)
         elif event.kind == "theme" and event.text:
             self._call_js("setTheme", event.text)
         elif event.kind == "capsule_position" and event.text:
             self._call_js("setCapsulePosition", event.text)
         elif event.kind == "preview_enabled":
             self._call_js("setPreviewEnabled", event.text not in ("0", ""))
+        elif event.kind == "orb_enabled":
+            self._call_js("setOrbEnabled", event.text not in ("0", ""))
+            # 前端跟着开关切换「位置 / 球位置」两行的显隐(互斥显示),
+            # 内容高度变了 —— 等它切完再 fit 一次,窗口跟着长/缩
+            self._refit_soon()
+        elif event.kind == "orb_position" and event.text:
+            self._call_js("setOrbPosition", event.text)
 
     def push_levels(self, levels: list[float], elapsed: float) -> None:
         """面板不显示电平 —— 空实现(接口要留着,免得 pump 判类型)。"""
@@ -577,6 +618,64 @@ class VoicePanel:
 
         self._pump.on_event(
             UIEvent(kind="preview_enabled", text="1" if flag else "0"))
+
+    # ---------- 常驻悬浮球 ----------
+
+    def _orb_enabled(self) -> bool:
+        """常驻悬浮球开没开(配置项 ``floating_orb``)。
+
+        默认**关**:关着时行为和老版本一模一样(按热键才弹胶囊)。
+        """
+        try:
+            return bool(getattr(self.controller.config, "floating_orb", False))
+        except Exception:
+            return False
+
+    def _set_orb(self, enabled: bool) -> None:
+        """开关常驻悬浮球:存配置 → 推面板和胶囊。
+
+        和主题/位置同一条链路:一个事件,面板和胶囊都收到,顺序由唯一的
+        推送线程保证。胶囊收到后把球显示出来(或收回去)。
+        """
+        flag = bool(enabled)
+        try:
+            self.controller.config.floating_orb = flag
+            self.controller.config.save()
+        except Exception as e:
+            log.debug("保存悬浮球开关失败: %s", e)
+
+        self._pump.on_event(UIEvent(kind="orb_enabled", text="1" if flag else "0"))
+
+    def _orb_position(self) -> str:
+        """当前悬浮球的位置档位(follow / pinned / custom)。
+
+        默认 follow:球跟着输入光标走,是用户最常有的期待。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "orb_position", "follow")
+                       or "follow").strip().lower()
+        except Exception:
+            return "follow"
+        return mode if mode in ORB_POSITION_MODES else "follow"
+
+    def _set_orb_position(self, mode: str) -> None:
+        """切换悬浮球的位置档位:存配置 → 推面板和胶囊。
+
+        胶囊收到后按新档位重新摆球:follow/pinned 起轮询线程
+        (follow 挪位置、pinned 管显隐,都只在光标聚焦到输入处时露脸),
+        pinned/custom 用同一份记住的位置,custom 常驻。
+        """
+        value = str(mode or "follow").strip().lower()
+        if value not in ORB_POSITION_MODES:
+            log.info("未知悬浮球位置档位 %r,按 follow 处理", mode)
+            value = "follow"
+        try:
+            self.controller.config.orb_position = value
+            self.controller.config.save()
+        except Exception as e:
+            log.debug("保存悬浮球位置档位失败: %s", e)
+
+        self._pump.on_event(UIEvent(kind="orb_position", text=value))
 
     # ---------- 几何 ----------
 
@@ -684,6 +783,10 @@ class VoicePanel:
         # 那时的值没推出去,这里补上
         self._call_js("setCapsulePosition", self._capsule_position())
         self._call_js("setPreviewEnabled", self._preview_enabled())
+        self._call_js("setOrbEnabled", self._orb_enabled())
+        self._call_js("setOrbPosition", self._orb_position())
+        # 识别后端(本地 / 网络):前端可能比 Python 晚就绪,这里补上
+        self._call_js("setBackend", self._backend_kind())
         try:
             self._fit_window()
         except Exception as e:
@@ -693,15 +796,29 @@ class VoicePanel:
         return _STATE_NAMES.get(self._state, "idle")
 
     def _model_tag(self) -> str:
+        """当前本地模型规格(网络后端没有本地模型 → 空串)。"""
         try:
             return getattr(self.controller.engine, "model_tag", "") or ""
         except Exception:
             return ""
 
+    def _backend_kind(self) -> str:
+        """当前识别后端(local / dashscope)。
+
+        读不到就按 local —— 默认档,也是用户最常用的期待。
+        """
+        try:
+            kind = str(getattr(self.controller, "backend_kind", "local")
+                       or "local").strip().lower()
+        except Exception:
+            return "local"
+        return kind if kind in BACKEND_KINDS else "local"
+
     def _snapshot(self) -> dict:
         return {
             "state": self._state_name(),
             "model": self._model_tag(),
+            "backend": self._backend_kind(),
             "hotkey": self.controller.config.hotkey,
         }
 
@@ -773,6 +890,18 @@ class VoicePanel:
             self._fit_window_locked()
         finally:
             self._fit_lock.release()
+
+    def _refit_soon(self) -> None:
+        """稍等前端改完布局再 fit 一次。
+
+        「位置 / 球位置」两行的显隐切换发生在**前端**(收到
+        setOrbEnabled 之后同步改 DOM),Python 不知道它什么时候完成 ——
+        延迟一下再量,量到的是切换后的高度。fit 有锁且幂等,
+        多触发几次无害。
+        """
+        timer = threading.Timer(0.4, self._fit_window)
+        timer.daemon = True
+        timer.start()
 
     def _fit_window_locked(self) -> None:
         need = BASE_H
@@ -991,7 +1120,15 @@ class VoicePanel:
             self.show()
 
     def _quit(self) -> None:
-        """退出程序:先存窗口位置,再销毁窗口让 webview.start() 返回。"""
+        """退出程序:先停热键 + 存窗口位置,再销毁窗口让 webview.start() 返回。
+
+        热键是**全局**资源 —— 必须在本进程真正退出之前就注销掉,
+        否则用户"退出后马上重启"会因为热键还被占着而注册失败。
+        """
+        try:
+            self.controller.shutdown()
+        except Exception:
+            pass
         self.destroy()
 
     def destroy(self) -> None:

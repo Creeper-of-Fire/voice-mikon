@@ -18,7 +18,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from qwen3_voice.asr.streaming import PreviewEngineKind
+from qwen3_voice.asr.streaming import (
+    FullPassEngine,
+    PreviewEngineKind,
+    SentencePreviewEngine,
+)
 from qwen3_voice.audio.recorder import Recorder
 from qwen3_voice.config import Config
 from qwen3_voice.core import controller as controller_module
@@ -208,6 +212,10 @@ def _recorder_with_frames(native_rate: int, n_frames: int = 2,
 
 
 # ---------------- Recorder 快照 / 增量 ----------------
+#
+# 录音器本身的行为契约(快照 vs stop()、采样率、增量拉取)归
+# ``tests/test_audio.py`` 管 —— 那边才是录音器行为的所在地。
+# 这里只保留"预览链路怎么用录音器"相关的那几条。
 
 def test_snapshot_empty_before_any_audio():
     """刚开始录音时快照是空的 —— 调用方必须判空。"""
@@ -215,40 +223,6 @@ def test_snapshot_empty_before_any_audio():
     snap = rec.snapshot()
     assert len(snap) == 0
     assert snap.dtype == np.int16
-
-
-def test_snapshot_matches_stop():
-    """快照内容和 stop() 完全一致(同样采样率时逐样本相等)。"""
-    rec = _recorder_with_frames(16000)
-    snap = rec.snapshot()
-    stopped = rec.stop()
-
-    assert snap.dtype == np.int16
-    assert len(snap) == 1600
-    assert np.array_equal(snap, stopped)
-
-
-def test_snapshot_does_not_consume_audio():
-    """多次取快照不能消费音频 —— stop() 仍然拿到完整数据。"""
-    rec = _recorder_with_frames(16000)
-    snaps = [rec.snapshot() for _ in range(3)]
-    for snap in snaps:
-        assert len(snap) == 1600
-
-    stopped = rec.stop()
-    assert len(stopped) == 1600
-    assert np.array_equal(stopped, snaps[-1])
-
-
-def test_snapshot_is_native_rate_stop_is_same_rate():
-    """快照和 stop() 都是原生采样率 —— 重采样交给 qwen_asr 内部做。"""
-    rec = _recorder_with_frames(48000)
-    snap = rec.snapshot()
-    assert len(snap) == 1600                      # 原生 48 k
-
-    stopped = rec.stop()
-    assert len(stopped) == 1600                   # 同样是原生 48 k,没有降采样
-    assert np.array_equal(snap, stopped)
 
 
 def test_drain_chunks_returns_increment():
@@ -371,11 +345,26 @@ def test_final_slot_is_full_pass_engine(controller):
 # ---------------- 插槽与回退 ----------------
 
 def test_default_preview_slot_is_sentence_engine(controller):
-    """默认组合:预览位分句引擎,最终位整段引擎。"""
+    """默认组合:预览位分句引擎,最终位整段引擎。
+
+    用 isinstance 而不是 ``type(...).__name__`` —— 改个类名字符串断言
+    就碎,这不是我们要守的东西。
+    而且要**两边都断言**:SentencePreviewEngine 和 FullPassEngine
+    都是 StreamingEngine 的子类,只断言 isinstance(x, StreamingEngine)
+    分不出谁是谁。所以这里明确断言"是谁" + "不是谁"。
+    """
     assert controller_module.PREVIEW_ENGINE_KIND == PreviewEngineKind.SENTENCE
     controller.start_recording()
-    assert type(controller._preview_engine).__name__ == "SentencePreviewEngine"
-    assert type(controller._final_engine).__name__ == "FullPassEngine"
+
+    preview = controller._preview_engine
+    final = controller._final_engine
+
+    # 预览位是分句引擎
+    assert isinstance(preview, SentencePreviewEngine)
+    assert not isinstance(preview, FullPassEngine)
+    # 最终位是整段引擎
+    assert isinstance(final, FullPassEngine)
+    assert not isinstance(final, SentencePreviewEngine)
 
 
 def test_full_pass_fallback_still_previews(monkeypatch, controller):

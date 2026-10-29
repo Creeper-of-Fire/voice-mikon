@@ -39,9 +39,13 @@ log = get_logger("asr.stream")
 # ---- 调参默认值(都集中在这里,方便按真机效果微调)----
 
 # VAD 静音阈值(归一化 RMS,0..1)。
-# 比整段静音判定(config.silence_rms)高:整段判定要求"绝对安静",
-# 而断句只需要"比底噪低" —— 底噪 0.005 的房间里用 0.002 永远断不出句子。
-VAD_SILENCE_RMS = 0.01
+# 实测定自用户真实录音(20261029-170527,USB 麦,增益偏低):
+#   底噪峰 -63~-60dB(0.0009~0.0011),语音主体 -53~-40dB(0.002~0.01),
+#   峰值才 -33dB —— 没有干净的双峰分界,0.01 会把语音主体大半判成
+#   静音,一句话被切成碎片后大量丢失(实测 94% 帧被判静音)。
+# 取 0.0015(≈-56.5dB,底噪峰的 ~1.5 倍):宁可把一点底噪包进句子
+# (识别不在乎句首尾多点底噪),也不能把语音切碎(碎句被丢,预览缺字)。
+VAD_SILENCE_RMS = 0.0015
 
 # 连续静音多久算断句(秒)
 SENTENCE_SILENCE_SECONDS = 0.3
@@ -248,7 +252,9 @@ class FullPassEngine(StreamingEngine):
         try:
             text = self._engine.transcribe(audio, self._sample_rate) or ""
         except Exception as e:
-            # 识别失败(引擎异常 / 切换模型时旧模型被换掉)只跳过这一轮
+            # 识别失败(引擎异常 / 切换模型时旧模型被换掉)只跳过这一轮。
+            # 保持 debug:这是**旧回退路径**(默认走分句引擎),而且每 1.5 秒
+            # 就会失败一次 —— 升到 WARNING 只会刷屏,分句路径的日志才有用。
             log.debug("整段预览识别失败: %s", e)
             return
         self._last_cost = time.monotonic() - t0
@@ -393,6 +399,11 @@ class SentencePreviewEngine(StreamingEngine):
         text = self._recognize(audio)
         if not text:
             return
+        # INFO 级:真机日志里要能直接看到"分句在出字"。
+        # 之前这条链路上只有 debug,一旦预览零出字,日志一片空白,
+        # 分不清是"没识别"还是"识别了没显示"——这两种的修法完全不同。
+        # 一句一条,不会刷屏。
+        log.info("预览句 %.1fs: %s", len(audio) / self._sample_rate, text)
         self._sentences.append(text)
         if notify:
             self._notify("".join(self._sentences))
@@ -410,8 +421,10 @@ class SentencePreviewEngine(StreamingEngine):
         try:
             return (self._engine.transcribe(audio, self._sample_rate) or "").strip()
         except Exception as e:
-            # 模型没加载 / 切模型时旧模型被换掉 —— 只跳过这一句
-            log.debug("分句识别失败: %s", e)
+            # 模型没加载 / 切模型时旧模型被换掉 —— 只跳过这一句。
+            # WARNING 级(而不是 debug):这正是"预览零出字"的**第一种**
+            # 可能原因,必须肉眼可见;而且只在真出错时才出现,不会刷屏。
+            log.warning("分句识别失败: %s", e)
             return ""
 
     def _notify(self, text: str) -> None:
@@ -420,7 +433,9 @@ class SentencePreviewEngine(StreamingEngine):
         try:
             self._partial(text)
         except Exception as e:
-            log.debug("partial 回调异常: %s", e)
+            # 认出来了但推不出去 —— "预览零出字"的**第二种**可能原因。
+            # 同样提到 WARNING:能区分"没识别"和"没显示",比 debug 有用得多。
+            log.warning("partial 回调异常: %s", e)
 
 
 def make_preview_engine(kind: PreviewEngineKind | str,

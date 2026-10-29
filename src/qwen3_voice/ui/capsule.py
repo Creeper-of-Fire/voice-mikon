@@ -11,6 +11,7 @@ Python 与前端之间的桥接契约(完整见同目录 ``BRIDGE.md``):
 
   Python → JS   window.__capsule.setState / setLevels / setElapsed
                 / setPreview / setResult / setError / setCancelled
+                / resetForRecording / setTheme
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
                 / update_regions
 
@@ -60,6 +61,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..config import THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32.api import (
@@ -302,8 +304,16 @@ class VoiceCapsule:
                 # 靠这个快照把它还回去。
                 self._target_hwnd = get_foreground_window()
                 self._cancel_hide_timer()
+                # 显示前把当前主题再推一遍:面板改主题是**异步**的
+                # (走推送线程),用户改完主题马上按热键的话,setTheme
+                # 可能还堵在队列里 —— 这里补推一次,保证胶囊亮起来
+                # 时配色已经是对的。setTheme 幂等,多推无害。
+                self._call_js("setTheme", self._theme_mode())
                 self._call_js("resetForRecording")
                 self._show()
+        elif kind == "theme" and event.text:
+            # 面板改了主题档位 → 跟着换配色
+            self._call_js("setTheme", event.text)
         elif kind == "preview":
             # 实时预览文字(录音过程中已识别出的内容)
             self._last_preview = event.text
@@ -334,6 +344,20 @@ class VoiceCapsule:
             return
         self._call_js_pair("setLevels", json.dumps(levels),
                            "setElapsed", elapsed)
+
+    # ---------- 主题 ----------
+
+    def _theme_mode(self) -> str:
+        """当前主题档位(auto / light / dark)。
+
+        读不到就按 auto —— 兜底"跟随系统"不会翻车。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "theme", "auto")
+                       or "auto").strip().lower()
+        except Exception:
+            return "auto"
+        return mode if mode in THEME_MODES else "auto"
 
     # ---------- 前端桥接 ----------
 
@@ -387,6 +411,8 @@ class VoiceCapsule:
         """
         self._gui_ready.set()
         self._call_js("setState", _STATE_NAMES.get(self._state, "idle"))
+        # 主题也补推一次:前端可能比 Python 晚就绪,那时的档位没推出去
+        self._call_js("setTheme", self._theme_mode())
         if self._last_preview:
             self._call_js("setPreview", self._last_preview)
         self._place()

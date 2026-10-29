@@ -25,6 +25,13 @@ log = logging.getLogger("qwen3_voice.config")
 # 仓库内的示例配置(首次运行时复制到 data/)
 EXAMPLE_CONFIG = PROJECT_DIR / "config.example.json"
 
+# 主题档位:
+#   auto  跟随系统(Windows 的"应用模式",WebView2 直接跟着走)
+#   light 强制白天
+#   dark  强制黑夜
+# 面板和胶囊共用这一套 —— 面板改了,胶囊跟着换。
+THEME_MODES = ("auto", "light", "dark")
+
 
 @dataclass
 class Config:
@@ -60,6 +67,7 @@ class Config:
     panel_geometry: str = ""                 # "x,y,w,h",空=用默认位置
     panel_visible: bool = False              # 面板启动时是否显示(默认不常驻,托盘打开)
     show_tray: bool = True
+    theme: str = "auto"                      # auto(跟随系统) / light(白天) / dark(黑夜)
 
     # ---- 其它
     log_file: str = ""
@@ -80,6 +88,9 @@ class Config:
             issues.append("max_duration 必须大于 min_duration")
         if self.silence_rms < 0:
             issues.append("silence_rms 不能为负")
+        if self.theme not in THEME_MODES:
+            issues.append(
+                f"theme 只能是 {' / '.join(THEME_MODES)},当前 {self.theme!r}")
         return issues
 
     # ---------- 序列化 ----------

@@ -17,14 +17,21 @@
  *   - 状态点沿用它 answer-card 标题栏的写法:实心点 + 一圈 soft 色光晕。
  *
  * 两处本地适配(不是原样照抄):
- *   1. 深色主题走 ``prefers-color-scheme`` 媒体查询 —— OpenType 用
+ *   1. 主题走 **data-theme 属性 + 媒体查询兜底** —— OpenType 用
  *      ``:root[data-theme='dark']``(theme.ts 里由 JS 切 attribute),
- *      本项目没有主题开关,直接跟 Windows 的应用主题即可。
- *      (panel.py 的 ``system_prefers_dark()`` 只管建窗瞬间的底色。)
+ *      本项目多了一档"跟随系统",所以:
+ *        - JS 在 ``<html>`` 上设 ``data-theme="light|dark"``
+ *        - **auto 时不设属性**,让 ``prefers-color-scheme`` 媒体查询
+ *          自然接管 —— 这样"跟随系统"不需要 JS 监听系统主题变化
+ *        - CSS 侧三段:``:root`` 是浅色,深色由
+ *          ``@media(prefers-color-scheme:dark){:root:not([data-theme=light])}``
+ *          和 ``:root[data-theme=dark]`` 两处给出
+ *          (深色那块**两处必须同步改**,见下面注释)
+ *      (panel.py 的 ``theme_background_color()`` 只管建窗瞬间的底色。)
  *   2. 字号整体压小一档(正文 13px / 辅助 12px):面板只有 260px 宽,
  *      OpenType 的 14px/16px 在这里太挤。
  *
- * 布局保持"标题栏 + 模型行 + 页脚"的紧凑结构,不加装饰性元素。
+ * 布局保持"标题栏 + 模型行 + 主题行 + 页脚"的紧凑结构,不加装饰性元素。
  *
  * 面板窗口**不是透明窗口**(background_color 是实色),所以可以用阴影 ——
  * 胶囊那边不行:透明窗口上 box-shadow 会渲染成一条灰带(见 capsule.css)。
@@ -76,13 +83,17 @@
 
 /* ---------------- 日夜模式 ---------------- */
 
-/* 深色主题:跟随系统(prefers-color-scheme)。
-   WebView2 的 prefers-color-scheme 直接跟随 Windows 的应用主题,
-   所以这里只要用媒体查询换掉变量值,不用 JS、也不用监听切换事件。
+/* 深色主题有两处来源,token 值**必须一样**(改一处就要改另一处):
+     a) 用户强制黑夜 → ``:root[data-theme="dark"]``
+     b) 跟随系统且系统是深色 → 媒体查询里的 ``:root:not([data-theme="light"])``
+
+   为什么 b 要排除 ``[data-theme="light"]``:强制白天时,系统的深色
+   媒体查询照样会命中,不加这个 :not 就会被系统深色压回去 ——
+   ":not" 的特异度(0,2,0)高于 :root(0,1,0),所以排除掉就一定赢。
 
    深色值就是 OpenType 的 ``:root[data-theme='dark']`` 那段,原样搬过来。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --bg: #0f0f11;
     --card: #1a1a1d;
@@ -103,6 +114,29 @@
     --k-trans-b: #8aa6ff;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.3);
   }
+}
+
+/* 强制黑夜(与上面媒体查询里的深色 token 完全一致) */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f0f11;
+  --card: #1a1a1d;
+  --nav: #18181b;
+  --hover: #27272b;
+  --text: #f4f4f5;
+  --text2: #d4d4d8;
+  --muted: #8b8b93;
+  --line: #2a2a2f;
+  --accent: #f4f4f5;
+  --danger: #ff7b7f;
+  --danger-soft: #3a1c1e;
+  --warn: #e3b25e;
+  --warn-soft: #33281a;
+  --k-ask: #15291e;
+  --k-ask-b: #5fd08f;
+  --k-trans: #1b2440;
+  --k-trans-b: #8aa6ff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.3);
 }
 
 * {
@@ -246,9 +280,9 @@ body {
   padding: 8px 14px 10px;
 }
 
-/* 模型切换 */
+/* 配置行:模型、主题两行共用同一种布局 */
 
-.model-row {
+.option-row {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -298,6 +332,13 @@ body {
   color: var(--text);
   font-weight: 600;
   box-shadow: var(--shadow);
+}
+
+/* 中文文案的那一段(主题)不用等宽字体:
+   模型段的 "0.6B / 1.7B" 是西文数字,等宽才对齐;
+   中文在等宽栈里会掉到兜底字体,字宽还不一样,观感更乱。 */
+.seg.is-text .seg-item {
+  font-family: var(--font);
 }
 
 /* 底部：热键提示 + 退出 */

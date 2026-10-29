@@ -1,15 +1,17 @@
 /* 给 capsule.js 造一个最小 DOM,在 node 里驱动它,观察它往 Python 上报了
- * 哪些窗口区域。
+ * 哪些窗口区域、以及 <html> 上的 data-theme 是什么。
  *
- * 为什么要有这个:前端的"节流合并"是**纯 JS 逻辑**(setTimeout + 尾沿触发),
- * Python 侧测不到;而节流最容易出的错就是"掐头"—— 中间几次变化被丢掉,
+ * 为什么要有这个:前端的"节流合并"和"主题切换"都是**纯 JS 逻辑**
+ * (setTimeout + 尾沿触发 / 属性切换),Python 侧测不到;
+ * 而节流最容易出的错就是"掐头"—— 中间几次变化被丢掉,
  * 窗口形状停在旧尺寸上。这个脚本就是用来盯住它的。
  *
  * 用法:node capule_js_harness.js '<json 步骤>'
  *   步骤:{"op":"advance","ms":100}          推进虚拟时钟,触发到期的定时器
  *         {"op":"call","fn":"setPreview","args":["你好"]}  调前端方法
  *         {"op":"fire","event":"resize"}    触发 window 的事件
- * 输出:stdout 上一个 JSON —— {"calls":[{"name":...,"args":[...]}]}
+ * 输出:stdout 上一个 JSON —— {"calls":[{"name":...,"args":[...]}],
+ *                              "html":{"data-theme":"light"}}
  *
  * 虚拟时钟是手搓的:setTimeout 不真的等,advance() 才推进 —— 测试不sleep,
  * 也不会因为真实计时器的抖动而 flaky。
@@ -113,8 +115,16 @@ global.window = global;
 global.setTimeout = setTimeoutFake;
 global.clearTimeout = () => {};
 global.addEventListener = (type, fn) => { listeners[type] = fn; };
+
+/* <html> 的属性:主题就靠 data-theme 表达(auto 时这个属性被移除) */
+const htmlAttrs = {};
 global.document = {
   readyState: 'complete',
+  documentElement: {
+    setAttribute: (k, v) => { htmlAttrs[k] = v; },
+    removeAttribute: (k) => { delete htmlAttrs[k]; },
+    getAttribute: (k) => (k in htmlAttrs ? htmlAttrs[k] : null)
+  },
   getElementById: (id) => els[id] || null,
   createElement: (tag) => makeEl('new-' + tag),
   addEventListener: () => {}
@@ -159,4 +169,4 @@ for (const step of steps) {
   }
 }
 
-process.stdout.write(JSON.stringify({ calls: calls }));
+process.stdout.write(JSON.stringify({ calls: calls, html: htmlAttrs }));

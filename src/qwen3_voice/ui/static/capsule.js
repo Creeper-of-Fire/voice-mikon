@@ -20,7 +20,7 @@
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
  *   Python → JS : window.__capsule.setState / setLevels / setElapsed
  *                 / setPreview / setResult / setError / setCancelled
- *                 / resetForRecording
+ *                 / resetForRecording / setTheme
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
  *                 / update_regions
  */
@@ -32,6 +32,9 @@
   /* ---- 波形包络（移植自 OpenType）----
      对称包络:两端短、中间高。9 根固定的小条,不滚动。 */
   var WAVE = [5, 8, 12, 16, 19, 16, 12, 8, 5];
+
+  /* 主题档位:auto = 跟随系统,light = 白天,dark = 黑夜 */
+  var THEMES = ['auto', 'light', 'dark'];
 
   /* 胶囊各阶段的中文文案 */
   var PHASE_TEXT = {
@@ -54,7 +57,8 @@
     state: 'idle',      // 控制器状态机
     phase: 'recording', // 胶囊自己的阶段
     level: 0,           // 当前（平滑后）的响度 0..1
-    elapsed: 0          // 录音计时（秒）
+    elapsed: 0,         // 录音计时（秒）
+    theme: 'auto'       // 主题档位
   };
 
   var el = {};              // DOM 缓存
@@ -176,6 +180,26 @@
       return;   // 已经在等尾沿了,这次变化跟下一次一起发
     }
     regionTimer = window.setTimeout(reportRegions, REGION_THROTTLE_MS);
+  }
+
+  /* ==================== 主题 ==================== */
+
+  /* 主题切换:在 <html> 上设 data-theme。
+
+   * auto 时**移除属性** —— 这样 CSS 的 prefers-color-scheme 媒体查询
+   * 自然接管(跟随系统),不需要 JS 去监听系统主题的变化。
+   * 和 panel.js 是同一套机制(见 capsule.css 的主题说明)。 */
+  function applyTheme(mode) {
+    var m = THEMES.indexOf(mode) >= 0 ? mode : 'auto';
+    ui.theme = m;
+    if (!document.documentElement) {
+      return;
+    }
+    if (m === 'auto') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', m);
+    }
   }
 
   /* ==================== 胶囊阶段 ==================== */
@@ -400,6 +424,11 @@
       ui.level = 0;
       setElapsed(0);
       setPhase('recording');
+    },
+    setTheme: function (mode) {
+      // 主题档位:面板改的。Python 侧会在每次录音开始前再补推一次,
+      // 所以这里只需要幂等地设上属性就行。
+      applyTheme(mode);
     }
   };
 
@@ -431,6 +460,7 @@
     writeText('', 'normal');
     setElapsed(0);
     setPhase('recording');
+    applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
 
     bindEvents();
 

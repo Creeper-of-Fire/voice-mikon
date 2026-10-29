@@ -23,6 +23,7 @@
   "panel_geometry": "",
   "panel_visible": false,
   "show_tray": true,
+  "theme": "auto",
   "log_file": "",
   "log_level": "INFO"
 }

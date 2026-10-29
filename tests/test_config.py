@@ -63,3 +63,31 @@ def test_device_name_hints_not_shared_between_instances():
     b = Config()
     a.device_name_hints.append("X")
     assert "X" not in b.device_name_hints
+
+
+# ---------------- 主题档位 ----------------
+
+def test_theme_defaults_to_auto():
+    """默认"跟随系统" —— 新装的用户不该被钉死在某一套配色上。"""
+    assert Config().theme == "auto"
+
+
+def test_theme_roundtrip(tmp_path: Path):
+    """主题要能存进 config.json 再读回来。"""
+    cfg = Config(theme="light")
+    target = tmp_path / "config.json"
+    cfg.save(target)
+
+    loaded = Config.from_dict(json.loads(target.read_text(encoding="utf-8")))
+    assert loaded.theme == "light"
+
+
+def test_validate_catches_bad_theme():
+    """写坏了的主题档位要能被发现(不然界面会跟着瞎切)。"""
+    cfg = Config(theme="solarized")
+    assert any("theme" in issue for issue in cfg.validate())
+
+
+def test_valid_themes_pass_validation():
+    for mode in ("auto", "light", "dark"):
+        assert Config(theme=mode).validate() == []

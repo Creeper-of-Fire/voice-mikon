@@ -6,6 +6,7 @@
 
 import re
 import threading
+import types
 
 import pytest
 
@@ -523,3 +524,191 @@ def test_throttle_merges_region_reports_and_keeps_the_last():
     # 不是中间那次(2 个字 → 宽 120)—— 最后一次不能被节流掐掉
     assert reports[1]["textbar"][2] == 180
     assert reports[1]["pill"][2] == 180
+
+
+# ---------------- 主题(三档:跟随系统 / 白天 / 黑夜) ----------------
+
+class FakeConfig:
+    """带 theme 字段的假配置。
+
+    面板和胶囊只会读它、写它、存它 —— 够用了。
+    """
+
+    def __init__(self, theme="auto"):
+        self.theme = theme
+        self.hotkey = "ctrl+alt+space"
+        self.saves = 0
+
+    def save(self):
+        self.saves += 1
+
+
+class ThemeSink:
+    """记录收到过几次主题事件的推送目标(当胶囊用)。"""
+
+    def __init__(self):
+        self.themes: list[str] = []
+        self.events: list[UIEvent] = []
+
+    def handle_event(self, event):
+        self.events.append(event)
+        if event.kind == "theme":
+            self.themes.append(event.text)
+
+    def push_levels(self, levels, elapsed):
+        pass
+
+
+def _make_themed_panel() -> VoicePanel:
+    """带 config 和推送线程的面板(不建真窗口)。"""
+    panel = _make_panel()
+    panel.controller = types.SimpleNamespace(config=FakeConfig())
+    panel._pump = _EventPump(panel.controller)
+    panel._pump.add_sink(panel)
+    return panel
+
+
+def test_set_theme_saves_config_and_pushes_to_both_windows():
+    """面板改主题:存配置 → 推面板前端 → 推胶囊。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_theme("light")
+
+    assert panel.controller.config.theme == "light"
+    assert panel.controller.config.saves == 1
+
+    # 主题事件是**投进队列**的,由唯一的推送线程分发给所有窗口
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert "setTheme" in panel._window.methods()   # 面板前端
+    assert sink.themes == ["light"]                # 胶囊
+
+
+def test_set_theme_rejects_unknown_mode():
+    """写坏的档位不能传下去 —— 按 auto 处理。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_theme("solarized")
+
+    assert panel.controller.config.theme == "auto"
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert sink.themes == ["auto"]
+
+
+def test_capsule_applies_theme_event():
+    """胶囊收到主题事件 → 推 setTheme 给前端。"""
+    cap = _make_capsule()
+
+    cap.handle_event(UIEvent(kind="theme", text="dark"))
+
+    assert "setTheme" in cap._window.methods()
+
+
+def test_capsule_pushes_theme_before_resetting_for_recording():
+    """主题必须在 resetForRecording **之前**推到胶囊。
+
+    面板改主题是异步的(走推送线程),用户改完马上按热键的话,
+    setTheme 可能还堵在队列里 —— 显示前补推一次,配色才不会错。
+    """
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(theme="light"))
+
+    cap.handle_event(UIEvent(kind="state", state=State.RECORDING))
+
+    methods = cap._window.methods()
+    assert "setTheme" in methods
+    assert methods.index("setTheme") < methods.index("resetForRecording")
+
+
+def test_capsule_frontend_ready_pushes_theme():
+    """前端晚就绪时要把当前主题补推一次。"""
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(theme="dark"))
+
+    cap._on_frontend_ready()
+
+    assert "setTheme" in cap._window.methods()
+
+
+def test_theme_background_color_follows_the_mode(monkeypatch):
+    """建窗底色:强制档用对应色,auto 档读系统。"""
+    import qwen3_voice.ui.panel as panel_mod
+
+    monkeypatch.setattr(panel_mod, "system_prefers_dark", lambda: True)
+    assert panel_mod.theme_background_color("light") == panel_mod.WINDOW_BG_LIGHT
+    assert panel_mod.theme_background_color("dark") == panel_mod.WINDOW_BG_DARK
+    assert panel_mod.theme_background_color("auto") == panel_mod.WINDOW_BG_DARK
+
+    monkeypatch.setattr(panel_mod, "system_prefers_dark", lambda: False)
+    assert panel_mod.theme_background_color("auto") == panel_mod.WINDOW_BG_LIGHT
+
+
+# ---------------- 前端主题逻辑(node 跑真实 JS) ----------------
+
+def _run_js_harness(harness_name: str, steps: list[dict]) -> dict:
+    """跑一个前端 harness,返回它吐的 JSON。没装 node 就跳过。"""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("没装 node,跳过前端测试")
+
+    harness = Path(__file__).with_name(harness_name)
+    out = subprocess.run(
+        [node, str(harness), json.dumps(steps, ensure_ascii=False)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_panel_frontend_sets_theme_attribute(mode):
+    """面板:setTheme('light'/'dark') → <html> 上设 data-theme,当前档高亮。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setTheme", "args": [mode]}])
+
+    assert data["html"].get("data-theme") == mode
+    assert data["active"]["theme"] == mode
+
+
+def test_panel_frontend_auto_removes_theme_attribute():
+    """auto 要**移除**属性 —— 这样 CSS 的媒体查询才能接管(跟随系统)。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setTheme", "args": ["auto"]}])
+
+    assert "data-theme" not in data["html"]
+    assert data["active"]["theme"] == "auto"
+
+
+def test_panel_theme_click_notifies_python():
+    """点主题段的某一档:本地立刻换 + 通知 Python 存档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "click", "group": "themeSeg", "index": 1}])
+
+    assert data["html"].get("data-theme") == "light"
+    assert data["active"]["theme"] == "light"
+    themes = [c for c in data["calls"] if c["name"] == "set_theme"]
+    assert themes and themes[0]["args"] == ["light"]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_capsule_frontend_sets_theme_attribute(mode):
+    """胶囊:和面板同一套机制 —— setTheme 设 data-theme。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setTheme", "args": [mode]}])
+
+    assert data["html"].get("data-theme") == mode
+
+
+def test_capsule_frontend_auto_removes_theme_attribute():
+    """auto:属性移除,交给 CSS 媒体查询。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setTheme", "args": ["auto"]}])
+
+    assert "data-theme" not in data["html"]

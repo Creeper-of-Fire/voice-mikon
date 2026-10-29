@@ -11,9 +11,9 @@
 Python 与前端之间是双向桥接,方法名两边必须严格对齐
 (完整契约见同目录的 ``BRIDGE.md``):
 
-  Python → JS   window.__qwen.setState / setModel / setHotkey
+  Python → JS   window.__qwen.setState / setModel / setHotkey / setTheme
   JS → Python   window.pywebview.api.ready / switch_model / get_snapshot
-                / move_window / close_panel / quit_app
+                / move_window / close_panel / quit_app / set_theme
 
 线程分工:
   主线程      调 webview.start() 并等它返回(winforms 后端会把 GUI
@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..config import THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32.api import (
@@ -61,21 +62,21 @@ log = get_logger("ui.panel")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # 设计基准(逻辑像素 = CSS 像素)
-# 面板瘦身后只剩标题栏 + 模型行 + 页脚,高度按内容自适应,
+# 面板瘦身后只剩标题栏 + 模型行 + 主题行 + 页脚,高度按内容自适应,
 # 这里给的是"内容刚好装下"的下限,不准就在 _fit_window 里量。
 #
 # 尺寸跟 panel.css 的排版对上了:
 #   卡片外边距 6+6 + 卡片描边 1+1 + 标题栏 32+1 + 内容区 8+10
-#   + 模型行 32 + 行距 8 + 页脚 25 = 132
+#   + 模型行 32 + 行距 8 + 主题行 32 + 行距 8 + 页脚 25 = 172
 # (内容再高一点也装得下 —— .panel 是 min-height,装不下时会长高,
 #  _fit_window 量到 scrollHeight 会把窗口跟着放大。)
 BASE_W = 260
-BASE_H = 132
+BASE_H = 172
 
-# 页面加载完成前的窗口底色(占位):跟系统主题走,免得深色系统下闪一下白。
-# 真正的配色由 CSS 的 prefers-color-scheme 媒体查询决定,这里只管"开场"。
-# 这两个值必须和 panel.css 里 :root 的 --bg 一致(浅色 #fff / 深色 #0f0f11),
-# 不然开场那一下会闪出两种底色。
+# 页面加载完成前的窗口底色(占位):跟最终会显示的那套主题一致,
+# 免得深色主题下闪一下白。真正的配色由 CSS 决定,这里只管"开场"。
+# 这两个值必须和 panel.css 里 :root 的 --bg 一致
+# (浅色 #fff / 深色 #0f0f11),不然开场那一下会闪出两种底色。
 WINDOW_BG_LIGHT = "#ffffff"
 WINDOW_BG_DARK = "#0f0f11"
 
@@ -142,9 +143,10 @@ def system_prefers_dark() -> bool:
     读注册表 ``HKCU\\...\\Themes\\Personalize`` 的 ``AppsUseLightTheme``:
     0 = 深色,1 = 浅色。
 
-    只用来给 WebView2 选一个"页面还没加载时的窗口底色" —— 深色系统
-    配白底会闪一下白。真正的配色由 CSS 的 ``prefers-color-scheme``
-    媒体查询决定(WebView2 直接跟随 Windows 的应用主题)。
+    只在"跟随系统(auto)"这一档用来选页面还没加载时的窗口底色 ——
+    深色系统配白底会闪一下白。真正的配色由 CSS 决定:
+    强制档用 ``data-theme`` 属性,auto 档用 ``prefers-color-scheme``
+    媒体查询(WebView2 直接跟随 Windows 的应用主题)。
     """
     try:
         import winreg
@@ -158,6 +160,20 @@ def system_prefers_dark() -> bool:
     except Exception as e:
         log.debug("读系统主题失败,按浅色处理: %s", e)
         return False
+
+
+def theme_background_color(theme: str) -> str:
+    """按主题档位给建窗底色。
+
+    强制档直接用对应色;auto 档读系统(``system_prefers_dark()``)。
+    底色只是"页面加载前的那一瞬间" —— 后面的配色由 CSS 决定,
+    所以这里跟 CSS 的 --bg 保持一致就行,不用跟着主题变来变去。
+    """
+    if theme == "light":
+        return WINDOW_BG_LIGHT
+    if theme == "dark":
+        return WINDOW_BG_DARK
+    return WINDOW_BG_DARK if system_prefers_dark() else WINDOW_BG_LIGHT
 
 
 def dbfs_to_unit(rms: float, floor_rms: float = 0.0) -> float:
@@ -323,6 +339,10 @@ class _PanelApi:
     def switch_model(self, tag: str) -> None:
         self._panel.controller.switch_model(tag)
 
+    def set_theme(self, mode: str) -> None:
+        """切换主题档位(auto / light / dark)。"""
+        self._panel._set_theme(mode)
+
     def get_snapshot(self) -> dict:
         return self._panel._snapshot()
 
@@ -409,8 +429,8 @@ class VoicePanel:
             easy_drag=False,      # 自己实现拖动,才能记住位置
             on_top=True,
             resizable=False,
-            background_color=(WINDOW_BG_DARK if system_prefers_dark()
-                             else WINDOW_BG_LIGHT),
+            background_color=theme_background_color(
+                getattr(self.controller.config, "theme", "auto")),
         )
         self._window.events.before_show += self._on_before_show
         self._window.events.shown += self._on_window_shown
@@ -438,9 +458,51 @@ class VoicePanel:
             self._call_js("setState", self._state_name())
         elif event.kind == "model" and event.model_tag:
             self._call_js("setModel", event.model_tag)
+        elif event.kind == "theme" and event.text:
+            self._call_js("setTheme", event.text)
 
     def push_levels(self, levels: list[float], elapsed: float) -> None:
         """面板不显示电平 —— 空实现(接口要留着,免得 pump 判类型)。"""
+
+    # ---------- 主题 ----------
+
+    def _theme_mode(self) -> str:
+        """当前主题档位(auto / light / dark)。
+
+        读不到就按 auto —— 兜底"跟随系统"不会翻车。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "theme", "auto")
+                       or "auto").strip().lower()
+        except Exception:
+            return "auto"
+        return mode if mode in THEME_MODES else "auto"
+
+    def _set_theme(self, mode: str) -> None:
+        """换主题档位:存配置 → 推面板和胶囊。
+
+        两个窗口都走 _EventPump(面板自己也一样):``evaluate_js`` 是
+        阻塞的,而且 WebView2 的调用必须串行 —— 在 JS API 的回调线程
+        里直接 evaluate_js,就和推送线程抢同一个 WebView2,顺序不可控。
+        前端点按钮时已经先本地换过了,这里推的是"确认",晚几毫秒无感。
+
+        胶囊自己还会在每次录音开始前补推一次当前主题
+        (见 capsule.py 的 RECORDING 分支)—— 那是防"用户改完主题
+        马上按热键,setTheme 还堵在队列里"的竞态。
+        """
+        mode = str(mode or "auto").strip().lower()
+        if mode not in THEME_MODES:
+            log.info("未知主题档位 %r,按 auto 处理", mode)
+            mode = "auto"
+
+        try:
+            self.controller.config.theme = mode
+            self.controller.config.save()
+        except Exception as e:
+            log.debug("保存主题设置失败: %s", e)
+
+        # 一个事件,面板和胶囊都收到 —— 顺序由唯一的推送线程保证
+        self._pump.on_event(UIEvent(kind="theme", text=mode))
 
     # ---------- 几何 ----------
 
@@ -543,6 +605,7 @@ class VoicePanel:
         self._call_js("setState", self._state_name())
         self._call_js("setModel", self._model_tag())
         self._call_js("setHotkey", self.controller.config.hotkey)
+        self._call_js("setTheme", self._theme_mode())
         try:
             self._fit_window()
         except Exception as e:

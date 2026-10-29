@@ -4,7 +4,7 @@
 
 | 窗口 | 前端文件 | Python 宿主 | 职责 |
 |---|---|---|---|
-| 面板 | `static/index.html` + `panel.css` + `panel.js` | `panel.py` | 配置窗口:状态、模型切换、退出 |
+| 面板 | `static/index.html` + `panel.css` + `panel.js` | `panel.py` | 配置窗口:状态、模型切换、主题切换、退出 |
 | 胶囊 | `static/capsule.html` + `capsule.css` + `capsule.js` | `capsule.py` | 录音反馈:实时预览、波形、计时 |
 
 两侧实现必须严格遵守,不得自行增删、改名或改语义。改这里就要同时改两边。
@@ -39,14 +39,15 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__qwen.setState(state)` | `state` ∈ `"starting"` \| `"idle"` \| `"recording"` \| `"processing"` \| `"error"` | 状态机变化时调用(面板只拿它点亮标题栏的状态点) |
 | `__qwen.setModel(tag)` | `tag` ∈ `"0.6B"` \| `"1.7B"` | 当前模型 |
 | `__qwen.setHotkey(text)` | `text` string | 热键显示文本,启动时推一次 |
+| `__qwen.setTheme(mode)` | `mode` ∈ `"auto"` \| `"light"` \| `"dark"` | 当前主题档位,启动时推一次;换档时再推 |
 
 > 面板瘦身后**不再**接收 `setLevels` / `setElapsed` / `setStatus` /
 > `setResult` / `setPreview` —— 这些全部归胶囊窗口。
-> 推送层(面板的 `_EventPump`)按窗口过滤:面板只推上面这三个,
+> 推送层(面板的 `_EventPump`)按窗口过滤:面板只推上面这几个,
 > 胶囊推全套。
 
 前端在 DOM 就绪后调用 `window.pywebview.api.ready()`;Python 收到 `ready()`
-后立即推一次**全量状态**(state / model / hotkey)。
+后立即推一次**全量状态**(state / model / hotkey / theme)。
 
 ## JS → Python
 
@@ -61,6 +62,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `move_window(x, y)` | None | 窗口左上角移到**绝对位置** (x, y),CSS(逻辑)像素 |
 | `close_panel()` | None | 隐藏面板(**不是**退出程序) |
 | `quit_app()` | None | 退出整个程序 |
+| `set_theme(mode)` | None | 切换主题档位,`mode` ∈ `"auto"` / `"light"` / `"dark"` |
 
 ### 拖动的单位与节流
 
@@ -99,6 +101,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__capsule.setError(text)` | `text` string | 出错:文字条转暗红底 + 红字 |
 | `__capsule.setCancelled()` | 无 | 用户主动取消:文字条显示「已取消」 |
 | `__capsule.resetForRecording()` | 无 | 新一轮录音开始:清掉上一轮的文案与配色 |
+| `__capsule.setTheme(mode)` | `mode` ∈ `"auto"` \| `"light"` \| `"dark"` | 主题档位;面板改档位时推,胶囊每次显示前也会补推一次 |
 
 ### `setLevels` 的语义(重要)
 
@@ -172,16 +175,60 @@ logo、文案、配色**。只学交互与视觉语言。
 > 面板时代的"滚动条形图"(22 根、三槽轮转、4 段非线性映射)已经随面板
 > 瘦身一起删掉了,现在只有胶囊这一套。
 
-### 日夜模式
+### 主题(三档:跟随系统 / 白天 / 黑夜)
 
-- **胶囊固定深色**,不跟随系统 —— 它是压在别人窗口上的浮层,
-  深底在任何背景上都读得清
-- **面板跟随系统**:`prefers-color-scheme` 媒体查询,WebView2 直接
-  跟随 Windows 的"应用模式",不需要 JS、不需要监听切换事件
-- 配色全部收敛在 `:root` 的 CSS 变量里,深色模式只覆盖变量值,
-  两套主题共用同一份结构
-- 窗口底色(`background_color`)也按系统主题给,免得深色系统下
-  页面加载前闪一下白
+面板和胶囊**共用同一套主题机制**,面板上有一行"主题"分段控件
+(自动 / 白天 / 黑夜),改哪边两边都跟着换。
+
+| 档位 | 含义 | 落地方式 |
+|---|---|---|
+| `auto` | 跟随系统(Windows 的"应用模式") | 前端**不设** `data-theme`,CSS 的 `prefers-color-scheme` 媒体查询自然接管 |
+| `light` | 强制白天 | `<html data-theme="light">` |
+| `dark` | 强制黑夜 | `<html data-theme="dark">` |
+
+**为什么 auto 时不设属性**:设了属性就得靠 JS 监听系统主题变化
+(`matchMedia` 的 change 事件)才能跟随 —— 而 WebView2 的
+`prefers-color-scheme` 本来就直接跟着 Windows 走,媒体查询一条就够。
+不设属性 = 少一个监听、少一处状态。
+
+CSS 侧三段(`panel.css` / `capsule.css` 各一份,结构一样):
+
+```css
+:root { /* 浅色 token */ }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { /* 深色 token */ }
+}
+:root[data-theme="dark"] { /* 深色 token */ }
+```
+
+`[data-theme="light"]` 的那个 `:not` 是关键:强制白天时,系统的深色
+媒体查询照样会命中,不加 `:not` 就会被系统深色压回去。
+
+> ⚠️ 胶囊(`capsule.css`)**不设** `color-scheme`:它是透明窗口,
+> html/body 背景都是 transparent,声明了 `color-scheme` 可能让浏览器
+> 给 canvas 刷一层不透明底色,透明就废了。
+
+### 主题的推送链路
+
+```
+面板前端点主题段
+   → window.pywebview.api.set_theme(mode)
+   → panel.py  _set_theme():存 config.json(config.theme)
+                              → 推自己的前端 __qwen.setTheme(mode)
+                              → 往 _EventPump 投一个 kind="theme" 事件
+   → 胶囊 handle_event(kind="theme") → __capsule.setTheme(mode)
+```
+
+- 面板自己**不**走推送线程:它就是当前窗口,直接 `evaluate_js` 即可
+- 胶囊**必须**走推送线程:WebView2 的调用要串行,在推送线程之外去
+  `evaluate_js` 同一个 WebView2,顺序会乱
+- 胶囊**每次录音开始前**(即 `resetForRecording` 之前)会再补推一次
+  当前主题 —— 面板改主题是异步的,用户改完马上按热键时
+  `setTheme` 可能还堵在队列里,补推一次配色才不会错
+- 胶囊隐藏时也能推:`evaluate_js` 对隐藏窗口照样执行
+- 建窗底色(`background_color`)按档位给:`light`/`dark` 用对应色,
+  `auto` 读系统 —— 免得页面加载前闪一下别的底色
+  (胶囊是透明窗,`background_color` 本来就无效,不用管)
 
 ### 胶囊窗口的视觉规格
 
@@ -193,15 +240,27 @@ logo、文案、配色**。只学交互与视觉语言。
   内容用 CSS 贴着窗口底部排(`.stack` 的 `justify-content: flex-end`),
   文字条到 `max-height` 就自己内部滚动
 - **透明窗口上不能有 `box-shadow` / `backdrop-filter`** —— 它们会渲染成
-  一条灰带。层次只靠"深底 + 半透明白描边"表达
-- 文字条:底色 `#0b0b0c`、字色 `#f4f4f5`、描边 `rgba(255,255,255,0.2)`、
-  圆角 14px、内边距 10~14px、字号 14px、行高 1.8、
+  一条灰带。层次只靠"底色 + 半透明描边"表达
+- 文字条:圆角 14px、内边距 10~14px、字号 14px、行高 1.8、
   `white-space: pre-wrap` + `overflow-wrap: anywhere`、
   最大宽 480px / 最大高 120px(超出内部滚动)
-- 胶囊:高 40px、圆角 999px、同款深底与描边,内容是
-  `[✕ 取消(30×30 圆钮,底色 #3a3a3e)] [波形区 + 计时] [✓ 结束(30×30 圆钮,
+- 胶囊:高 40px、圆角 999px、同款底色与描边,内容是
+  `[✕ 取消(30×30 圆钮)] [波形区 + 计时] [✓ 结束(30×30 圆钮,
   底色与波形同色 #ff5a5a)]`
-- 错误态:文字条底色 `#2a0f11`、描边 `rgba(255,107,107,0.3)`、字色 `#fecaca`
+- 配色**全部走 `:root` 的 token**,深浅两套只换值不改结构:
+
+  | token | 深色 | 浅色 |
+  |---|---|---|
+  | `--deep`(文字条 + 胶囊底色) | `#0b0b0c` | `#fff` |
+  | `--fg`(字色) | `#f4f4f5` | `#111113` |
+  | `--stroke`(描边) | `rgba(255,255,255,0.2)` | `rgba(17,17,19,0.12)` |
+  | `--cancel-btn` | `#3a3a3e` | `#ececee` |
+  | `--err-bg` / `--err-stroke` / `--err-fg` | `#2a0f11` / `rgba(255,107,107,0.3)` / `#fecaca` | `#fef2f2` / `rgba(229,72,77,0.35)` / `#b91c1c` |
+  | `--wave`(录音红) | `#ff5a5a` | `#ff5a5a`(两套一样 —— 红是语义色,不是主题色) |
+
+  浅色胶囊是本项目自定的(OpenType 只有深色胶囊):白卡 + 深字,
+  描边比深色那套更深 —— 浅底上 `rgba(255,255,255,.2)` 那种白描边
+  根本看不见
 - 识别中:波形区换成「识别中…」+ 纯 CSS 旋转动画(不引外部图标库)
 
 ### 胶囊必须不抢焦点(硬性要求)
@@ -321,7 +380,11 @@ payload 格式:
 | `body` | CSS `background: transparent` |
 
 另外:透明窗口上**不能有 `box-shadow` / `backdrop-filter`** —— 它们会
-渲染成一条灰带。层次只靠"深底 + 半透明白描边"表达。
+渲染成一条灰带。层次只靠"底色 + 半透明描边"表达。
+
+同理也**不能给胶囊的 `:root` 设 `color-scheme`** —— html/body 背景都是
+transparent,canvas 跟着根元素走,声明了 `color-scheme` 可能让浏览器给
+canvas 刷一层不透明底色,透明就废了。
 
 ### 布局
 

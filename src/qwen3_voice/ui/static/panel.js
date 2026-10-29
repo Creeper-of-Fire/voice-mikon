@@ -7,9 +7,9 @@
  * (capsule.html / capsule.css / capsule.js),那边是另一套独立文件。
  *
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
- *   Python → JS : window.__qwen.setState / setModel / setHotkey
+ *   Python → JS : window.__qwen.setState / setModel / setHotkey / setTheme
  *   JS → Python : window.pywebview.api.ready / switch_model / get_snapshot
- *                 / move_window / close_panel / quit_app
+ *                 / move_window / close_panel / quit_app / set_theme
  */
 (function () {
   'use strict';
@@ -19,6 +19,9 @@
   // 契约定义的状态集合
   var STATES = ['starting', 'idle', 'recording', 'processing', 'error'];
 
+  // 主题档位：auto = 跟随系统,light = 白天,dark = 黑夜
+  var THEMES = ['auto', 'light', 'dark'];
+
   // Python 还没推热键时的兜底文案
   var DEFAULT_HOTKEY = 'Ctrl+Alt+Space';
 
@@ -27,7 +30,8 @@
   var ui = {
     state: 'idle',          // 当前状态机
     model: '0.6B',          // 当前模型
-    hotkey: ''              // 当前热键（原始字符串，不含"热键"前缀）
+    hotkey: '',             // 当前热键（原始字符串，不含"热键"前缀）
+    theme: 'auto'           // 当前主题档位
   };
 
   var el = {};             // DOM 缓存
@@ -132,6 +136,35 @@
     if (el.hotkey) {
       // 只把按键组合写进 <kbd>:"热键"两个字是 HTML 里的静态标签
       el.hotkey.textContent = ui.hotkey || '未设置';
+    }
+  }
+
+  /* 主题切换:在 <html> 上设 data-theme。
+
+   * auto 时**移除属性** —— 这样 CSS 的 prefers-color-scheme 媒体查询
+   * 自然接管(跟随系统),不需要 JS 去监听系统主题的变化。
+   * CSS 那边三段:浅色是 :root,深色由
+   *   @media(dark){:root:not([data-theme="light"])} 和
+   *   :root[data-theme="dark"]
+   * 给出 —— 强制白天时媒体查询那一段会被 :not 排除掉,压不过我们。 */
+  function applyTheme(mode) {
+    ensureDom();
+    var m = THEMES.indexOf(mode) >= 0 ? mode : 'auto';
+    ui.theme = m;
+
+    if (m === 'auto') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', m);
+    }
+
+    // 当前档位高亮
+    if (el.themeSeg) {
+      var items = el.themeSeg.querySelectorAll('.seg-item');
+      for (var i = 0; i < items.length; i++) {
+        var isActive = items[i].getAttribute('data-theme-mode') === m;
+        items[i].classList.toggle('is-active', isActive);
+      }
     }
   }
 
@@ -248,6 +281,22 @@
       });
     }
 
+    // 主题切换
+    if (el.themeSeg) {
+      el.themeSeg.addEventListener('click', function (e) {
+        var item = e.target && e.target.closest ? e.target.closest('.seg-item') : null;
+        if (!item) {
+          return;
+        }
+        var mode = item.getAttribute('data-theme-mode');
+        if (!mode) {
+          return;
+        }
+        applyTheme(mode);   // 先本地生效，Python 随后会用 setTheme 校正
+        callApi('set_theme', mode);
+      });
+    }
+
     // 标题栏拖动
     if (el.titlebar) {
       el.titlebar.addEventListener('mousedown', onDragStart, false);
@@ -266,6 +315,9 @@
     },
     setHotkey: function (text) {
       applyHotkey(text);
+    },
+    setTheme: function (mode) {
+      applyTheme(mode);
     }
   };
 
@@ -278,6 +330,7 @@
     el.closeBtn = $('closeBtn');
     el.quitBtn = $('quitBtn');
     el.modelSeg = $('modelSeg');
+    el.themeSeg = $('themeSeg');
     el.hotkey = $('hotkeyLabel');
   }
 
@@ -294,6 +347,7 @@
     applyState('idle');
     applyModel('0.6B');
     applyHotkey('热键 Ctrl+Alt+V');
+    applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
 
     bindEvents();
 

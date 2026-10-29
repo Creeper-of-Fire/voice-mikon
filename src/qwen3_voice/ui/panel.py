@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..config import THEME_MODES
+from ..config import CAPSULE_POSITION_MODES, THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
 from ..win32.api import (
@@ -67,11 +67,16 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 #
 # 尺寸跟 panel.css 的排版对上了:
 #   卡片外边距 6+6 + 卡片描边 1+1 + 标题栏 32+1 + 内容区 8+10
-#   + 模型行 32 + 行距 8 + 主题行 32 + 行距 8 + 页脚 25 = 172
+#   + 模型行 32 + 行距 8 + 主题行 32 + 行距 8
+#   + 位置行 32 + 行距 8 + 预览行 32 + 行距 8 + 页脚 25 = 252
 # (内容再高一点也装得下 —— .panel 是 min-height,装不下时会长高,
 #  _fit_window 量到 scrollHeight 会把窗口跟着放大。)
-BASE_W = 260
-BASE_H = 172
+#
+# 宽度 320:多出来的 60px 给"位置"那行的三段控件 ——
+# "跟随输入 / 固定底部 / 自定义"是 11 个中文字,260px 装不下,
+# 挤成一团反而看不清。宽度是固定值,不参与自适应。
+BASE_W = 320
+BASE_H = 252
 
 # 页面加载完成前的窗口底色(占位):跟最终会显示的那套主题一致,
 # 免得深色主题下闪一下白。真正的配色由 CSS 决定,这里只管"开场"。
@@ -343,6 +348,14 @@ class _PanelApi:
         """切换主题档位(auto / light / dark)。"""
         self._panel._set_theme(mode)
 
+    def set_capsule_position(self, mode: str) -> None:
+        """切换胶囊位置模式(follow / bottom / custom)。"""
+        self._panel._set_capsule_position(mode)
+
+    def set_preview(self, enabled: bool) -> None:
+        """开关录音时的实时预览文字条。"""
+        self._panel._set_preview(enabled)
+
     def get_snapshot(self) -> dict:
         return self._panel._snapshot()
 
@@ -460,6 +473,10 @@ class VoicePanel:
             self._call_js("setModel", event.model_tag)
         elif event.kind == "theme" and event.text:
             self._call_js("setTheme", event.text)
+        elif event.kind == "capsule_position" and event.text:
+            self._call_js("setCapsulePosition", event.text)
+        elif event.kind == "preview_enabled":
+            self._call_js("setPreviewEnabled", event.text not in ("0", ""))
 
     def push_levels(self, levels: list[float], elapsed: float) -> None:
         """面板不显示电平 —— 空实现(接口要留着,免得 pump 判类型)。"""
@@ -503,6 +520,63 @@ class VoicePanel:
 
         # 一个事件,面板和胶囊都收到 —— 顺序由唯一的推送线程保证
         self._pump.on_event(UIEvent(kind="theme", text=mode))
+
+    # ---------- 胶囊位置 / 预览开关 ----------
+
+    def _capsule_position(self) -> str:
+        """当前胶囊位置模式(follow / bottom / custom)。
+
+        读不到就按 follow —— 默认档,也是用户最常用的期待。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "capsule_position",
+                               "follow") or "follow").strip().lower()
+        except Exception:
+            return "follow"
+        return mode if mode in CAPSULE_POSITION_MODES else "follow"
+
+    def _set_capsule_position(self, mode: str) -> None:
+        """换胶囊位置模式:存配置 → 推面板和胶囊。
+
+        和主题同一条链路:一个事件,面板和胶囊都收到,顺序由唯一的
+        推送线程保证。胶囊收到后自己记住新模式,下一轮录音时按新
+        模式摆位(不打断当前这一轮)。
+        """
+        mode = str(mode or "follow").strip().lower()
+        if mode not in CAPSULE_POSITION_MODES:
+            log.info("未知胶囊位置模式 %r,按 follow 处理", mode)
+            mode = "follow"
+
+        try:
+            self.controller.config.capsule_position = mode
+            self.controller.config.save()
+        except Exception as e:
+            log.debug("保存胶囊位置模式失败: %s", e)
+
+        self._pump.on_event(UIEvent(kind="capsule_position", text=mode))
+
+    def _preview_enabled(self) -> bool:
+        """要不要显示实时预览文字条。"""
+        try:
+            return bool(getattr(self.controller.config, "show_preview", True))
+        except Exception:
+            return True
+
+    def _set_preview(self, enabled: bool) -> None:
+        """开关实时预览文字条:存配置 → 推面板和胶囊。
+
+        预览关掉之后,胶囊只剩波形+计时+按钮;"已输入"/错误提示
+        改在胶囊内的 label 位显示(前端负责,后端不再推预览文字)。
+        """
+        flag = bool(enabled)
+        try:
+            self.controller.config.show_preview = flag
+            self.controller.config.save()
+        except Exception as e:
+            log.debug("保存预览开关失败: %s", e)
+
+        self._pump.on_event(
+            UIEvent(kind="preview_enabled", text="1" if flag else "0"))
 
     # ---------- 几何 ----------
 
@@ -606,6 +680,10 @@ class VoicePanel:
         self._call_js("setModel", self._model_tag())
         self._call_js("setHotkey", self.controller.config.hotkey)
         self._call_js("setTheme", self._theme_mode())
+        # 胶囊位置模式与预览开关:前端可能比 Python 晚就绪,
+        # 那时的值没推出去,这里补上
+        self._call_js("setCapsulePosition", self._capsule_position())
+        self._call_js("setPreviewEnabled", self._preview_enabled())
         try:
             self._fit_window()
         except Exception as e:

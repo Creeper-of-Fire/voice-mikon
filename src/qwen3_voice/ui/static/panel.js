@@ -8,8 +8,10 @@
  *
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
  *   Python → JS : window.__qwen.setState / setModel / setHotkey / setTheme
+ *                 / setCapsulePosition / setPreviewEnabled
  *   JS → Python : window.pywebview.api.ready / switch_model / get_snapshot
  *                 / move_window / close_panel / quit_app / set_theme
+ *                 / set_capsule_position / set_preview
  */
 (function () {
   'use strict';
@@ -22,6 +24,9 @@
   // 主题档位：auto = 跟随系统,light = 白天,dark = 黑夜
   var THEMES = ['auto', 'light', 'dark'];
 
+  // 胶囊位置档位：follow = 跟随输入光标,bottom = 固定底部,custom = 自定义
+  var POSITION_MODES = ['follow', 'bottom', 'custom'];
+
   // Python 还没推热键时的兜底文案
   var DEFAULT_HOTKEY = 'Ctrl+Alt+Space';
 
@@ -31,7 +36,9 @@
     state: 'idle',          // 当前状态机
     model: '0.6B',          // 当前模型
     hotkey: '',             // 当前热键（原始字符串，不含"热键"前缀）
-    theme: 'auto'           // 当前主题档位
+    theme: 'auto',          // 当前主题档位
+    position: 'follow',     // 当前胶囊位置档位
+    preview: true           // 实时预览文字条是否显示
   };
 
   var el = {};             // DOM 缓存
@@ -168,6 +175,34 @@
     }
   }
 
+  /* ==================== 胶囊位置 / 预览开关 ==================== */
+
+  /* 胶囊位置档位:follow(跟随输入光标) / bottom(固定底部) / custom(自定义)。
+   * 改的是**胶囊**的行为,面板只负责把档位记下来并广播出去。 */
+  function applyCapsulePosition(mode) {
+    ensureDom();
+    var m = POSITION_MODES.indexOf(mode) >= 0 ? mode : 'follow';
+    ui.position = m;
+
+    if (el.positionSeg) {
+      var items = el.positionSeg.querySelectorAll('.seg-item');
+      for (var i = 0; i < items.length; i++) {
+        var isActive = items[i].getAttribute('data-position-mode') === m;
+        items[i].classList.toggle('is-active', isActive);
+      }
+    }
+  }
+
+  /* 预览开关:关掉之后录音时不再显示实时预览文字条,
+   * 胶囊里只剩波形+计时+按钮(提示改在胶囊内的 label 位)。 */
+  function applyPreview(enabled) {
+    ensureDom();
+    ui.preview = !!enabled;
+    if (el.previewToggle) {
+      el.previewToggle.checked = ui.preview;
+    }
+  }
+
   /* ==================== 拖动 ==================== */
 
   /* 拖动 = 发**绝对目标位置**,不是增量:
@@ -301,6 +336,31 @@
     if (el.titlebar) {
       el.titlebar.addEventListener('mousedown', onDragStart, false);
     }
+
+    // 胶囊位置档位
+    if (el.positionSeg) {
+      el.positionSeg.addEventListener('click', function (e) {
+        var item = e.target && e.target.closest ? e.target.closest('.seg-item') : null;
+        if (!item) {
+          return;
+        }
+        var mode = item.getAttribute('data-position-mode');
+        if (!mode) {
+          return;
+        }
+        applyCapsulePosition(mode);   // 先本地高亮，Python 随后会用 setCapsulePosition 校正
+        callApi('set_capsule_position', mode);
+      });
+    }
+
+    // 预览开关
+    if (el.previewToggle) {
+      el.previewToggle.addEventListener('change', function () {
+        var on = !!el.previewToggle.checked;
+        applyPreview(on);             // 先本地生效，Python 随后会用 setPreviewEnabled 校正
+        callApi('set_preview', on);
+      });
+    }
   }
 
   /* ==================== 对外接口 ==================== */
@@ -318,6 +378,12 @@
     },
     setTheme: function (mode) {
       applyTheme(mode);
+    },
+    setCapsulePosition: function (mode) {
+      applyCapsulePosition(mode);
+    },
+    setPreviewEnabled: function (enabled) {
+      applyPreview(enabled);
     }
   };
 
@@ -331,6 +397,8 @@
     el.quitBtn = $('quitBtn');
     el.modelSeg = $('modelSeg');
     el.themeSeg = $('themeSeg');
+    el.positionSeg = $('positionSeg');
+    el.previewToggle = $('previewToggle');
     el.hotkey = $('hotkeyLabel');
   }
 
@@ -348,6 +416,8 @@
     applyModel('0.6B');
     applyHotkey('热键 Ctrl+Alt+V');
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
+    applyCapsulePosition('follow');   // 同理:setCapsulePosition 会推真实档位
+    applyPreview(true);               // 同理:setPreviewEnabled 会推真实值
 
     bindEvents();
 

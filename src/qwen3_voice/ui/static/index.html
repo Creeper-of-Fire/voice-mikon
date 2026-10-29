@@ -41,6 +41,25 @@
         </div>
       </div>
 
+      <!-- 胶囊出现在哪:跟随输入光标 / 固定底部 / 自己拖一个位置 -->
+      <div class="option-row">
+        <span class="row-label">位置</span>
+        <div class="seg is-text is-tight" id="positionSeg" role="group" aria-label="胶囊位置">
+          <button class="seg-item is-active" type="button" data-position-mode="follow" title="贴着输入光标出现(像输入法候选框)">跟随输入</button>
+          <button class="seg-item" type="button" data-position-mode="bottom" title="固定在屏幕底部居中">固定底部</button>
+          <button class="seg-item" type="button" data-position-mode="custom" title="拖动胶囊自己选位置,下次从记忆位置出现">自定义</button>
+        </div>
+      </div>
+
+      <!-- 预览文字条:关掉之后胶囊只剩波形+计时+按钮,不挡屏幕 -->
+      <div class="option-row">
+        <span class="row-label">预览</span>
+        <label class="switch" id="previewSwitch" title="录音时显示实时预览文字">
+          <input type="checkbox" id="previewToggle" checked>
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+
       <footer class="footer">
         <!-- "热键" 是静态标签,按键组合由 panel.js 写进 kbd(OpenType 的键帽样式) -->
         <span class="hotkey"><span class="hotkey-label">热键</span><kbd id="hotkeyLabel">Ctrl+Alt+V</kbd></span>

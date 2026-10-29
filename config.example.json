@@ -25,6 +25,10 @@
   "panel_visible": false,
   "show_tray": true,
   "theme": "auto",
+  "capsule_position": "follow",
+  "show_preview": true,
+  "capsule_geometry": "",
+  "capsule_monitor": "",
   "log_file": "",
   "log_level": "INFO"
 }

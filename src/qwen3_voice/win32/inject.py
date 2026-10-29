@@ -17,6 +17,17 @@
   这样最坏情况是"用户原内容没还回去",而不是"用户新内容被吞掉"。
   真正的解法是缩短占用时间 —— 这里的占用窗口比 OpenType 的 1.2s 短。
 
+**没送达就不还**(本项目自己的规矩):
+OpenType 能放心用完就还,是因为它有 UI Automation 可以读回控件内容
+校验,知道有没有部分成功。我们没有这个校验能力,所以只认"事件确实
+送出去了"这一个信号:
+    - 送出去了 -> 文字已经在目标窗口里,归还原内容,一切照旧
+    - 没送出去 -> **不还**,把识别结果留在剪贴板里
+      (目标窗口没收到、剪贴板又被抹掉 = 刚说出口的话彻底消失,
+       那是最不能接受的结果)
+代价是失败时用户原来那份剪贴板内容被顶掉了 —— 宁可丢一份旧的,
+也不能丢刚说出口的。胶囊上还有「复制」按钮可以手动取走。
+
 为什么不用 `SendInput` + `KEYEVENTF_UNICODE` 逐字打字:
   那种方式不碰剪贴板,看着更"干净",但 OpenType 只在**读不到目标控件**
   时才用它(游戏、终端)。原因有二:
@@ -55,7 +66,13 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
     """把 text 粘贴到 hwnd 窗口的光标处。
 
     hwnd 为 0 表示不恢复焦点(粘贴到当前前台窗口)。
-    返回是否成功写入剪贴板并发送粘贴。
+
+    返回**是否真的送到了目标窗口**。
+
+    送不到就必须如实说送不到 —— 谎报成功比失败更糟:用户以为文字
+    已经进输入框了,不会再去别处找,结果那段话其实哪儿都没有。
+    送不到时的兜底是**把识别结果留在剪贴板里**(不归还),用户按一下
+    Ctrl+V 就能拿到,胶囊上也有「复制」按钮可以点。
     """
     if not text:
         return False
@@ -71,7 +88,15 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
         return False
 
     # ---- 备份原剪贴板(只备份文本)----
-    original = clipboard.get_text() if restore else None
+    # "读失败"和"里面没有文本"必须分得清:读失败说明我们**不知道**
+    # 原内容是什么,也就没法归还 —— 那就干脆不还,把识别结果留在
+    # 剪贴板里(总比"清空了又不还"强)。
+    original: str | None = None
+    if restore:
+        read_ok, original = clipboard.read_text()
+        if not read_ok:
+            log.warning("读不到原剪贴板内容(可能被别的程序占着),"
+                        "本次不归还,识别结果将留在剪贴板")
 
     if not clipboard.set_text(text):
         log.debug("写入剪贴板失败")
@@ -84,20 +109,41 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
         time.sleep(0.25)
 
     sent = send_ctrl_v()
+    # SendInput 只插入数组前缀,顺序是 [Ctrl↓, V↓, V↑, Ctrl↑]。
+    # **V↓ 送出去 = 目标应用已经收到"粘贴"这个动作了**:
+    #   sent >= 2  粘贴已经触发(Ctrl↑ 没送出去只是键没抬起,
+    #               api.send_ctrl_v 会补抬,不影响已经发生的粘贴)
+    #   sent <= 1  V 根本没送出去,**什么都没发生**
+    delivered = sent >= 2
+    if not delivered:
+        log.warning("Ctrl+V 一个事件都没送出去(sent=%d),目标没收到粘贴", sent)
+        # 没送出去:**不恢复剪贴板**,把识别结果留在里面。
+        # 恢复了就等于把这段话彻底弄丢(目标窗口没收到,剪贴板也没了),
+        # 那才是真的"刚说出口的话消失了"。
+        # 代价是用户原来的剪贴板内容被顶掉了 —— 这是"借用剪贴板"的
+        # 固有代价:宁可丢一份旧的,也不能丢刚说出口的。
+        log.info("注入未送达,识别结果保留在剪贴板里")
+        return False
     if sent < 4:
-        # SendInput 只投递了一部分(常见于被 UIPI 拦下:目标程序以管理员
-        # 身份运行,我们的进程不是)。此时目标多半没收到粘贴。
-        log.warning("Ctrl+V 只投递了 %d/4 个事件,可能没送达", sent)
+        # 抬起事件没全部送达,但 V↓ 已经送出去 = 粘贴**已经触发**了。
+        # api.send_ctrl_v 会把抬起事件补发掉(补发在微秒级,远快过
+        # 按键重复的最小间隔),所以这里绝不能重贴 —— 那会造成重复文本。
+        log.info("Ctrl+V 只投递了 %d/4 个事件,粘贴已触发", sent)
     time.sleep(PASTE_SETTLE)
 
     # 恢复原剪贴板放到后台线程:_restore 里要等 RESTORE_SETTLE(约 1 秒)
     # 才动手,同步等它的话 UI 状态会滞后 —— 用户已经看到文字进输入框
-    # 了,面板却还转着"识别中"(实测被吐槽过)。归属守卫(序号比对)
+    # 了,胶囊却还转着"识别中"(实测被吐槽过)。归属守卫(序号比对)
     # 在后台做完全等价:比对的是我们发布时的序号,谁先检查都一样。
-    threading.Thread(
-        target=_restore, args=(original, text, published_seq),
-        name="clipboard-restore", daemon=True,
-    ).start()
+    #
+    # original 为 None 有两种情况:配置关了归还,或者原剪贴板里确实
+    # 没有文本(读到了但里面是空的/只有图片)。两种都不动 ——
+    # 识别结果留在剪贴板里,用户自己还能用。
+    if original is not None:
+        threading.Thread(
+            target=_restore, args=(original, text, published_seq),
+            name="clipboard-restore", daemon=True,
+        ).start()
     return True
 
 

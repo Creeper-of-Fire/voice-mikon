@@ -64,6 +64,10 @@ def _make_capsule() -> VoiceCapsule:
     cap._hide_lock = threading.Lock()
     cap._focus_restore = 0
     cap._target_hwnd = 0
+    # 位置模式相关的新状态(绕过了 __init__,得手动补上)
+    cap._anchor = None
+    cap._dragging = False
+    cap._drag_lock = threading.Lock()
     cap._window = FakeWindow("__capsule")
     cap.controller = None
     return cap
@@ -513,7 +517,7 @@ def test_throttle_merges_region_reports_and_keeps_the_last():
     ]
     out = subprocess.run(
         [node, str(harness), json.dumps(steps, ensure_ascii=False)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     records = json.loads(out.stdout)["calls"]
 
@@ -529,14 +533,19 @@ def test_throttle_merges_region_reports_and_keeps_the_last():
 # ---------------- 主题(三档:跟随系统 / 白天 / 黑夜) ----------------
 
 class FakeConfig:
-    """带 theme 字段的假配置。
+    """带配置字段的假配置。
 
     面板和胶囊只会读它、写它、存它 —— 够用了。
     """
 
-    def __init__(self, theme="auto"):
+    def __init__(self, theme="auto", capsule_position="follow",
+                 show_preview=True):
         self.theme = theme
         self.hotkey = "ctrl+alt+space"
+        self.capsule_position = capsule_position
+        self.show_preview = show_preview
+        self.capsule_geometry = ""
+        self.capsule_monitor = ""
         self.saves = 0
 
     def save(self):
@@ -646,6 +655,176 @@ def test_theme_background_color_follows_the_mode(monkeypatch):
     assert panel_mod.theme_background_color("auto") == panel_mod.WINDOW_BG_LIGHT
 
 
+# ---------------- 胶囊位置模式 + 预览开关 ----------------
+
+def test_set_capsule_position_saves_config_and_pushes_to_both_windows():
+    """面板改位置模式:存配置 → 推面板前端 → 推胶囊。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_capsule_position("custom")
+
+    assert panel.controller.config.capsule_position == "custom"
+    assert panel.controller.config.saves == 1
+
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert "setCapsulePosition" in panel._window.methods()   # 面板前端
+    assert sink.events[-1].kind == "capsule_position"         # 胶囊
+
+
+def test_set_capsule_position_rejects_unknown_mode():
+    """写坏的档位不能传下去 —— 按 follow 处理。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_capsule_position("solarized")
+
+    assert panel.controller.config.capsule_position == "follow"
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert sink.events[-1].text == "follow"
+
+
+def test_set_preview_saves_config_and_pushes_to_both_windows():
+    """面板关预览:存配置 → 推面板前端 → 推胶囊。"""
+    panel = _make_themed_panel()
+    sink = ThemeSink()
+    panel._pump.add_sink(sink)
+
+    panel._set_preview(False)
+
+    assert panel.controller.config.show_preview is False
+    assert panel.controller.config.saves == 1
+
+    panel._pump._dispatch(panel._pump._events.get_nowait())
+    assert "setPreviewEnabled" in panel._window.methods()
+    assert sink.events[-1].kind == "preview_enabled"
+    assert sink.events[-1].text == "0"
+
+
+def test_capsule_applies_position_event():
+    """胶囊收到位置模式事件 → 推 setPositionMode 给前端。"""
+    cap = _make_capsule()
+
+    cap.handle_event(UIEvent(kind="capsule_position", text="custom"))
+
+    assert "setPositionMode" in cap._window.methods()
+
+
+def test_capsule_applies_preview_event():
+    """胶囊收到预览开关事件 → 推 setPreviewEnabled 给前端。"""
+    cap = _make_capsule()
+
+    cap.handle_event(UIEvent(kind="preview_enabled", text="0"))
+
+    assert "setPreviewEnabled" in cap._window.methods()
+
+
+def test_capsule_pushes_preview_flag_before_resetting_for_recording():
+    """预览开关必须在 resetForRecording **之前**推到胶囊。
+
+    面板改开关是异步的(走推送线程),用户改完马上按热键的话,
+    setPreviewEnabled 可能还堵在队列里 —— 显示前补推一次,
+    文字条才不会闪一下才消失。
+    """
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(show_preview=False))
+
+    cap.handle_event(UIEvent(kind="state", state=State.RECORDING))
+
+    methods = cap._window.methods()
+    assert "setPreviewEnabled" in methods
+    assert methods.index("setPreviewEnabled") < methods.index("resetForRecording")
+
+
+def test_capsule_skips_preview_text_when_preview_is_off():
+    """预览关着:一个字都不往前端送(文字条整块不出现)。"""
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(show_preview=False))
+
+    cap.handle_event(UIEvent(kind="preview", text="你好"))
+
+    assert "setPreview" not in cap._window.methods()
+
+
+def test_capsule_still_pushes_preview_text_when_preview_is_on():
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(config=FakeConfig(show_preview=True))
+
+    cap.handle_event(UIEvent(kind="preview", text="你好"))
+
+    assert "setPreview" in cap._window.methods()
+
+
+# ---------------- 胶囊拖动(自定义位置) ----------------
+
+def _drag_capsule(monkeypatch, mode="custom"):
+    """造一个能拖的胶囊,并把摆位相关的 Win32 调用换成假的。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_capsule()
+    cap.controller = types.SimpleNamespace(
+        config=FakeConfig(capsule_position=mode))
+    cap._window.native = types.SimpleNamespace(
+        Handle=types.SimpleNamespace(ToInt64=lambda: 777))
+    return cap, cap_mod
+
+
+def test_drag_moves_the_window_to_an_absolute_position(monkeypatch):
+    """拖动发的是**绝对位置**(逻辑像素),不是增量。"""
+    cap, cap_mod = _drag_capsule(monkeypatch)
+    moves: list[tuple] = []
+    monkeypatch.setattr(cap_mod, "move_window_to",
+                        lambda hwnd, x, y: moves.append((hwnd, x, y)) or True)
+    monkeypatch.setattr(VoiceCapsule, "_current_scale", lambda self: 1.75)
+
+    cap_mod._CapsuleApi(cap).move_capsule(100, 200)
+
+    assert moves == [(777, 175, 350)]     # 逻辑 × 缩放 = 物理
+
+
+def test_drag_end_saves_the_position_in_custom_mode(monkeypatch):
+    """自定义模式:松手后把位置记下来(相对工作区的逻辑偏移)。"""
+    cap, cap_mod = _drag_capsule(monkeypatch)
+    monkeypatch.setattr(cap_mod, "get_window_rect",
+                        lambda hwnd: (100, 200, 612, 460))
+    monkeypatch.setattr(VoiceCapsule, "_monitor_at_window",
+                        lambda self: types.SimpleNamespace(
+                            work_area=(0, 0, 1920, 1040),
+                            scale=1.0,
+                            device="\\\\.\\DISPLAY1"))
+
+    cap_mod._CapsuleApi(cap).end_drag()
+
+    assert cap.controller.config.capsule_geometry == "100,200"
+    assert cap.controller.config.capsule_monitor == "\\\\.\\DISPLAY1"
+    assert cap.controller.config.saves == 1
+
+
+def test_drag_end_does_not_save_position_outside_custom_mode(monkeypatch):
+    """跟随/固定底部模式下拖了也不记 —— 位置不归拖拽说了算。"""
+    cap, cap_mod = _drag_capsule(monkeypatch, mode="follow")
+    monkeypatch.setattr(cap_mod, "get_window_rect",
+                        lambda hwnd: (100, 200, 612, 460))
+
+    cap_mod._CapsuleApi(cap).end_drag()
+
+    assert cap.controller.config.capsule_geometry == ""
+    assert cap.controller.config.saves == 0
+
+
+def test_drag_flags_are_visible_to_the_focus_guard(monkeypatch):
+    """拖动期间守卫不抢焦点,松手后恢复 —— 拖到一半不会被抢断。"""
+    cap, cap_mod = _drag_capsule(monkeypatch)
+
+    cap_mod._CapsuleApi(cap).begin_drag()
+    assert cap._is_dragging() is True
+
+    cap_mod._CapsuleApi(cap).end_drag()
+    assert cap._is_dragging() is False
+
+
 # ---------------- 前端主题逻辑(node 跑真实 JS) ----------------
 
 def _run_js_harness(harness_name: str, steps: list[dict]) -> dict:
@@ -662,7 +841,7 @@ def _run_js_harness(harness_name: str, steps: list[dict]) -> dict:
     harness = Path(__file__).with_name(harness_name)
     out = subprocess.run(
         [node, str(harness), json.dumps(steps, ensure_ascii=False)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
@@ -848,3 +1027,311 @@ def test_capsule_wave_stops_when_recording_ends():
 
     # 停了之后一根都没再被改写
     assert len([b for b in wave if b["touched"]]) == 2
+
+
+# ---------------- 面板前端:位置档位 + 预览开关 ----------------
+
+def test_panel_position_click_notifies_python():
+    """点「自定义」档:本地立刻高亮 + 通知 Python 存档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "click", "group": "positionSeg", "index": 2}])
+
+    assert data["active"]["position"] == "custom"
+    positions = [c for c in data["calls"] if c["name"] == "set_capsule_position"]
+    assert positions and positions[0]["args"] == ["custom"]
+
+
+@pytest.mark.parametrize("mode", ["follow", "bottom", "custom"])
+def test_panel_position_highlight_follows_python(mode):
+    """Python 推 setCapsulePosition → 高亮切到对应档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setCapsulePosition", "args": [mode]}])
+
+    assert data["active"]["position"] == mode
+
+
+def test_panel_preview_toggle_notifies_python():
+    """拨预览开关:本地立刻生效 + 通知 Python 存档。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "toggle", "id": "previewToggle", "checked": False}])
+
+    assert data["preview"] is False
+    previews = [c for c in data["calls"] if c["name"] == "set_preview"]
+    assert previews and previews[0]["args"] == [False]
+
+
+def test_panel_preview_switch_follows_python():
+    """Python 推 setPreviewEnabled(false) → 开关拨到关。"""
+    data = _run_js_harness("panel_js_harness.js", [
+        {"op": "call", "fn": "setPreviewEnabled", "args": [False]}])
+
+    assert data["preview"] is False
+
+
+# ---------------- 胶囊前端:预览显隐 ----------------
+
+def test_capsule_preview_off_hides_the_textbar():
+    """预览关掉:body 上加 no-preview(文字条整块不出现)。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPreviewEnabled", "args": [False]}])
+
+    assert "no-preview" in data["body"]
+
+
+def test_capsule_preview_on_keeps_the_textbar():
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPreviewEnabled", "args": [True]}])
+
+    assert "no-preview" not in data["body"]
+
+
+def test_capsule_result_with_preview_off_shows_only_the_label():
+    """预览关着:最终结果**不进文字条**,胶囊里显示「已输入」。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPreviewEnabled", "args": [False]},
+        {"op": "call", "fn": "setResult", "args": ["你好世界"]},
+    ])
+
+    assert data["textbar"] == ""
+    assert data["label"] == "已输入"
+
+
+def test_capsule_error_with_preview_off_goes_to_the_label():
+    """预览关着:错误文案进胶囊的 label 位(一行截断)。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPreviewEnabled", "args": [False]},
+        {"op": "call", "fn": "setError", "args": ["没听清,请再说一遍"]},
+    ])
+
+    assert data["textbar"] == ""
+    assert data["label"] == "没听清,请再说一遍"
+
+
+def test_capsule_preview_with_preview_on_still_writes_the_textbar():
+    """预览开着:老样子,文字条照常显示。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPreview", "args": ["你好"]},
+    ])
+
+    assert data["textbar"] == "你好"
+
+
+# ---------------- 胶囊前端:拖动(自定义位置) ----------------
+
+def test_capsule_drag_sends_absolute_position():
+    """拖动发的是**绝对位置**:起点窗口位置 + 鼠标位移。
+
+    绝对目标天然不漂 —— 某一次 IPC 丢了,下一次直接覆盖。
+    """
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPositionMode", "args": ["custom"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 150, "screenY": 260},
+        {"op": "advance", "ms": 20},
+        {"op": "mouse", "type": "mouseup", "screenX": 150, "screenY": 260},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "begin_drag" in names
+    assert "end_drag" in names
+    moves = [c for c in data["calls"] if c["name"] == "move_capsule"]
+    assert moves and moves[0]["args"] == [50, 60]     # 起点(0,0) + 位移(50,60)
+
+
+def test_capsule_drag_is_disabled_outside_custom_mode():
+    """跟随/固定底部模式下胶囊不拖 —— 拖了也没意义。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPositionMode", "args": ["follow"]},
+        {"op": "mouse", "target": "pill", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 150, "screenY": 260},
+        {"op": "advance", "ms": 20},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "begin_drag" not in names
+    assert "move_capsule" not in names
+
+
+def test_capsule_drag_ignores_the_buttons():
+    """点在 ✕ / ✓ 上不触发拖动 —— 那是按钮,不是把手。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPositionMode", "args": ["custom"]},
+        {"op": "mouse", "target": "okBtn", "type": "mousedown",
+         "screenX": 100, "screenY": 200},
+        {"op": "mouse", "type": "mousemove", "screenX": 150, "screenY": 260},
+        {"op": "advance", "ms": 20},
+    ])
+
+    names = [c["name"] for c in data["calls"]]
+    assert "begin_drag" not in names
+    assert "move_capsule" not in names
+
+
+def test_capsule_position_mode_marks_the_window_draggable():
+    """自定义模式 → body 加 can-drag(鼠标指针变成 move)。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setPositionMode", "args": ["custom"]}])
+
+    assert "can-drag" in data["body"]
+
+
+# ---------------- 注入失败的出口:原文 + 「复制」按钮 ----------------
+
+
+def test_capsule_error_passes_payload_to_frontend():
+    """错误事件带的原文要送到前端 —— 前端要靠它显示全文、亮出复制按钮。"""
+    cap = _make_capsule()
+
+    cap.handle_event(UIEvent(kind="error", text="文本注入失败",
+                             payload="识别原文"))
+
+    assert "setError" in cap._window.methods()
+    assert "识别原文" in "\n".join(cap._window.scripts)
+
+
+def test_capsule_error_with_payload_waits_longer(monkeypatch):
+    """带原文的错误要多留一会儿 —— 用户得有时间点「复制」。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    delays = []
+    cap = _make_capsule()
+    monkeypatch.setattr(cap, "_schedule_hide", delays.append)
+
+    cap.handle_event(UIEvent(kind="error", text="文本注入失败",
+                             payload="识别原文"))
+    cap.handle_event(UIEvent(kind="error", text="没听清"))
+
+    assert delays[0] > delays[1]
+
+
+def test_copy_result_writes_clipboard_and_hides_capsule(monkeypatch):
+    """「复制」按钮:写进剪贴板并**读回校验**,确认写进去了才收胶囊。
+
+    用户要的是"确认"—— 确认文字真的进了剪贴板,而不是我们试了一下。
+    """
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_capsule()
+    cap._want_visible = True
+    written = []
+
+    def fake_set(text):
+        written.append(text)
+        return True
+
+    monkeypatch.setattr(cap_mod.clipboard, "set_text", fake_set)
+    monkeypatch.setattr(cap_mod.clipboard, "get_text", lambda: "识别原文")
+
+    ok = cap_mod._CapsuleApi(cap).copy_result("识别原文")
+
+    assert ok is True
+    assert written == ["识别原文"]
+    assert cap._want_visible is False      # 拿到了,胶囊就收掉
+
+
+def test_copy_result_keeps_capsule_when_verify_fails(monkeypatch):
+    """读回来不是同一份 → 当作失败,胶囊留在原地让用户再试。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_capsule()
+    cap._want_visible = True
+
+    monkeypatch.setattr(cap_mod.clipboard, "set_text", lambda text: True)
+    monkeypatch.setattr(cap_mod.clipboard, "get_text", lambda: "别的东西")
+
+    ok = cap_mod._CapsuleApi(cap).copy_result("识别原文")
+
+    assert ok is False
+    assert cap._want_visible is True       # 没拿到,胶囊不收
+
+
+def test_copy_result_rejects_empty_text(monkeypatch):
+    """空文本没意义 —— 直接拒绝,别去动用户的剪贴板。"""
+    import qwen3_voice.ui.capsule as cap_mod
+
+    cap = _make_capsule()
+    called = []
+    monkeypatch.setattr(cap_mod.clipboard, "set_text",
+                        lambda text: called.append(text) or True)
+
+    assert cap_mod._CapsuleApi(cap).copy_result("   ") is False
+    assert called == []
+
+
+# ---------------- 前端:错误态的原文与复制按钮(node 跑真实 JS) ----------------
+
+
+def test_capsule_error_shows_text_and_enables_copy():
+    """带原文的错误:文字条显示**识别原文**,胶囊上出现「复制」按钮。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError",
+         "args": ["文本注入失败", "刚说出口的话"]},
+    ])
+
+    assert data["textbar"] == "刚说出口的话"
+    assert "can-copy" in data["pill"]
+    assert "error" in data["pill"]
+
+
+def test_capsule_error_without_payload_has_no_copy_button():
+    """没有原文的错误(没听清)不给复制按钮 —— 没东西可复制。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError", "args": ["没听清,请再说一遍"]},
+    ])
+
+    assert data["textbar"] == "没听清,请再说一遍"
+    assert "can-copy" not in data["pill"]
+
+
+def test_capsule_copy_button_sends_the_text_to_python():
+    """点「复制」→ 把识别原文发给 Python。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError",
+         "args": ["文本注入失败", "刚说出口的话"]},
+        {"op": "mouse", "target": "copyBtn", "type": "click"},
+    ])
+
+    copies = [c for c in data["calls"] if c["name"] == "copy_result"]
+    assert copies and copies[0]["args"] == ["刚说出口的话"]
+
+
+def test_capsule_copy_button_reports_failure_to_user():
+    """Python 说没写进去 → 胶囊不能装作成功,要让用户再试一次。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError",
+         "args": ["文本注入失败", "刚说出口的话"]},
+        {"op": "setCopyResult", "value": False},
+        {"op": "mouse", "target": "copyBtn", "type": "click"},
+    ])
+
+    assert "复制失败" in data["label"]
+    # 没拿到东西,按钮还得留着
+    assert "can-copy" in data["pill"]
+
+
+def test_capsule_copy_button_clears_state_on_success():
+    """写成功了 → 前端把原文和按钮清干净(胶囊随后被 Python 收掉)。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError",
+         "args": ["文本注入失败", "刚说出口的话"]},
+        {"op": "setCopyResult", "value": True},
+        {"op": "mouse", "target": "copyBtn", "type": "click"},
+    ])
+
+    assert "can-copy" not in data["pill"]
+
+
+def test_capsule_new_recording_clears_the_copy_state():
+    """新一轮录音 → 上一轮错误态留下的原文和按钮要清干净。"""
+    data = _run_js_harness("capsule_js_harness.js", [
+        {"op": "call", "fn": "setError",
+         "args": ["文本注入失败", "刚说出口的话"]},
+        {"op": "call", "fn": "resetForRecording", "args": []},
+    ])
+
+    assert "can-copy" not in data["pill"]
+    assert "recording" in data["pill"]
+    # 上一轮的原文被清空了(只剩占位符)
+    assert data["textbar"] == "正在聆听…"

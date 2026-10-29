@@ -32,6 +32,12 @@ EXAMPLE_CONFIG = PROJECT_DIR / "config.example.json"
 # 面板和胶囊共用这一套 —— 面板改了,胶囊跟着换。
 THEME_MODES = ("auto", "light", "dark")
 
+# 胶囊位置三档:
+#   follow  跟随输入光标(像输入法候选框,贴着光标出现)
+#   bottom  固定在主屏工作区底部居中(原来的行为)
+#   custom  用户拖到哪就记在哪(存相对工作区的逻辑偏移)
+CAPSULE_POSITION_MODES = ("follow", "bottom", "custom")
+
 
 @dataclass
 class Config:
@@ -72,6 +78,20 @@ class Config:
     panel_visible: bool = False              # 面板启动时是否显示(默认不常驻,托盘打开)
     show_tray: bool = True
     theme: str = "auto"                      # auto(跟随系统) / light(白天) / dark(黑夜)
+    # 胶囊出现在哪:
+    #   follow  跟着输入光标(默认)
+    #   bottom  固定在主屏工作区底部居中
+    #   custom  用户拖出来的位置(记在 capsule_geometry 里)
+    capsule_position: str = "follow"
+    # 录音时要不要显示实时预览文字条。关掉之后胶囊只剩波形+计时+按钮,
+    # "已输入"/错误提示改在胶囊内的 label 位显示。
+    show_preview: bool = True
+    # 自定义模式下记忆的胶囊位置:"dx,dy",相对**所在工作区左上角**的
+    # 逻辑像素偏移(存相对量,换缩放率/换显示器都不飞)。
+    capsule_geometry: str = ""
+    # 自定义模式下记忆的显示器设备名(如 \\.\DISPLAY1):还原时先找到
+    # 那块屏,找不到就退回当前屏。
+    capsule_monitor: str = ""
 
     # ---- 其它
     log_file: str = ""
@@ -95,6 +115,11 @@ class Config:
         if self.theme not in THEME_MODES:
             issues.append(
                 f"theme 只能是 {' / '.join(THEME_MODES)},当前 {self.theme!r}")
+        if self.capsule_position not in CAPSULE_POSITION_MODES:
+            issues.append(
+                "capsule_position 只能是 "
+                f"{' / '.join(CAPSULE_POSITION_MODES)},"
+                f"当前 {self.capsule_position!r}")
         return issues
 
     # ---------- 序列化 ----------

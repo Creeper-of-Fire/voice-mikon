@@ -10,8 +10,15 @@
  *   步骤:{"op":"advance","ms":100}          推进虚拟时钟,触发到期的定时器
  *         {"op":"call","fn":"setPreview","args":["你好"]}  调前端方法
  *         {"op":"fire","event":"resize"}    触发 window 的事件
+ *         {"op":"mouse","target":"pill","type":"mousedown",
+ *               "screenX":100,"screenY":200}            在胶囊上按下鼠标
+ *         {"op":"mouse","type":"mousemove","screenX":150,"screenY":260}
+ *         {"op":"setCopyResult","value":false}  让「复制」按钮的调用返回失败
  * 输出:stdout 上一个 JSON —— {"calls":[{"name":...,"args":[...]}],
  *                              "html":{"data-theme":"light"},
+ *                              "body":["no-preview"],
+ *                              "pill":["recording","can-copy"],
+ *                              "label":"已输入",
  *                              "wave":[{"age":0,"offset":0,"height":"2.00px",
  *                                       "silent":true}, ...]}
  *
@@ -32,7 +39,9 @@ let now = 0;
 let timerSeq = 0;
 const timers = [];
 
-/* requestAnimationFrame 的假实现:回调排队,advance() 里统一冲 */
+/* requestAnimationFrame 的假实现:回调排队,advance() 里统一冲。
+   id 要稳定 —— cancelAnimationFrame 得能按 id 撤掉某一帧。 */
+let rafSeq = 0;
 const rafQueue = [];
 
 function setTimeoutFake(fn, ms) {
@@ -58,13 +67,23 @@ function clearTimerFake(id) {
 }
 
 function requestAnimationFrameFake(fn) {
-  rafQueue.push(fn);
-  return rafQueue.length;
+  rafSeq += 1;
+  rafQueue.push({ id: rafSeq, fn });
+  return rafSeq;
+}
+
+function cancelAnimationFrameFake(id) {
+  for (let i = 0; i < rafQueue.length; i++) {
+    if (rafQueue[i].id === id) {
+      rafQueue.splice(i, 1);
+      return;
+    }
+  }
 }
 
 function flushRaf() {
   while (rafQueue.length) {
-    rafQueue.shift()();
+    rafQueue.shift().fn();
   }
 }
 
@@ -113,7 +132,8 @@ function makeClassList() {
   const set = new Set();
   return {
     add: (c) => set.add(c),
-    remove: (c) => set.delete(c),
+    // remove 接受多个类名(和 DOM 的 classList.remove 一样)
+    remove: (...cs) => { cs.forEach((c) => set.delete(c)); },
     toggle: (c, force) => {
       const on = force === undefined ? !set.has(c) : !!force;
       if (on) {
@@ -123,7 +143,8 @@ function makeClassList() {
       }
       return on;
     },
-    contains: (c) => set.has(c)
+    contains: (c) => set.has(c),
+    values: () => Array.from(set)
   };
 }
 
@@ -134,10 +155,15 @@ function makeEl(id) {
     children: [],
     style: {},
     classList: makeClassList(),
-    addEventListener: () => {},
+    handlers: {},
+    isButton: false,
+    parent: null,           // 事件冒泡链(按钮的父级是胶囊)
+    addEventListener: (type, fn) => { el.handlers[type] = fn; },
     appendChild: (child) => { el.children.push(child); },
     getBoundingClientRect: () => rectOf(el),
-    offsetWidth: 0
+    offsetWidth: 0,
+    // 拖拽时用来判断"点的是不是按钮"(点在 ✕/✓ 上不触发拖动)
+    closest: (sel) => (sel === 'button' && el.isButton ? el : null)
   };
   // 写 textContent = 清掉子节点:波形区靠 `textContent = ''` 清场,
   // 假 DOM 得跟上,不然旧条会越积越多
@@ -166,7 +192,15 @@ function rectOf(el) {
 }
 
 ['textbar', 'textbarText', 'pill', 'waveform', 'barLabel', 'barTimer',
-  'cancelBtn', 'okBtn'].forEach((id) => { els[id] = makeEl(id); });
+  'cancelBtn', 'okBtn', 'copyBtn'].forEach((id) => { els[id] = makeEl(id); });
+// ✕ / ✓ / 复制 是按钮:拖拽时点它们不能触发拖动
+els.cancelBtn.isButton = true;
+els.okBtn.isButton = true;
+els.copyBtn.isButton = true;
+// 事件冒泡:点在按钮上,mousedown 会冒泡到胶囊(胶囊才是拖拽把手)
+els.cancelBtn.parent = els.pill;
+els.okBtn.parent = els.pill;
+els.copyBtn.parent = els.pill;
 
 global.window = global;
 global.setTimeout = setTimeoutFake;
@@ -174,12 +208,22 @@ global.clearTimeout = clearTimerFake;
 global.setInterval = setIntervalFake;
 global.clearInterval = clearTimerFake;
 global.requestAnimationFrame = requestAnimationFrameFake;
+global.cancelAnimationFrame = cancelAnimationFrameFake;
 global.addEventListener = (type, fn) => { listeners[type] = fn; };
+// 窗口在屏幕上的位置:拖动时的基准点(capsule.js 用 window.screenX/Y)
+global.screenX = 0;
+global.screenY = 0;
 
 /* <html> 的属性:主题就靠 data-theme 表达(auto 时这个属性被移除) */
 const htmlAttrs = {};
+/* body 上的类:预览关掉时是 no-preview,自定义位置时是 can-drag */
+const bodyClasses = makeClassList();
+/* document 上的监听:拖动时胶囊会往 document 上挂 mousemove/mouseup */
+const docListeners = {};
+
 global.document = {
   readyState: 'complete',
+  body: { classList: bodyClasses },
   documentElement: {
     setAttribute: (k, v) => { htmlAttrs[k] = v; },
     removeAttribute: (k) => { delete htmlAttrs[k]; },
@@ -187,8 +231,22 @@ global.document = {
   },
   getElementById: (id) => els[id] || null,
   createElement: (tag) => makeEl('new-' + tag),
-  addEventListener: () => {}
+  addEventListener: (type, fn) => {
+    (docListeners[type] = docListeners[type] || []).push(fn);
+  },
+  removeEventListener: (type, fn) => {
+    const list = docListeners[type] || [];
+    const idx = list.indexOf(fn);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    }
+  }
 };
+
+/* 「复制」按钮调用的返回值:默认成功,步骤里可以改成失败。
+   真实环境里 pywebview 会把 Python 的返回值包成 Promise。 */
+let copyResultValue = true;
+
 global.pywebview = {
   api: {
     ready: () => { calls.push({ name: 'ready', args: [] }); return true; },
@@ -197,6 +255,16 @@ global.pywebview = {
     update_regions: (payload) => {
       calls.push({ name: 'update_regions', args: [payload] });
       return true;
+    },
+    move_capsule: (x, y) => {
+      calls.push({ name: 'move_capsule', args: [x, y] });
+      return true;
+    },
+    begin_drag: () => { calls.push({ name: 'begin_drag', args: [] }); },
+    end_drag: () => { calls.push({ name: 'end_drag', args: [] }); },
+    copy_result: (text) => {
+      calls.push({ name: 'copy_result', args: [text] });
+      return Promise.resolve(copyResultValue);
     }
   }
 };
@@ -236,28 +304,81 @@ const src = fs.readFileSync(
 // 间接 eval:在全局作用域里跑,window.__capsule 才挂得上
 (0, eval)(src);
 
-const steps = JSON.parse(process.argv[2] || '[]');
-for (const step of steps) {
-  if (step.op === 'advance') {
-    advance(step.ms || 0);
-  } else if (step.op === 'call') {
-    const fn = global.__capsule[step.fn];
-    if (typeof fn !== 'function') {
-      throw new Error('前端没有这个方法: ' + step.fn);
+/* 主流程是 async 的:pywebview 的返回值是 Promise,前端会 .then() 一把,
+   那边的回调是**微任务** —— 同步跑完就输出的话,回调还没执行,
+   断言会看到"什么都没发生"。每步之后用 setImmediate 冲一次微任务。 */
+async function main() {
+  const steps = JSON.parse(process.argv[2] || '[]');
+  for (const step of steps) {
+    if (step.op === 'advance') {
+      advance(step.ms || 0);
+    } else if (step.op === 'call') {
+      const fn = global.__capsule[step.fn];
+      if (typeof fn !== 'function') {
+        throw new Error('前端没有这个方法: ' + step.fn);
+      }
+      fn.apply(null, step.args || []);
+    } else if (step.op === 'setCopyResult') {
+      // 「复制」按钮调 Python 的返回值:成功(true)还是失败(false)
+      copyResultValue = !!step.value;
+    } else if (step.op === 'fire') {
+      const fn = listeners[step.event];
+      if (typeof fn === 'function') {
+        fn();
+      }
+    } else if (step.op === 'mouse') {
+      // 指定了 target → 派发给那个元素自己的 handler(mousedown);
+      // 没指定 → 派发给 document 上的监听(mousemove / mouseup)
+      const evt = {
+        type: step.type,
+        button: step.button === undefined ? 0 : step.button,
+        screenX: step.screenX || 0,
+        screenY: step.screenY || 0,
+        clientX: step.clientX || 0,
+        clientY: step.clientY || 0,
+        target: null,
+        preventDefault: () => {}
+      };
+      if (step.target) {
+        const el = els[step.target];
+        if (!el) {
+          throw new Error('没有这个元素: ' + step.target);
+        }
+        evt.target = el;
+        // 冒泡:从目标往上找第一个绑了这个事件的元素
+        // (浏览器语义 —— evt.target 始终是最初按下的那个)
+        let node = el;
+        while (node) {
+          const handler = node.handlers[step.type];
+          if (handler) {
+            handler(evt);
+            node = null;
+            break;
+          }
+          node = node.parent;
+        }
+        if (node) {
+          throw new Error('没有元素绑 ' + step.type + ': ' + step.target);
+        }
+      } else {
+        (docListeners[step.type] || []).slice().forEach((fn) => fn(evt));
+      }
+    } else {
+      throw new Error('不认识的步骤: ' + JSON.stringify(step));
     }
-    fn.apply(null, step.args || []);
-  } else if (step.op === 'fire') {
-    const fn = listeners[step.event];
-    if (typeof fn === 'function') {
-      fn();
-    }
-  } else {
-    throw new Error('不认识的步骤: ' + JSON.stringify(step));
+    // 冲微任务:Promise 的 then 回调
+    await new Promise((resolve) => setImmediate(resolve));
   }
+
+  process.stdout.write(JSON.stringify({
+    calls: calls,
+    html: htmlAttrs,
+    body: bodyClasses.values(),
+    pill: els.pill ? els.pill.classList.values() : [],
+    label: els.barLabel ? els.barLabel.textContent : '',
+    textbar: els.textbarText ? els.textbarText.textContent : '',
+    wave: dumpWave()
+  }));
 }
 
-process.stdout.write(JSON.stringify({
-  calls: calls,
-  html: htmlAttrs,
-  wave: dumpWave()
-}));
+main();

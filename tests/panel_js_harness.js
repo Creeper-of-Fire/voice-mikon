@@ -10,10 +10,12 @@
  * 用法:node panel_js_harness.js '<json 步骤>'
  *   步骤:{"op":"call","fn":"setTheme","args":["light"]}   调前端方法
  *         {"op":"click","group":"themeSeg","index":2}       点第 3 个分段项
+ *         {"op":"toggle","id":"previewToggle","checked":false}  拨开关
  * 输出:stdout 上一个 JSON
  *   {"calls":[{"name":...,"args":[...]}],
  *    "html":{"data-theme":"light"},
- *    "active":{"model":"0.6B","theme":"dark"}}
+ *    "active":{"model":"0.6B","theme":"dark","position":"follow"},
+ *    "preview":true}
  */
 'use strict';
 
@@ -65,7 +67,7 @@ function makeClassList() {
   const set = new Set();
   return {
     add: (c) => set.add(c),
-    remove: (c) => set.delete(c),
+    remove: (...cs) => { cs.forEach((c) => set.delete(c)); },
     toggle: (c, force) => {
       const on = force === undefined ? !set.has(c) : !!force;
       if (on) {
@@ -75,7 +77,8 @@ function makeClassList() {
       }
       return on;
     },
-    contains: (c) => set.has(c)
+    contains: (c) => set.has(c),
+    values: () => Array.from(set)
   };
 }
 
@@ -84,6 +87,7 @@ function makeEl(id, attrs) {
     id: id,
     attrs: Object.assign({}, attrs || {}),
     textContent: '',
+    checked: false,
     children: [],
     style: {},
     classList: makeClassList(),
@@ -125,6 +129,12 @@ els.themeSeg = makeSegGroup('themeSeg', [
   { 'data-theme-mode': 'light', value: 'light' },
   { 'data-theme-mode': 'dark', value: 'dark' }
 ]);
+els.positionSeg = makeSegGroup('positionSeg', [
+  { 'data-position-mode': 'follow', value: 'follow' },
+  { 'data-position-mode': 'bottom', value: 'bottom' },
+  { 'data-position-mode': 'custom', value: 'custom' }
+]);
+els.previewToggle = makeEl('previewToggle');
 
 const htmlAttrs = {};
 
@@ -150,6 +160,10 @@ global.pywebview = {
     ready: () => { calls.push({ name: 'ready', args: [] }); return true; },
     switch_model: (tag) => { calls.push({ name: 'switch_model', args: [tag] }); },
     set_theme: (mode) => { calls.push({ name: 'set_theme', args: [mode] }); },
+    set_capsule_position: (mode) => {
+      calls.push({ name: 'set_capsule_position', args: [mode] });
+    },
+    set_preview: (on) => { calls.push({ name: 'set_preview', args: [on] }); },
     close_panel: () => { calls.push({ name: 'close_panel', args: [] }); },
     quit_app: () => { calls.push({ name: 'quit_app', args: [] }); }
   }
@@ -185,6 +199,18 @@ for (const step of steps) {
     }
     // 事件目标是那一项本身,closest('.seg-item') 会找到它
     handler({ target: item });
+  } else if (step.op === 'toggle') {
+    // 拨开关:先把 checked 设好,再触发 change
+    const el = els[step.id];
+    if (!el) {
+      throw new Error('没有这个控件: ' + step.id);
+    }
+    el.checked = !!step.checked;
+    const handler = el.handlers['change'];
+    if (!handler) {
+      throw new Error('控件没绑 change: ' + step.id);
+    }
+    handler({ target: el });
   } else if (step.op === 'fire') {
     const fn = listeners[step.event];
     if (typeof fn === 'function') {
@@ -206,6 +232,8 @@ process.stdout.write(JSON.stringify({
   html: htmlAttrs,
   active: {
     model: activeOf(els.modelSeg, 'data-model'),
-    theme: activeOf(els.themeSeg, 'data-theme-mode')
-  }
+    theme: activeOf(els.themeSeg, 'data-theme-mode'),
+    position: activeOf(els.positionSeg, 'data-position-mode')
+  },
+  preview: !!els.previewToggle.checked
 }));

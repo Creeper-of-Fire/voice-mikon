@@ -12,8 +12,17 @@ Python 与前端之间的桥接契约(完整见同目录 ``BRIDGE.md``):
   Python → JS   window.__capsule.setState / setLevels / setElapsed
                 / setPreview / setResult / setError / setCancelled
                 / resetForRecording / setTheme
+                / setPositionMode / setPreviewEnabled
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
-                / update_regions
+                / update_regions / move_capsule / begin_drag / end_drag
+                / copy_result
+
+胶囊出现在哪由三档决定(配置项 ``capsule_position``):
+
+  follow  跟着输入光标(默认)—— 按热键那一刻捕获一次定位信号,
+          贴着光标出现,像输入法候选框
+  bottom  固定在主屏工作区底部居中(原来的行为)
+  custom  用户拖到哪就记在哪(相对所在工作区的逻辑偏移,换屏不飞)
 
 线程分工:
   主线程      webview.start() 的 GUI 消息循环(和面板共用一次 start)
@@ -61,9 +70,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import THEME_MODES
+from ..config import CAPSULE_POSITION_MODES, THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
 from ..logging_setup import get_logger
+from ..win32 import clipboard
 from ..win32.api import (
     bring_to_top,
     get_foreground_window,
@@ -77,6 +87,18 @@ from ..win32.api import (
     set_tool_window_style,
     set_window_regions,
     show_window_no_activate,
+)
+from ..win32.caret import capture_anchor, warmup
+from ..win32.monitors import (
+    monitor_at_point,
+    monitor_by_device,
+    primary_monitor,
+)
+from .placement import (
+    bottom_position,
+    custom_position,
+    encode_offset,
+    follow_position,
 )
 
 log = get_logger("ui.capsule")
@@ -115,7 +137,14 @@ BOTTOM_MARGIN = 20
 # 各种结局之后,胶囊停留多久再隐藏(秒)
 HIDE_DELAY_OK = 1.5       # 识别成功并已注入
 HIDE_DELAY_ERROR = 4.5    # 出错:错误文案要让人看清
+# 出错而且**带着识别原文**:用户多半要点胶囊上的「复制」把文字取走,
+# 4.5 秒不够 —— 留久一点,别让人手忙脚乱。
+HIDE_DELAY_ERROR_COPY = 12.0
 HIDE_DELAY_CANCEL = 1.0   # 取消
+
+# 写完剪贴板后等一下再读回校验。剪贴板是异步通知的,立刻读有时会
+# 读到旧内容 —— 宁可多等几十毫秒,也不能把"没写进去"当成写成功了。
+CLIPBOARD_VERIFY_DELAY = 0.05
 
 # 启动守卫:建窗后的这段时间里盯着窗口,别让 pywebview 的建窗副作用
 # 把它亮出来或者抢走焦点(见 _on_before_show 的说明)
@@ -220,6 +249,31 @@ class _CapsuleApi:
         """
         self._capsule._on_update_regions(payload)
 
+    def move_capsule(self, x: float, y: float) -> None:
+        """拖动中:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+
+        和面板的 ``move_window`` 同一套约定:前端每次都从 mousedown
+        起点算绝对目标,发过来的不是增量 —— 某一次调用丢了或慢了,
+        下一次直接覆盖,天然不漂。
+        """
+        self._capsule._move_capsule_abs(x, y)
+
+    def begin_drag(self) -> None:
+        """用户开始拖胶囊(按住不放)。"""
+        self._capsule._begin_drag()
+
+    def end_drag(self) -> None:
+        """用户松手:归还焦点 + 记住位置。"""
+        self._capsule._end_drag()
+
+    def copy_result(self, text: str) -> bool:
+        """把识别结果手动写进剪贴板(注入失败时的兜底出口)。
+
+        返回**是否真的写进去了** —— 前端要靠这个结果决定是收胶囊
+        (拿到了)还是让用户再试一次(没拿到)。
+        """
+        return self._capsule._copy_result(text)
+
 
 class VoiceCapsule:
     """录音胶囊悬浮窗。"""
@@ -256,6 +310,15 @@ class VoiceCapsule:
         self._hide_timer: threading.Timer | None = None
         self._hide_lock = threading.Lock()
 
+        # 跟随输入模式的定位信号点:按热键那一刻捕获一次,**这一轮
+        # 录音内不再动**(位置可预期比位置聪明更重要)。
+        # 没捕获到(一点信号都拿不到)就是 None —— 走"主屏底部居中"。
+        self._anchor: Any = None
+        # 用户正拖着胶囊:拖动期间守卫**不**抢回焦点,
+        # 松手时统一还一次(抢来抢去会让 WebView2 的鼠标捕获不稳)
+        self._dragging = False
+        self._drag_lock = threading.Lock()
+
         # fit(量高度 + resize)整套删掉了 —— 透明窗口一旦被 resize,
         # WebView2 的透明背景就失效(见 WIN_W / WIN_H 的说明)
 
@@ -275,12 +338,17 @@ class VoiceCapsule:
             shadow=False,        # 透明窗口上阴影会渲染成灰边
             on_top=True,
             resizable=False,
-            easy_drag=False,     # 胶囊不拖拽、不记位置
+            easy_drag=False,     # 自己实现拖动(custom 模式才允许拖)
             focus=False,         # pywebview 也会加 WS_EX_NOACTIVATE
             background_color="#000000",
         )
         self._window.events.before_show += self._on_before_show
         self._window.events.shown += self._on_window_shown
+
+        # 预热 UIA:第一次调用要几百毫秒(类型库加载 + COM 初始化)。
+        # 那笔开销不能落在"用户刚按完热键"那一刻 —— 不然胶囊会迟到半秒。
+        threading.Thread(target=warmup, name="ui-caret-warmup",
+                         daemon=True).start()
 
     # ---------- 推送目标接口 ----------
 
@@ -304,27 +372,48 @@ class VoiceCapsule:
                 # 靠这个快照把它还回去。
                 self._target_hwnd = get_foreground_window()
                 self._cancel_hide_timer()
+                # **显示之前**把定位信号捕获下来:要的是"按热键那一刻"
+                # 的光标位置,不是"画完胶囊再问"的稍晚一点的位置。
+                self._capture_anchor()
                 # 显示前把当前主题再推一遍:面板改主题是**异步**的
                 # (走推送线程),用户改完主题马上按热键的话,setTheme
                 # 可能还堵在队列里 —— 这里补推一次,保证胶囊亮起来
                 # 时配色已经是对的。setTheme 幂等,多推无害。
+                # 位置模式、预览开关同理:面板那边改完马上按热键,
+                # 事件可能还堵在队列里。
                 self._call_js("setTheme", self._theme_mode())
+                self._call_js("setPositionMode", self._position_mode())
+                self._call_js("setPreviewEnabled", self._preview_enabled())
                 self._call_js("resetForRecording")
                 self._show()
         elif kind == "theme" and event.text:
             # 面板改了主题档位 → 跟着换配色
             self._call_js("setTheme", event.text)
+        elif kind == "capsule_position" and event.text:
+            # 面板改了胶囊位置模式
+            self._call_js("setPositionMode", event.text)
+        elif kind == "preview_enabled":
+            # 面板改了预览开关(事件文本是 "1" / "0")
+            self._call_js("setPreviewEnabled", event.text not in ("0", ""))
         elif kind == "preview":
             # 实时预览文字(录音过程中已识别出的内容)
             self._last_preview = event.text
+            # 预览关着就一个字都不往前端送:文字条根本不出现,
+            # 也省掉每句都来一次 IPC。
+            if not self._preview_enabled():
+                return
             self._call_js("setPreview", event.text)
         elif kind == "result":
             # 识别完成且已注入:文字条定格最终结果
             self._call_js("setResult", event.text)
             self._schedule_hide(HIDE_DELAY_OK)
         elif kind == "error":
-            self._call_js("setError", event.text)
-            self._schedule_hide(HIDE_DELAY_ERROR)
+            # 错误**可能带着识别原文**(注入失败时):一起发给前端,
+            # 前端据此显示全文,并给出「复制」按钮。
+            payload = event.payload or ""
+            self._call_js("setError", event.text, payload)
+            self._schedule_hide(HIDE_DELAY_ERROR_COPY if payload
+                                else HIDE_DELAY_ERROR)
         elif kind == "cancelled":
             self._call_js("setCancelled")
             self._schedule_hide(HIDE_DELAY_CANCEL)
@@ -358,6 +447,30 @@ class VoiceCapsule:
         except Exception:
             return "auto"
         return mode if mode in THEME_MODES else "auto"
+
+    # ---------- 位置模式 / 预览开关 ----------
+
+    def _position_mode(self) -> str:
+        """当前胶囊位置模式(follow / bottom / custom)。
+
+        读不到就按 follow(默认档):贴着光标出现是用户最常用的期待。
+        """
+        try:
+            mode = str(getattr(self.controller.config, "capsule_position",
+                               "follow") or "follow").strip().lower()
+        except Exception:
+            return "follow"
+        return mode if mode in CAPSULE_POSITION_MODES else "follow"
+
+    def _preview_enabled(self) -> bool:
+        """要不要显示实时预览文字条。
+
+        读不到就按开 —— 预览是默认体验,不该因为读不到配置就消失。
+        """
+        try:
+            return bool(getattr(self.controller.config, "show_preview", True))
+        except Exception:
+            return True
 
     # ---------- 前端桥接 ----------
 
@@ -413,9 +526,15 @@ class VoiceCapsule:
         self._call_js("setState", _STATE_NAMES.get(self._state, "idle"))
         # 主题也补推一次:前端可能比 Python 晚就绪,那时的档位没推出去
         self._call_js("setTheme", self._theme_mode())
+        # 位置模式与预览开关同理(面板那边改的,可能还堵在队列里)
+        self._call_js("setPositionMode", self._position_mode())
+        self._call_js("setPreviewEnabled", self._preview_enabled())
         if self._last_preview:
             self._call_js("setPreview", self._last_preview)
-        self._place()
+        # 跟随输入模式**不在这里**摆位:那时候还没有"这一轮的信号点",
+        # 摆出来的位置没有意义(等第一次录音时按光标摆)。
+        if self._position_mode() != "follow":
+            self._place()
 
     def _on_before_show(self) -> None:
         """建窗的**最后一步**:掐掉 pywebview 的抢焦点 hack,并先设好样式。
@@ -511,7 +630,8 @@ class VoiceCapsule:
                 # 没人要求显示却露着脸 → 藏回去(pywebview 偷偷 Show 的残留)
                 if not self._want_visible and is_window_visible(hwnd):
                     hide_window(hwnd)
-                elif fg == hwnd and last_fg and last_fg != hwnd:
+                elif (fg == hwnd and last_fg and last_fg != hwnd
+                      and not self._is_dragging()):
                     # 前台被胶囊占了 → 还回去。
                     #
                     # 胶囊是"显示器"不是输入目标:WebView2 的内容窗口
@@ -520,10 +640,18 @@ class VoiceCapsule:
                     # 与其禁止,不如抢回来 —— 归还前台**不影响**鼠标
                     # 点击消息的投递(✓/✕ 的 click 照常触发),而注入
                     # 落点由 ✓ 回调里的 _give_back_focus 双保险。
+                    #
+                    # 拖动期间除外:焦点来回跳会拖垮 WebView2 的
+                    # 鼠标捕获(拖到一半就断了),松手时统一还一次。
                     restore_foreground(last_fg)
             interval = (GUARD_INTERVAL if time.monotonic() < dense_until
                         else GUARD_SPARSE)
             time.sleep(interval)
+
+    def _is_dragging(self) -> bool:
+        """用户此刻是不是正拖着胶囊。"""
+        with self._drag_lock:
+            return self._dragging
 
     def _restore_focus(self) -> None:
         """把前台窗口还给用户原来那个。
@@ -621,6 +749,47 @@ class VoiceCapsule:
         if timer is not None:
             timer.cancel()
 
+    # ---------- 手动复制(注入失败时的兜底出口) ----------
+
+    def _copy_result(self, text: str) -> bool:
+        """把 text 写进剪贴板,写成功就把胶囊收掉。
+
+        用户在错误态点了「复制」—— 他要的是**确认**:确认文字真的进了
+        剪贴板,而不是我们"试了一下"。所以写完要读回来核对:读回来
+        不是同一份,就当没成功,胶囊留在原地让用户再试。
+
+        写成功就收胶囊:用户拿到了想要的东西,胶囊继续杵在屏幕上
+        就是干扰。
+        """
+        if not text or not text.strip():
+            return False
+        try:
+            ok = clipboard.set_text(text)
+        except Exception as e:
+            log.debug("写剪贴板失败: %s", e)
+            return False
+        if not ok:
+            log.warning("手动复制:写入剪贴板失败")
+            return False
+
+        time.sleep(CLIPBOARD_VERIFY_DELAY)
+        try:
+            current = clipboard.get_text()
+        except Exception as e:
+            log.debug("读回剪贴板失败: %s", e)
+            current = None
+        if current != text:
+            # 读回来不是我们写的那份:要么写失败了,要么用户在这几十
+            # 毫秒里自己复制了别的东西。后者不算我们的错,但也不能
+            # 谎报成功 —— 让用户看到"没复制成功"更诚实。
+            log.warning("手动复制:读回校验不一致,当作失败")
+            return False
+
+        log.info("手动复制成功,收胶囊")
+        self._cancel_hide_timer()
+        self._hide()
+        return True
+
     # ---------- 窗口命中区域(SetWindowRgn) ----------
 
     def _on_update_regions(self, payload: Any) -> None:
@@ -669,8 +838,76 @@ class VoiceCapsule:
 
     # ---------- 尺寸与位置 ----------
 
+    def _capture_anchor(self) -> None:
+        """捕获这一轮的定位信号点(只在录音开始时调一次)。
+
+        捕获的是**按热键那一刻**的光标位置。之后这一轮录音里
+        胶囊不再移动 —— 位置可预期比"位置聪明"更重要:
+        用户按完热键看到胶囊,就该知道它不会乱跳。
+        """
+        hwnd = self._native_handle()
+        try:
+            self._anchor = capture_anchor(
+                foreground_hwnd=get_foreground_window(),
+                exclude_hwnd=hwnd or 0,
+            )
+        except Exception as e:
+            log.debug("捕获光标位置失败: %s", e)
+            self._anchor = None
+        if self._anchor is not None:
+            log.debug("定位信号: %s (%d, %d)", self._anchor.kind,
+                      self._anchor.x, self._anchor.y)
+
     def _place(self) -> None:
-        """摆到工作区底部居中。
+        """按当前模式摆胶囊。"""
+        mode = self._position_mode()
+        if mode == "follow":
+            self._place_follow()
+        elif mode == "custom":
+            self._place_custom()
+        else:
+            self._place_bottom()
+
+    def _place_follow(self) -> None:
+        """贴着输入光标摆(像输入法候选框)。
+
+        信号点取自这一轮录音开始时捕获的锚点;还没捕获到(比如
+        前端先就绪、用户还没录过音)就现在补捕获一次。实在一点
+        信号都拿不到,退回"主屏底部居中"。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        if self._anchor is None:
+            self._capture_anchor()
+        anchor = self._anchor
+        if anchor is None:
+            self._place_bottom()
+            return
+
+        size = self._window_size()
+        if size is None:
+            return
+        win_w, win_h = size
+
+        mon = monitor_at_point(anchor.x, anchor.y)
+        if mon is not None:
+            area, scale = mon.work_area, mon.scale
+        else:
+            area, scale = get_work_area(), self._scale()
+        if area is None:
+            return
+
+        x, y = follow_position(anchor.x, anchor.y, win_w, win_h, area)
+        log.debug("跟随输入: 锚点(%d, %d) → 窗口(%d, %d)",
+                  anchor.x, anchor.y, x, y)
+        try:
+            move_window_to(hwnd, int(x), int(y))
+        except Exception as e:
+            log.debug("摆胶囊位置失败: %s", e)
+
+    def _place_bottom(self) -> None:
+        """摆到工作区底部居中(原来的行为)。
 
         用**工作区**而不是整块屏幕 —— 后者会被任务栏盖住底边。
         """
@@ -678,19 +915,88 @@ class VoiceCapsule:
         if not hwnd:
             return
         area = get_work_area()
-        rect = get_window_rect(hwnd)
-        if area is None or rect is None:
+        size = self._window_size()
+        if area is None or size is None:
             return
-        left, top, right, bottom = area
-        width = rect[2] - rect[0]
-        height = rect[3] - rect[1]
+        win_w, win_h = size
         margin = int(round(BOTTOM_MARGIN * self._scale()))
-        x = left + ((right - left) - width) // 2
-        y = bottom - height - margin
+        x, y = bottom_position(win_w, win_h, area, margin)
         try:
             move_window_to(hwnd, int(x), int(y))
         except Exception as e:
             log.debug("摆胶囊位置失败: %s", e)
+
+    def _place_custom(self) -> None:
+        """摆到用户拖出来的位置。
+
+        位置记的是"相对所在工作区左上角的逻辑偏移",还原时要先
+        找到当时那块屏(设备名);那块屏不在了就退回当前屏,再不行
+        就退回主屏底部 —— 宁可位置不理想,也不能把胶囊摆到屏幕外。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        size = self._window_size()
+        if size is None:
+            return
+        win_w, win_h = size
+
+        mon = self._saved_monitor()
+        if mon is None:
+            mon = self._monitor_at_window()
+        if mon is None:
+            mon = primary_monitor()
+        if mon is None:
+            self._place_bottom()
+            return
+
+        geometry = self._saved_geometry()
+        position = custom_position(geometry, mon.work_area, mon.scale,
+                                   win_w, win_h)
+        if position is None:
+            # 还没拖过(custom 模式第一次用):给个合理的起点
+            self._place_bottom()
+            return
+        try:
+            move_window_to(hwnd, int(position[0]), int(position[1]))
+        except Exception as e:
+            log.debug("摆胶囊位置失败: %s", e)
+
+    def _window_size(self) -> tuple[int, int] | None:
+        """窗口当前的**物理**像素尺寸。
+
+        用真实尺寸而不是建窗时请求的尺寸:WinForms 的 AutoScale 会
+        把客户区再缩一次(见 WIN_W 的说明),请求值和实际值对不上。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return None
+        rect = get_window_rect(hwnd)
+        if rect is None:
+            return None
+        width = rect[2] - rect[0]
+        height = rect[3] - rect[1]
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+
+    def _current_scale(self) -> float:
+        """窗口所在显示器的缩放系数。
+
+        用 ``GetDpiForWindow``:胶囊可能被拖到另一块缩放率不同的
+        屏上,按主屏的缩放换算位置会算飞。
+        """
+        try:
+            import ctypes
+
+            hwnd = self._native_handle()
+            if hwnd:
+                dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(hwnd))
+                if dpi:
+                    return max(1.0, dpi / 96.0)
+        except Exception:
+            pass
+        return self._scale()
 
     def _scale(self) -> float:
         """主显示器缩放系数(胶囊固定在主显示器上)。"""
@@ -703,6 +1009,98 @@ class VoiceCapsule:
         except Exception:
             pass
         return 1.0
+
+    # ---------- 拖动(自定义位置) ----------
+
+    def _move_capsule_abs(self, x: float, y: float) -> None:
+        """窗口左上角 → (x, y) 逻辑像素。
+
+        前端拖动时每次都从 mousedown 起点算绝对目标发过来(不发增量):
+        某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        try:
+            scale = self._current_scale()
+            move_window_to(hwnd, int(round(float(x) * scale)),
+                           int(round(float(y) * scale)))
+        except Exception as e:
+            log.debug("移动胶囊失败: %s", e)
+
+    def _begin_drag(self) -> None:
+        """用户开始拖胶囊。
+
+        拖动期间守卫**不**抢回焦点:鼠标点在 WebView2 子窗口上会把
+        前台激活到胶囊,守卫每 150ms 还一次的话,焦点来回跳会拖垮
+        WebView2 的鼠标捕获(拖到一半就断了)。松手时统一还一次。
+        """
+        with self._drag_lock:
+            self._dragging = True
+
+    def _end_drag(self) -> None:
+        """用户松手:归还焦点 + 记住位置。"""
+        with self._drag_lock:
+            self._dragging = False
+        # 前台若被这次点击激活到了胶囊上,还回这一轮录音的落点 ——
+        # 不还的话,后面注入的文字会发给胶囊自己。
+        self._give_back_focus()
+        if self._position_mode() == "custom":
+            self._save_capsule_position()
+
+    def _save_capsule_position(self) -> None:
+        """记住当前胶囊位置(相对所在工作区的逻辑偏移)。
+
+        存相对量而不是绝对坐标:换缩放率、换显示器都不飞。
+        """
+        hwnd = self._native_handle()
+        if not hwnd:
+            return
+        rect = get_window_rect(hwnd)
+        if rect is None:
+            return
+        mon = self._monitor_at_window()
+        if mon is None:
+            return
+        geometry = encode_offset(rect[0], rect[1], mon.work_area, mon.scale)
+        try:
+            config = self.controller.config
+            config.capsule_geometry = geometry
+            config.capsule_monitor = mon.device
+            config.save()
+        except Exception as e:
+            log.debug("保存胶囊位置失败: %s", e)
+            return
+        log.debug("记住胶囊位置: %s @ %s", geometry, mon.device)
+
+    def _monitor_at_window(self) -> Any:
+        """胶囊当前所在的那块显示器(拿窗口中心点去问)。"""
+        rect = get_window_rect(self._native_handle())
+        if rect is None:
+            return None
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        mon = monitor_at_point(cx, cy)
+        if mon is None:
+            mon = monitor_at_point(rect[0], rect[1])
+        return mon
+
+    def _saved_monitor(self) -> Any:
+        """上次记忆位置时所在的那块显示器(设备名对不上就返回 None)。"""
+        try:
+            device = str(getattr(self.controller.config, "capsule_monitor", "")
+                         or "")
+        except Exception:
+            return None
+        return monitor_by_device(device)
+
+    def _saved_geometry(self) -> str:
+        """上次记忆的位置(``"dx,dy"``)。"""
+        try:
+            return str(getattr(self.controller.config, "capsule_geometry", "")
+                       or "")
+        except Exception:
+            return ""
 
     # ---------- 生命周期 ----------
 

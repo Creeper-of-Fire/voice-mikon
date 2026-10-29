@@ -358,3 +358,43 @@ def test_new_recording_invalidates_cancelled_result(controller):
     assert not wait_for(lambda: any(e.kind == "result" for e in events),
                         timeout=1.0)
     assert controller.injected == []
+
+
+def test_injection_failure_carries_recognized_text(controller):
+    """注入失败时,错误事件必须**带着识别原文**。
+
+    只报一句「文本注入失败」是不够的:用户看不到自己说了什么,
+    胶囊上的「复制」按钮也靠这份文本才能把内容交到用户手上。
+    之前这里只发文案,那段话在界面上等于彻底消失了。
+    """
+    controller.state = State.RECORDING
+    controller.recorder = FakeRecorder(
+        audio=(np.ones(32000) * 5000).astype(np.int16))
+    controller.engine = FakeEngine(result="你好世界")
+    controller._injector = lambda *a, **k: False
+
+    events = []
+    controller.subscribe(events.append)
+    controller.stop_recording()
+
+    assert wait_for(lambda: any(e.kind == "error" for e in events))
+    err = next(e for e in events if e.kind == "error")
+    assert err.text == "文本注入失败"
+    assert err.payload == "你好世界"
+
+
+def test_successful_injection_emits_result_without_error(controller):
+    """注入成功时不该带原文 —— 那条路没有东西需要用户去捞。"""
+    controller.state = State.RECORDING
+    controller.recorder = FakeRecorder(
+        audio=(np.ones(32000) * 5000).astype(np.int16))
+    controller.engine = FakeEngine(result="你好世界")
+
+    events = []
+    controller.subscribe(events.append)
+    controller.stop_recording()
+
+    assert wait_for(lambda: any(e.kind == "result" for e in events))
+    result = next(e for e in events if e.kind == "result")
+    assert result.text == "你好世界"
+    assert result.payload == ""

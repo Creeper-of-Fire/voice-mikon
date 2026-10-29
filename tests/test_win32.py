@@ -108,13 +108,25 @@ class FakeClipboard:
     def __init__(self):
         self._text = ""
         self._seq = 0
+        # 假剪贴板能不能读?(用来模拟"剪贴板被别的程序占着")
+        self.read_ok = True
+
+    def read_text(self) -> tuple[bool, str | None]:
+        """和真实 clipboard.read_text 同一套语义:
+        (读到了没有, 读到的文本)。"""
+        if not self.read_ok:
+            return False, None
+        return True, (self._text or None)
 
     def get_text(self) -> str:
         return self._text
 
-    def set_text(self, text: str) -> None:
+    def set_text(self, text: str) -> bool:
+        # 真实 clipboard.set_text 返回 bool(写成功 True)——
+        # 注入逻辑靠它判断"写进去了没有",这里必须一致
         self._text = text
         self._seq += 1
+        return True
 
     def get_sequence_number(self) -> int:
         return self._seq
@@ -200,3 +212,136 @@ def test_set_window_regions_releases_region_when_set_fails():
     """
     # 明显不是窗口的句柄:CreateRectRgn / CombineRgn 都能跑,SetWindowRgn 会失败
     assert api.set_window_regions(0xDEADBEEF, [(0, 0, 10, 10)]) is False
+
+
+# ---------------- 注入失败时的回退 ----------------
+#
+# 核心承诺:**注入失败不许让刚说出口的话消失**。
+# 之前的行为是:投递不全也照样 return True(谎报成功),而且后台线程
+# 无条件把剪贴板恢复成原内容 —— 目标窗口没收到、剪贴板也没了,
+# 用户两头落空,界面还显示「已输入」。
+
+
+@pytest.fixture
+def paste_env(monkeypatch, fake_clipboard):
+    """把 inject 的外部依赖全换成假的。
+
+    绝不能真发按键、真碰真剪贴板、真抢焦点。
+    """
+    monkeypatch.setattr(inject, "RESTORE_SETTLE", 0.01)
+    monkeypatch.setattr(inject, "PASTE_SETTLE", 0.0)
+    monkeypatch.setattr(inject, "modifiers_held", lambda: False)
+    monkeypatch.setattr(inject, "get_foreground_window", lambda: 0)
+    monkeypatch.setattr(inject, "restore_foreground", lambda hwnd: None)
+    return fake_clipboard
+
+
+def test_paste_reports_failure_when_no_key_delivered(monkeypatch, paste_env):
+    """一个事件都没送出去 -> 如实报失败。
+
+    谎报成功比失败更糟:用户以为文字进了输入框,就不会再去别处找。
+    """
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 0)
+
+    assert inject.paste_text("识别文本", restore=True) is False
+
+
+def test_paste_counts_partial_delivery_as_delivered(monkeypatch, paste_env):
+    """V 的按下送出去了 = 粘贴已经触发。
+
+    SendInput 只插入数组前缀([Ctrl↓, V↓, V↑, Ctrl↑]),sent>=2 意味着
+    目标应用已经收到「粘贴」这个动作 —— 这时候判失败会害我们重贴,
+    造成重复文本。
+    """
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 2)
+
+    assert inject.paste_text("识别文本", restore=True) is True
+
+
+def test_paste_keeps_text_in_clipboard_when_not_delivered(monkeypatch, paste_env):
+    """没送出去时**不恢复**剪贴板 —— 识别结果必须留着。"""
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 0)
+    paste_env.set_text("用户原来的内容")
+
+    assert inject.paste_text("识别文本", restore=True) is False
+    # 剪贴板里是识别结果,不是被恢复掉的旧内容
+    # (trailing_space 默认会给末尾补个空格,这里不比它)
+    assert paste_env.get_text().strip() == "识别文本"
+
+
+def test_paste_restores_clipboard_when_delivered(monkeypatch, paste_env):
+    """送出去了 -> 归还原内容(老规矩不变)。"""
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 4)
+    paste_env.set_text("用户原来的内容")
+
+    assert inject.paste_text("识别文本", restore=True) is True
+    time.sleep(0.2)          # 等后台恢复线程跑完
+    assert paste_env.get_text() == "用户原来的内容"
+
+
+def test_paste_does_not_restore_when_original_unreadable(monkeypatch, paste_env):
+    """原剪贴板读不出来 -> 我们根本不知道原内容是什么,只能不还。
+
+    还不了就别装还 —— 硬「还」一个空字符串才是真的把用户内容抹了。
+    识别结果留在剪贴板里,用户至少还拿得到刚说出口的话。
+    """
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 4)
+    paste_env.set_text("用户原来的内容")
+    paste_env.read_ok = False        # 模拟剪贴板被别的程序占着
+
+    assert inject.paste_text("识别文本", restore=True) is True
+    time.sleep(0.2)
+    assert paste_env.get_text().strip() == "识别文本"
+
+
+def test_paste_skips_when_modifier_held(monkeypatch, paste_env):
+    """用户按着修饰键时不注入 —— 但也不能把这段话弄丢。
+
+    这条路径压根没写剪贴板,所以识别结果只在内存里;
+    界面上的出口是胶囊的「复制」按钮(见 test_ui_windows.py)。
+    """
+    monkeypatch.setattr(inject, "modifiers_held", lambda: True)
+    monkeypatch.setattr(inject, "send_ctrl_v", lambda: 4)
+
+    assert inject.paste_text("识别文本", restore=True) is False
+    # 一个字都没写进剪贴板
+    assert paste_env.get_text() == ""
+
+
+# ---------------- 剪贴板读写的语义 ----------------
+
+
+def test_clipboard_read_text_reports_open_failure(monkeypatch):
+    """打不开剪贴板 -> ok=False,**不能**当成「里面没有文本」。
+
+    混为一谈的后果:上层以为「没有原内容需要归还」,把用户剪贴板里的
+    内容清掉还不还回去。
+    """
+    monkeypatch.setattr(clipboard, "_open_clipboard", lambda: False)
+
+    ok, text = clipboard.read_text()
+
+    assert ok is False
+    assert text is None
+
+
+def test_clipboard_read_text_reports_empty_as_success(monkeypatch):
+    """打得开、但里面没有 CF_UNICODETEXT -> ok=True, text=None。
+
+    这和「读失败」是两回事,必须报得出来。
+    """
+
+    class _FakeUser32:
+        def GetClipboardData(self, fmt):
+            return 0        # 没有该格式
+
+        def CloseClipboard(self):
+            return True
+
+    monkeypatch.setattr(clipboard, "_open_clipboard", lambda: True)
+    monkeypatch.setattr(clipboard, "user32", _FakeUser32())
+
+    ok, text = clipboard.read_text()
+
+    assert ok is True
+    assert text is None

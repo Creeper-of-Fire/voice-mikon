@@ -5,8 +5,9 @@
  * 本项目整体按 AGPL-3.0-or-later 发布(见仓库根目录 LICENSE)。
  *
  * 移植了三处本地适配(不是原样照抄):
- *   1. 胶囊**不可拖动** → 去掉了 ``-webkit-app-region: drag`` 与
- *      ``cursor: move``(OpenType 的胶囊能拖)。
+ *   1. 胶囊的拖动**自己实现**(而且只有「自定义」位置模式才允许)
+ *      → 去掉了 ``-webkit-app-region: drag``:那个是给浏览器托管的
+ *      拖动用的,而我们要自己把位置发给 Python 摆窗口。
  *   2. 主题色用本项目的录音红 ``--wave: #ff5a5a``
  *      (OpenType 的 dictation 模式是白色,靠 ``--wave`` 换色区分模式,
  *      我们只有一种模式,用录音红)。
@@ -201,6 +202,20 @@ body {
   color: var(--dim);
 }
 
+/* ---------------- 预览关掉时的样子 ---------------- */
+
+/* 预览文字条整块消失 —— 胶囊里只剩波形+计时+按钮,不挡屏幕。
+   (关掉之后"已输入"/错误提示改显示在胶囊内的 label 位,
+   见 capsule.js 的 setPhase(phase, labelText)。) */
+.no-preview .textbar {
+  display: none;
+}
+
+/* 可拖动:只有「自定义」位置模式才给这个提示 */
+.can-drag .recording-pill {
+  cursor: move;
+}
+
 /* 错误态：暗红底 + 红描边 + 浅红字（沿用 OpenType 的 error 配色） */
 .textbar.is-error {
   background: var(--err-bg);
@@ -348,6 +363,23 @@ body {
 .recording-pill:not(.recording):not(.done):not(.error):not(.cancelled) .bar-state svg { animation: bar-spin 1.1s linear infinite; }
 @keyframes bar-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .bar-state svg { animation: none !important; } }
+
+/* ---------------- 复制按钮（注入失败时的兜底出口） ---------------- */
+
+/* 默认不出现。只有错误态、而且确实带着可复制的原文时,
+   JS 才给胶囊加 .can-copy —— 那时才把这个按钮亮出来。
+   (不能只靠 .error:识别失败、没听清这些错误没有原文可复制。) */
+.recording-pill .bar-copy { display: none; }
+.recording-pill.error.can-copy .bar-copy {
+  display: grid;
+  background: var(--state-bg);
+  color: var(--fg);
+}
+.recording-pill.error.can-copy .bar-copy:hover { background: var(--cancel-btn-hover); }
+
+/* 有复制按钮时,错误图标让位 —— 文案已经说明了出错,
+   两个图标并排反而挤。 */
+.recording-pill.error.can-copy .bar-state { display: none; }
 
 /* ---------------- 阶段切换 ---------------- */
 

@@ -91,6 +91,10 @@ class UIEvent:
     levels: list[float] = field(default_factory=list)
     elapsed: float = 0.0
     model_tag: str = ""
+    # error 事件**附带的原文**:注入失败时带着识别出来的文本一起发。
+    # 光有一句"文本注入失败"是不够的 —— 用户得看得到自己刚说了什么,
+    # 胶囊上的「复制」按钮也靠这份文本才能把内容交到用户手上。
+    payload: str = ""
 
 
 def _default_injector(text: str, hwnd: int, restore: bool, trailing_space: bool) -> bool:
@@ -549,7 +553,11 @@ class VoiceController:
         if ok:
             self._emit(UIEvent(kind="result", text=text))
         else:
-            self._emit(UIEvent(kind="error", text="文本注入失败"))
+            # 失败也要把原文带出去:只报一句"文本注入失败",用户既看不到
+            # 自己说了什么,也没法把它捞回来 —— 那段话就等于不存在了。
+            # 胶囊会把它显示出来,并给一个「复制」按钮。
+            self._emit(UIEvent(kind="error", text="文本注入失败",
+                               payload=text))
         # 最终结果到了,预览文字就没用了(最终结果始终来自整段识别,不是预览)
         self._emit(UIEvent(kind="preview", text=""))
 

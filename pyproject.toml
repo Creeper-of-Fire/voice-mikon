@@ -23,6 +23,12 @@ dependencies = [
 # pip install -e ".[hotwords]"
 hotwords = ["jieba>=0.42"]
 
+# 「跟随输入」位置模式要用 UI Automation 读光标位置(现代应用)。
+# 装不上也不影响使用 —— 定位会退到更弱的手段(传统控件光标 → 鼠标 →
+# 前台窗口矩形),只是没那么准。
+# pip install -e ".[uia]"
+uia = ["comtypes>=1.2"]
+
 [project.scripts]
 qwen3-voice = "qwen3_voice.__main__:main"
 

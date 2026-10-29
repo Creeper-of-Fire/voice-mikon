@@ -21,8 +21,10 @@
  *   Python → JS : window.__capsule.setState / setLevels / setElapsed
  *                 / setPreview / setResult / setError / setCancelled
  *                 / resetForRecording / setTheme
+ *                 / setPositionMode / setPreviewEnabled
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
- *                 / update_regions
+ *                 / update_regions / move_capsule / begin_drag / end_drag
+ *                 / copy_result
  */
 (function () {
   'use strict';
@@ -62,6 +64,9 @@
   /* 主题档位:auto = 跟随系统,light = 白天,dark = 黑夜 */
   var THEMES = ['auto', 'light', 'dark'];
 
+  /* 胶囊位置档位:follow = 跟随输入光标,bottom = 固定底部,custom = 自定义 */
+  var POSITION_MODES = ['follow', 'bottom', 'custom'];
+
   /* 胶囊各阶段的中文文案 */
   var PHASE_TEXT = {
     recording: '',
@@ -84,7 +89,11 @@
     phase: 'recording', // 胶囊自己的阶段
     level: 0,           // 当前（平滑后）的响度 0..1
     elapsed: 0,         // 录音计时（秒）
-    theme: 'auto'       // 主题档位
+    theme: 'auto',      // 主题档位
+    positionMode: 'follow', // 胶囊位置档位（只有 custom 模式允许拖动）
+    previewEnabled: true,   // 实时预览文字条是否显示
+    errorPayload: '',       // 错误态里可复制的原文(注入失败时带着识别文本)
+    copying: false          // 复制进行中(防连点)
   };
 
   var el = {};              // DOM 缓存
@@ -130,6 +139,26 @@
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  // 调 Python 并**等它的返回值**。
+  // pywebview 会把 Python 函数的返回值包成 Promise ——「复制」按钮要靠
+  // 这个返回值判断"到底写进去了没有",不能像别处那样把 Promise 吞掉。
+  function callApiAsync(name) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var api = window.pywebview && window.pywebview.api;
+      if (!api || typeof api[name] !== 'function') {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(api[name].apply(api, args)).then(function (ret) {
+        return ret === true;
+      }, function () {
+        return false;
+      });
+    } catch (e) {
+      return Promise.resolve(false);
     }
   }
 
@@ -236,11 +265,45 @@
     }
   }
 
+  /* ==================== 位置模式 / 预览开关 ==================== */
+
+  /* 位置模式:只有 custom 模式允许拖动胶囊。
+   * 跟随输入模式下拖了也没意义 —— 下一轮录音还是回到光标那里。 */
+  function applyPositionMode(mode) {
+    var m = POSITION_MODES.indexOf(mode) >= 0 ? mode : 'follow';
+    ui.positionMode = m;
+    if (document.body) {
+      document.body.classList.toggle('can-drag', m === 'custom');
+    }
+  }
+
+  /* 预览开关:关掉之后文字条整块消失(胶囊只剩波形+计时+按钮),
+   * "已输入"/错误提示改在胶囊里的 label 位显示。 */
+  function applyPreviewEnabled(enabled) {
+    ui.previewEnabled = !!enabled;
+    if (document.body) {
+      document.body.classList.toggle('no-preview', !ui.previewEnabled);
+    }
+    // 两种情况都要把文字条清空:留着上一轮的旧内容,
+    // 切回"开"的时候会闪一下
+    if (el.textbar) {
+      el.textbar.classList.remove('is-error', 'is-cancelled');
+      el.textbar.classList.add('is-empty');
+    }
+    if (el.textbarText) {
+      el.textbarText.textContent = '';
+    }
+    scheduleRegionReport();
+  }
+
   /* ==================== 胶囊阶段 ==================== */
 
   // 切换胶囊阶段。phase 以 class 的形式挂在胶囊上(和 OpenType 一致),
   // CSS 靠它决定显示波形还是状态文字、右侧是结束钮还是状态图标。
-  function setPhase(phase) {
+  //
+  // labelText 是**覆盖文案**:预览关掉的时候,提示要显示在胶囊里的
+  // label 位(而不是文字条上),比如错误文案 —— 一行截断即可。
+  function setPhase(phase, labelText) {
     ui.phase = phase;
     if (el.pill) {
       for (var i = 0; i < PHASES.length; i++) {
@@ -248,7 +311,9 @@
       }
     }
     if (el.barLabel) {
-      el.barLabel.textContent = PHASE_TEXT[phase] || '';
+      var text = labelText != null ? String(labelText)
+                                  : (PHASE_TEXT[phase] || '');
+      el.barLabel.textContent = text;
     }
     // 滚动电平条只在**录音阶段**跑 —— 别的阶段胶囊里换状态文字,
     // 条子停在那儿不动(反正 waveform 被 CSS 藏了)
@@ -268,7 +333,14 @@
   /* ==================== 文字条 ==================== */
 
   // 写文字条内容。kind 决定配色：normal / error / cancelled
+  //
+  // 预览关掉的时候**一个字都不写**:文字条整块都不该出现
+  // (CSS 里 .no-preview 把它 display:none,这里保证内容也是空的,
+  //  免得切回"开"的时候闪出上一轮的旧内容)。
   function writeText(text, kind) {
+    if (!ui.previewEnabled) {
+      return;
+    }
     var value = text == null ? '' : String(text);
     if (el.textbar) {
       el.textbar.classList.remove('is-empty', 'is-error', 'is-cancelled');
@@ -284,6 +356,40 @@
     }
     // 文字条的长宽会变 → 窗口形状要跟着变
     scheduleRegionReport();
+  }
+
+  /* ==================== 错误态的复制 ==================== */
+
+  // 注入失败时,那段话可能哪儿都没有:目标窗口没收到,剪贴板里
+  // 也未必留下。这个按钮是用户唯一能把内容捞回来的出口 ——
+  // 点一下 → Python 写剪贴板 → **读回校验** → 确认写进去了,
+  // 胶囊自己关掉。写不进去就留在原地,让用户再试一次。
+  function setCopyHint(text) {
+    setPhase('error', text);
+  }
+
+  function onCopyClick() {
+    if (ui.copying) {
+      return;
+    }
+    var text = ui.errorPayload;
+    if (!text || !text.trim()) {
+      return;
+    }
+    ui.copying = true;
+    setCopyHint('复制中…');
+    callApiAsync('copy_result', text).then(function (ok) {
+      ui.copying = false;
+      if (ok) {
+        // Python 侧已经把胶囊收掉了,这里把状态清干净
+        ui.errorPayload = '';
+        if (el.pill) {
+          el.pill.classList.remove('can-copy');
+        }
+      } else {
+        setCopyHint('复制失败,再试一次');
+      }
+    });
   }
 
   /* ==================== 电平数据 ==================== */
@@ -503,6 +609,92 @@
     // 滚动条自己按 80ms 推进,不依赖计时 —— 秒数只管显示
   }
 
+  /* ==================== 拖动(自定义位置) ==================== */
+
+  /* 胶囊本体(非按钮区)当拖拽把手 —— 只有「自定义」模式才允许:
+   * 跟随输入模式下拖了也没意义(下一轮还是回到光标那里),
+   * 固定底部模式下拖了会被下一次录音直接掰回去。
+   *
+   * 发**绝对目标位置**,不发增量 —— 面板那套已经验证过:
+   * 增量在 IPC 慢的时候会漂,而绝对目标天然不漂
+   * (某一次调用丢了或慢了,下一次直接覆盖)。
+   *
+   * 坐标用 e.screenX(鼠标的**屏幕**坐标)而不是 clientX ——
+   * 窗口自己一动 clientX(视口内坐标)就变,会被窗口移动污染。 */
+  var drag = {
+    active: false,
+    startScreenX: 0,
+    startScreenY: 0,
+    startWinX: 0,
+    startWinY: 0,
+    pending: null,
+    raf: 0
+  };
+
+  function onDragStart(e) {
+    if (ui.positionMode !== 'custom') {
+      return;
+    }
+    if (e.button !== 0) {
+      return;
+    }
+    // 点在 ✕ / ✓ 按钮上时不触发拖动
+    if (e.target && e.target.closest && e.target.closest('button')) {
+      return;
+    }
+    drag.active = true;
+    drag.startScreenX = e.screenX;
+    drag.startScreenY = e.screenY;
+    drag.startWinX = window.screenX;
+    drag.startWinY = window.screenY;
+    drag.pending = null;
+    document.addEventListener('mousemove', onDragMove, false);
+    document.addEventListener('mouseup', onDragEnd, false);
+    // 告诉 Python:拖动期间别抢回焦点(焦点来回跳会拖垮鼠标捕获)
+    callApi('begin_drag');
+    e.preventDefault();
+  }
+
+  function onDragMove(e) {
+    if (!drag.active) {
+      return;
+    }
+    drag.pending = e;
+    if (!drag.raf) {
+      drag.raf = requestAnimationFrame(flushDrag);
+    }
+  }
+
+  function flushDrag() {
+    drag.raf = 0;
+    var e = drag.pending;
+    drag.pending = null;
+    if (!e || !drag.active) {
+      return;
+    }
+    var x = drag.startWinX + (e.screenX - drag.startScreenX);
+    var y = drag.startWinY + (e.screenY - drag.startScreenY);
+    if (x === drag.startWinX && y === drag.startWinY) {
+      return;
+    }
+    callApi('move_capsule', x, y);
+  }
+
+  function onDragEnd() {
+    if (!drag.active) {
+      return;
+    }
+    drag.active = false;
+    document.removeEventListener('mousemove', onDragMove, false);
+    document.removeEventListener('mouseup', onDragEnd, false);
+    if (drag.raf) {
+      cancelAnimationFrame(drag.raf);
+      drag.raf = 0;
+    }
+    flushDrag();       // 把最后一次位置补上
+    callApi('end_drag');   // Python 侧:归还焦点 + 记住位置
+  }
+
   /* ==================== 事件绑定 ==================== */
 
   function bindEvents() {
@@ -518,6 +710,16 @@
       el.okBtn.addEventListener('click', function () {
         callApi('stop_recording');
       });
+    }
+
+    // 胶囊本体当拖拽把手(只有「自定义」位置模式才真的拖得动)
+    if (el.pill) {
+      el.pill.addEventListener('mousedown', onDragStart, false);
+    }
+
+    // 复制：注入失败时把识别结果手动写进剪贴板
+    if (el.copyBtn) {
+      el.copyBtn.addEventListener('click', onCopyClick);
     }
   }
 
@@ -554,19 +756,51 @@
           || ui.phase === 'cancelled') {
         return;
       }
+      // 预览关着:文字条整块都不出现,一个字都不写
+      if (!ui.previewEnabled) {
+        return;
+      }
       writeText(text == null ? '' : String(text), 'normal');
     },
     setResult: function (text) {
-      // 最终结果：文字条定格
-      writeText(text == null ? '' : String(text), 'normal');
+      // 最终结果：文字条定格(预览关着时只剩胶囊里的「已输入」)
+      if (ui.previewEnabled) {
+        writeText(text == null ? '' : String(text), 'normal');
+      }
       setPhase('done');
     },
-    setError: function (text) {
-      writeText(text == null ? '' : String(text), 'error');
-      setPhase('error');
+    setError: function (message, payload) {
+      var msg = message == null ? '' : String(message);
+      var raw = payload == null ? '' : String(payload);
+      ui.errorPayload = raw;
+      ui.copying = false;
+      // 带原文 = 注入失败那一类:文字条显示**识别原文**(用户要的
+      // 就是这段话),胶囊里给一个「复制」按钮。没有原文的错误
+      // (没听清 / 识别失败)只显示文案,不给按钮 —— 没东西可复制。
+      var canCopy = !!raw.trim();
+      if (el.pill) {
+        el.pill.classList.toggle('can-copy', canCopy);
+      }
+      if (canCopy) {
+        if (ui.previewEnabled) {
+          writeText(raw, 'error');
+          setPhase('error', '点右侧复制');
+        } else {
+          // 预览关着:文字条不出现,全文只能靠这个按钮拿走
+          setPhase('error', msg + ' · 点右侧复制');
+        }
+      } else if (ui.previewEnabled) {
+        writeText(msg, 'error');
+        setPhase('error');
+      } else {
+        // 预览关着:错误文案进胶囊的 label 位(一行截断即可)
+        setPhase('error', msg);
+      }
     },
     setCancelled: function () {
-      writeText('已取消', 'cancelled');
+      if (ui.previewEnabled) {
+        writeText('已取消', 'cancelled');
+      }
       setPhase('cancelled');
     },
     resetForRecording: function () {
@@ -576,12 +810,26 @@
       resetLevelBars();
       barsRunning = true;
       setElapsed(0);
+      // 上一轮错误态留下的原文与「复制」按钮也要清干净
+      ui.errorPayload = '';
+      ui.copying = false;
+      if (el.pill) {
+        el.pill.classList.remove('can-copy');
+      }
       setPhase('recording');
     },
     setTheme: function (mode) {
       // 主题档位:面板改的。Python 侧会在每次录音开始前再补推一次,
       // 所以这里只需要幂等地设上属性就行。
       applyTheme(mode);
+    },
+    setPositionMode: function (mode) {
+      // 胶囊位置档位:面板改的。Python 侧也会在录音开始前补推一次。
+      applyPositionMode(mode);
+    },
+    setPreviewEnabled: function (enabled) {
+      // 预览开关:面板改的。
+      applyPreviewEnabled(enabled);
     }
   };
 
@@ -597,6 +845,7 @@
     el.barTimer = $('barTimer');
     el.cancelBtn = $('cancelBtn');
     el.okBtn = $('okBtn');
+    el.copyBtn = $('copyBtn');
   }
 
   // Python 可能在 DOMContentLoaded 之前就推状态，这里做惰性绑定兜底
@@ -614,6 +863,8 @@
     // 波形条在进入录音阶段时才建(见 setPhase),这里只定阶段
     setPhase('recording');
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
+    applyPositionMode('follow');   // 同理:setPositionMode 会推真实档位
+    applyPreviewEnabled(true);      // 同理:setPreviewEnabled 会推真实值
 
     bindEvents();
 

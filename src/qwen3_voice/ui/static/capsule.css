@@ -13,6 +13,10 @@
  *   3. 胶囊宽度保持 fit-content(和 OpenType 一致):曾给过
  *      ``min-width: 280px``,但内容(✕+波形+计时+✓)只有约 190px,
  *      多出的空隙全堆在 ✓ 右侧,视觉上右截空了一大段 —— 已去掉。
+ *   4. **波形不是 OpenType 的**:OpenType 用 9 根固定对称包络,这里按
+ *      MiniMax Code 的 ``asr-volume-bars`` 规格做 13 根**滚动电平条**
+ *      (从右往左滚)。用户最初就定了"音量条保持 MiniMax Code 规格,
+ *      其他随便学 OpenType" —— 波形区曾被"移植 OpenType"波及,已修回。
  *
  * 两条硬规矩(都是透明窗口踩出来的):
  *   1. 不写 box-shadow / backdrop-filter —— 在透明窗口上它们会渲染成
@@ -58,6 +62,9 @@
 
   /* 录音红:两套主题一样 —— 红是"正在录"的语义色,不是主题色 */
   --wave: #ff5a5a;
+  /* 波形里的静音条:底噪时画灰,别让人以为一直在响。
+     跟着前景色走 —— 深色主题是浅灰,浅色主题是深灰。 */
+  --wave-dim: rgba(244, 244, 245, 0.28);
 
   --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei",
           "PingFang SC", "Hiragino Sans GB", sans-serif;
@@ -86,6 +93,7 @@
     --cancel-btn-hover: #e4e4e7;
     --state-bg: rgba(17, 17, 19, 0.08);
     --wave-fg: #111113;
+    --wave-dim: rgba(17, 17, 19, 0.22);
     --dim: rgba(17, 17, 19, 0.45);
     --dim2: rgba(17, 17, 19, 0.6);
     --dim3: rgba(17, 17, 19, 0.55);
@@ -105,6 +113,7 @@
   --cancel-btn-hover: #e4e4e7;
   --state-bg: rgba(17, 17, 19, 0.08);
   --wave-fg: #111113;
+  --wave-dim: rgba(17, 17, 19, 0.22);
   --dim: rgba(17, 17, 19, 0.45);
   --dim2: rgba(17, 17, 19, 0.6);
   --dim3: rgba(17, 17, 19, 0.55);
@@ -249,15 +258,50 @@ body {
   padding: 0 2px;
 }
 
-/* 波形：9 根对称包络的小条（短 → 高 → 短） */
-.waveform { display: flex; align-items: center; gap: 3px; height: 24px; }
-.waveform i {
+/* 波形区：滚动电平条（MiniMax Code 的 asr-volume-bars 规格）
+   13 根定宽小条，从右往左滚。条数用 MCode 原版的 13 根 —— 胶囊窄，
+   旧面板那 22 根是面板宽才放得下。
+   宽度是算出来的：13×3px(条宽) + 12×3px(间隙) = 75px。 */
+.waveform {
+  position: relative;
   display: block;
+  width: 75px;
+  height: 24px;
+  flex: 0 0 auto;
+  /* 滑出左边的条直接裁掉 —— 胶囊窄，不能让条子跑到计时数字那边 */
+  overflow: hidden;
+}
+
+/* 一根条：固定 3px 宽，底对齐（从底部往上长），
+   位置靠 transform 平移（向左滚动），高度靠 style.height 改。
+   transform 过渡 80ms = 推进周期，高度过渡 75ms 略短，避免拖尾。 */
+.waveform i {
+  position: absolute;
+  right: 0;
+  bottom: 0;
   width: 3px;
-  min-height: 3px;
+  height: 2px;
   border-radius: 3px;
-  background: var(--wave);
-  transition: height 90ms;
+  background: currentColor;
+  color: var(--wave);
+  transition: transform 80ms linear, height 75ms ease-out;
+}
+
+/* 静音条（电平 ≤ 0.04）：灰色，而不是录音红 */
+.waveform i.is-silent {
+  color: var(--wave-dim);
+}
+
+/* 左侧渐隐：滑出视口的条在左边缘淡出，而不是被硬切一刀 */
+.waveform::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  pointer-events: none;
+  background: linear-gradient(90deg, var(--deep) 0%, transparent 100%);
 }
 
 /* 状态文字（OpenType 的 bar-label）
@@ -308,7 +352,7 @@ body {
 /* ---------------- 阶段切换 ---------------- */
 
 /* 录音中：波形 + 计时，右侧是结束钮 */
-.recording-pill.recording .waveform { display: flex; }
+.recording-pill.recording .waveform { display: block; }
 .recording-pill.recording .bar-timer { display: inline; }
 .recording-pill.recording .bar-stop { display: grid; }
 .recording-pill.recording .bar-state { display: none; }

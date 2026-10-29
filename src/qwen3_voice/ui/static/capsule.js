@@ -2,17 +2,17 @@
  *
  * 纯原生 JS：零 npm、零框架、零 CDN、零外部字体/图标请求，离线可用。
  *
- * 波形渲染（9 根对称包络 + 高度算法）与阶段切换**移植自 OpenType**
+ * 胶囊的**外观**(胶囊形状 / 按钮 / 阶段切换)**移植自 OpenType**
  * (https://github.com/ct-jyjntc/opentype-public) 的
  * ``src/renderer/floating-bar.tsx`` —— AGPL-3.0。
  * 本项目整体按 AGPL-3.0-or-later 发布(见 LICENSE)。
  *
  * 与移植版的差异(适配改动,不是照抄):
- *   - 电平的量纲不同:OpenType 的 level 是它自己的线性电平(0.1 就饱和),
- *     我们的是 dBFS 对数域映射后的绝对值(人声约 0.4~0.7)。直接照搬
- *     ``level / 0.1`` 会让波形永远是满的 —— 那就把"我说话声音大不大"
- *     这个信息抹掉了。所以饱和因子改成 ``min(1, level)``,
- *     **包络形状与相位波动完全照搬**。
+ *   - **波形是本项目自有的,不是 OpenType 的**:按 MiniMax Code 的
+ *     ``asr-volume-bars`` 规格做**滚动电平条**(13 根定宽小条,从右往左
+ *     滚、三槽轮转、带过渡插值)。用户最初就定了"音量条保持 MiniMax
+ *     Code 规格,其他随便学 OpenType" —— 波形区曾经被"移植 OpenType"
+ *     的指令波及,现在修回来(旧面板时代就是这么做的,见 a1a3ea2)。
  *   - 计时是本项目自有的(OpenType 的胶囊没有计时)。
  *   - 图标用内联 SVG(Lucide 的 X / Check / Info / LoaderCircle),
  *     不用 unicode 字符凑合。
@@ -29,9 +29,35 @@
 
   /* ==================== 常量 ==================== */
 
-  /* ---- 波形包络（移植自 OpenType）----
-     对称包络:两端短、中间高。9 根固定的小条,不滚动。 */
-  var WAVE = [5, 8, 12, 16, 19, 16, 12, 8, 5];
+  /* ---- 滚动电平条(对齐 MiniMax Code 的 asr-volume-bars)----
+     13 根定宽小条,从右往左滚动。旧面板时代就是这么做的
+     (面板那 22 根是因为面板更宽;胶囊窄,取 MCode 原版的 13 根)。 */
+
+  // 同时显示的条数:13 根(MiniMax Code 原版规格)
+  var BAR_COUNT = 13;
+
+  // 条宽 / 条间距(px):步进 = 宽 + 间距 = 6px,与 capsule.css 保持一致
+  var BAR_WIDTH = 3;
+  var BAR_GAP = 3;
+  var BAR_STEP = BAR_WIDTH + BAR_GAP;
+
+  // 每推进一根条的周期(ms)
+  var BAR_TICK_MS = 80;
+
+  // 元素池 = 可见条数 + 1:多出来的那根已经滑出视口左侧,
+  // 用来"回收"(复用同一个 DOM 节点当新条),省得新条横穿屏幕飞进来
+  var POOL_SIZE = BAR_COUNT + 1;
+
+  // 静音死区:响度 <= 0.04 视为底噪
+  var DEAD_ZONE = 0.04;
+
+  // 条高上下限(px):静音 2px,最响 20px
+  var SILENT_HEIGHT = 2;
+  var MAX_HEIGHT = 20;
+
+  // 4px 正好是 level = 0.04 对应的高度(MCode 的死区上界);
+  // 不高于它就算静音条,画灰色
+  var SILENT_MAX_PX = 4;
 
   /* 主题档位:auto = 跟随系统,light = 白天,dark = 黑夜 */
   var THEMES = ['auto', 'light', 'dark'];
@@ -62,6 +88,14 @@
   };
 
   var el = {};              // DOM 缓存
+
+  // 滚动电平条的运行状态
+  var pool = [];            // 条的 DOM 节点:pool[0] 最新,pool[末位] 最老
+  var ages = [];            // 每根条的"年龄":0 = 最新,越大越老
+  var slotIndex = 0;        // 三槽轮转指针
+  var lastBarHeight = 0;    // 上一根条的像素高度(做过渡插值用)
+  var barTimer = 0;         // 推进条的定时器
+  var barsRunning = false;  // 条是不是正在跑(避免重复调用时重置)
   var smoother = { current: 0 };   // 电平滑器当前值
 
   /* ==================== 小工具 ==================== */
@@ -216,6 +250,17 @@
     if (el.barLabel) {
       el.barLabel.textContent = PHASE_TEXT[phase] || '';
     }
+    // 滚动电平条只在**录音阶段**跑 —— 别的阶段胶囊里换状态文字,
+    // 条子停在那儿不动(反正 waveform 被 CSS 藏了)
+    if (phase === 'recording') {
+      if (!barsRunning) {
+        resetLevelBars();
+        barsRunning = true;
+      }
+    } else if (barsRunning) {
+      stopBars();
+      barsRunning = false;
+    }
     // 阶段换了,胶囊的宽度会变(波形 ↔ 状态文字)→ 窗口形状要跟着变
     scheduleRegionReport();
   }
@@ -271,14 +316,14 @@
   function setLevels(payload) {
     var vals = parseLevels(payload);
     if (!vals || !vals.length) {
-      // 空序列：这一帧没有新样本，不动平滑器
+      // 空序列:这一帧没有新样本,不动平滑器
       return;
     }
-    // Python 侧 30fps 推一串滑动窗口，只取最新的一个值喂给平滑器，
-    // **不做窗口内归一化** —— 归一化之后波形永远看起来是满的，
+    // Python 侧 30fps 推一串滑动窗口,而条子 80ms 才出一根,
+    // 所以只取最新的一个值(数组末尾)喂给平滑器,
+    // **不做窗口内归一化** —— 归一化之后条子永远看起来是满的,
     // 用户就没法从条的高低看出"我说话声音大不大"了。
     ui.level = smoothLevel(vals[vals.length - 1]);
-    renderWave();
   }
 
   /* ==================== 电平滑 ==================== */
@@ -293,43 +338,146 @@
     return clamp(out, 0, 1);
   }
 
-  /* ==================== 波形（移植自 OpenType）================ */
+  /* ==================== 高度映射 ==================== */
 
-  // 9 根对称包络的小条:两端短、中间高,高度由真实电平驱动,
-  // 相位随秒数流动(整体在"呼吸")。
+  // 响度(0..1) → 条高(px)。4 段非线性,这是"对比度明显"的来源:
+  //   0 ~ 0.04 : 固定 2px(死区 / 底噪)
+  //   0.04 ~ 0.2: 4 → 12px(斜率 50,最灵敏)
+  //   0.2  ~ 0.5: 12 → 18px(斜率 20)
+  //   0.5  ~ 1  : 18 → 20px(斜率 4,压缩)
   //
-  // 高度公式移植自 OpenType 的 floating-bar.tsx:
-  //   height = 3 + min(1, level/0.1) * base * (0.75 + 0.25*sin(...))
-  // 我们的 level 是 dBFS 对数域的绝对值(人声 0.4~0.7),直接用
-  // level/0.1 会永远饱和 —— 包络照搬,饱和因子改成 min(1, level)。
-  function renderWave() {
-    if (!el.waveform) {
-      return;
+  // ⚠️ 输入是**绝对电平**(Python 侧 dbfs_to_unit 的 dBFS 对数映射值),
+  // 前端绝不按窗口内最大值归一化 —— 归一化之后条子永远看起来是满的,
+  // 用户就没法从条的高低看出"我说话声音大不大"了。
+  function mapHeight(level) {
+    if (level <= DEAD_ZONE) {
+      return SILENT_HEIGHT;
     }
-    var bars = el.waveform.children;
-    if (!bars.length) {
-      return;
+    if (level <= 0.2) {
+      return 4 + (level - DEAD_ZONE) / 0.16 * 8;
     }
-    var lvl = clamp(ui.level, 0, 1);
-    var sec = Math.floor(ui.elapsed);
-    for (var i = 0; i < bars.length; i++) {
-      var base = WAVE[i] || 5;
-      var swing = 0.75 + 0.25 * Math.sin(Math.abs(i - 4) * 1.3 + sec * 2);
-      var height = 3 + lvl * base * swing;
-      bars[i].style.height = height.toFixed(2) + 'px';
+    if (level <= 0.5) {
+      return 12 + (level - 0.2) / 0.3 * 6;
     }
+    return Math.min(MAX_HEIGHT, 18 + (level - 0.5) / 0.5 * 2);
   }
 
-  // 建一次 9 根条(固定不滚动 —— 包络靠高度变化表达流动)
-  function buildWave() {
+  /* ==================== 三槽轮转 ==================== */
+
+  // 每次算出三个高度(过渡 / 当前 / 衰减)轮流用,
+  // 相邻条因此天然错开,不会是一排单调的长短 —— "流动感"的来源。
+  //
+  // MCode 那边 r / decay 是"响度"(j() 的结果),这里直接保留像素高度:
+  // I() 与 j() 互为反函数,往返一次结果不变,省一层换算。
+  function nextBarHeight(curPx, level) {
+    var prev = lastBarHeight;
+    // 过渡条:与上一根做 65% 插值 → 缓升 / 缓降
+    var trans = prev + (curPx - prev) * 0.65;
+    // 衰减条:回声感,越响掉得越多
+    var decay = curPx <= SILENT_MAX_PX
+      ? curPx
+      : Math.max(SILENT_MAX_PX, curPx - (0.75 + 3.75 * level));
+    var slots = [trans, curPx, decay];
+    var h = slots[slotIndex % 3];
+    slotIndex++;
+    lastBarHeight = h;
+    // 死区下界:静音条恒为 2px
+    return clamp(h, SILENT_HEIGHT, MAX_HEIGHT);
+  }
+
+  /* ==================== 滚动电平条 ==================== */
+
+  // 新建一根条
+  function createBar() {
+    var bar = document.createElement('i');
+    bar.style.height = SILENT_HEIGHT + 'px';
+    bar.style.transform = 'translateX(0px)';
+    bar.classList.add('is-silent');
+    return bar;
+  }
+
+  // 推进一根新条:新条从右侧进,旧的从左侧出(滑出视口即被裁掉)
+  function advanceBar() {
     if (!el.waveform) {
       return;
     }
-    el.waveform.textContent = '';
-    for (var i = 0; i < WAVE.length; i++) {
-      var bar = document.createElement('i');
-      bar.style.height = '3px';
-      el.waveform.appendChild(bar);
+    var level = ui.level;
+    var curPx = mapHeight(level);
+    var height = nextBarHeight(curPx, level);
+
+    var recycled;
+    if (pool.length < POOL_SIZE) {
+      // 池子还没满(正常情况下一进录音就填满了,这里只是兜底)
+      recycled = createBar();
+      el.waveform.appendChild(recycled);
+    } else {
+      // 条够了:回收最老的一根(它已经在视口左侧外,回收时不会被人看见)
+      recycled = pool.pop();
+      ages.pop();
+    }
+    pool.unshift(recycled);
+    ages.unshift(0);
+    // 其余各根年龄 +1(也就是整体向左滑一个步距)
+    for (var i = 1; i < ages.length; i++) {
+      ages[i] += 1;
+    }
+
+    // 写位置:年龄 a 的条平移 -a × 步距
+    // 回收的那根要"瞬移"到最右边:先关掉它的过渡,
+    // 否则它会从屏幕左边一路飞过来
+    recycled.style.transition = 'none';
+    recycled.style.height = SILENT_HEIGHT + 'px';
+    for (var j = 0; j < pool.length; j++) {
+      pool[j].style.transform = 'translateX(' + (-ages[j] * BAR_STEP) + 'px)';
+    }
+
+    // 强制回流,让浏览器认下"瞬时"的位置(后面再放开过渡)
+    void el.waveform.offsetWidth;
+
+    // 颜色:静音条画灰色;高度下一帧再给,触发 75ms 的高度过渡
+    var silent = height <= SILENT_MAX_PX;
+    recycled.classList.toggle('is-silent', silent);
+    var target = height.toFixed(2) + 'px';
+    window.requestAnimationFrame(function () {
+      recycled.style.transition = '';
+      recycled.style.height = target;
+    });
+  }
+
+  // 进入录音:重来一遍,不保留上一次的残留高度
+  function resetLevelBars() {
+    stopBars();
+    pool = [];
+    ages = [];
+    slotIndex = 0;
+    lastBarHeight = 0;
+    smoother.current = 0;
+    ui.level = 0;
+    if (el.waveform) {
+      el.waveform.textContent = '';
+      // 预填满 13 根(外加 1 根屏外的回收位):
+      // 组宽一开始就是满的,和 MCode 那个定宽小条一致;
+      // 初始都是 2px 的静音基线,等真实音量来了再长起来
+      for (var i = 0; i < POOL_SIZE; i++) {
+        var bar = createBar();
+        bar.style.transform = 'translateX(' + (-i * BAR_STEP) + 'px)';
+        el.waveform.appendChild(bar);
+        pool.push(bar);
+        ages.push(i);
+      }
+    }
+    startBars();
+  }
+
+  function startBars() {
+    stopBars();
+    barTimer = window.setInterval(advanceBar, BAR_TICK_MS);
+  }
+
+  function stopBars() {
+    if (barTimer) {
+      window.clearInterval(barTimer);
+      barTimer = 0;
     }
   }
 
@@ -352,8 +500,7 @@
     if (el.barTimer) {
       el.barTimer.textContent = formatTime(s);
     }
-    // 秒数变了,包络的相位也跟着变(OpenType 就是这么做的)
-    renderWave();
+    // 滚动条自己按 80ms 推进,不依赖计时 —— 秒数只管显示
   }
 
   /* ==================== 事件绑定 ==================== */
@@ -384,6 +531,11 @@
         setPhase('recording');
       } else if (state === 'processing') {
         setPhase('processing');
+      } else {
+        // 待机 / 出错:胶囊这会儿是隐藏的,波形不必再跑
+        // (阶段不变 —— 阶段决定的是"胶囊长什么样",不是"跑不跑")
+        stopBars();
+        barsRunning = false;
       }
     },
     setLevels: function (payload) {
@@ -420,8 +572,9 @@
     resetForRecording: function () {
       // 新一轮录音:清掉上一轮的文案与配色
       writeText('', 'normal');
-      smoother.current = 0;
-      ui.level = 0;
+      // 滚动条也从头再来 —— 上一轮残留的高度不该带过来
+      resetLevelBars();
+      barsRunning = true;
       setElapsed(0);
       setPhase('recording');
     },
@@ -455,10 +608,10 @@
 
   function init() {
     bindDom();
-    buildWave();
 
     writeText('', 'normal');
     setElapsed(0);
+    // 波形条在进入录音阶段时才建(见 setPhase),这里只定阶段
     setPhase('recording');
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
 

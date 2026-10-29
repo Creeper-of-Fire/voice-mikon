@@ -712,3 +712,139 @@ def test_capsule_frontend_auto_removes_theme_attribute():
         {"op": "call", "fn": "setTheme", "args": ["auto"]}])
 
     assert "data-theme" not in data["html"]
+
+
+# ---------------- 胶囊的滚动电平条(node 跑真实 JS) ----------------
+#
+# 规格来自 MiniMax Code 的 asr-volume-bars(旧面板时代就是这么做的,
+# 见 a1a3ea2 的 panel.js):13 根定宽小条、每 80ms 推进一根、从右往左滚、
+# 三槽轮转(过渡 / 当前 / 衰减)、高度按**绝对电平**映射。
+
+BAR_COUNT = 13          # 可见条数(MCode 原版)
+BAR_POOL = BAR_COUNT + 1   # 多一根是屏外的回收位
+BAR_TICK_MS = 80        # 推进周期
+BAR_STEP_PX = 6         # 步进 = 条宽 3px + 间隙 3px
+
+
+def _bar_px(bar: dict) -> float:
+    """把 "18.80px" 变成 18.8。"""
+    return float(str(bar["height"]).replace("px", ""))
+
+
+def _capsule_wave(steps: list[dict]) -> list[dict]:
+    """跑胶囊前端,返回波形区的条(按 age 升序,age=0 是最新、最靠右)。"""
+    data = _run_js_harness("capsule_js_harness.js", steps)
+    return data["wave"]
+
+
+def test_capsule_wave_has_thirteen_bars_plus_one_recycler():
+    """可视 13 根,另加 1 根屏外的回收位(复用同一个 DOM 节点当新条)。"""
+    wave = _capsule_wave([{"op": "advance", "ms": 10}])
+
+    assert len(wave) == BAR_POOL
+    # age 从 0(最新、最右)到 13(最老、最左,已经滑出视口)
+    assert [b["age"] for b in wave] == list(range(BAR_POOL))
+
+
+def test_capsule_wave_advances_one_bar_every_80ms():
+    """每 80ms 推进一根 —— 被 tick 改写过的条数正好等于推进次数。"""
+    wave = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.8]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 3},
+    ])
+
+    touched = [b for b in wave if b["touched"]]
+    assert len(touched) == 3
+    # 改写过的正好是最新的三根
+    assert [b["age"] for b in touched] == [0, 1, 2]
+
+
+def test_capsule_wave_scrolls_from_right_to_left():
+    """滚动方向:新条从右边进,旧条往左滑(offset 越来越负)。"""
+    wave = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.8]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 4},
+    ])
+
+    # age 越大越靠左;步进 6px
+    assert [b["offset"] for b in wave] == [-i * BAR_STEP_PX for i in range(BAR_POOL)]
+    # 最新的一根贴在右边缘(胶囊里它是"刚进来的那根")
+    assert wave[0]["offset"] == 0
+
+
+def test_capsule_wave_uses_three_slot_rotation():
+    """三槽轮转:过渡 / 当前 / 衰减轮流用,相邻条天然错开。
+
+    电平恒定时,三根一组地重复:"当前"=电平对应的高度,"衰减"更低,
+    "过渡"夹在两者之间 —— 这就是"流动感"的来源。
+    """
+    wave = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.8]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 9},
+    ])
+    # 只看被 tick 改写过的条(预填的条还是 2px 的静音基线)
+    live = [b for b in wave if b["touched"]]
+
+    cur = [_bar_px(b) for b in live if b["age"] % 3 == 1]     # 当前槽
+    decay = [_bar_px(b) for b in live if b["age"] % 3 == 0]    # 衰减槽
+    trans = [_bar_px(b) for b in live if b["age"] % 3 == 2]    # 过渡槽
+
+    assert len(cur) == 3 and len(decay) == 3
+    # 同一槽的几根高度一致(电平恒定)
+    assert len(set(cur)) == 1
+    assert len(set(decay)) == 1
+    # 过渡槽:前两根已经收敛到同一个值(最老那根是第一拍,还没收敛)
+    assert len(set(trans[:2])) == 1
+    # 衰减 < 过渡 < 当前
+    assert decay[0] < trans[0] < cur[0]
+
+
+def test_capsule_wave_bar_transition_is_interpolated():
+    """过渡插值:过渡槽的高度 = 衰减 + 65% × (当前 − 衰减),不是硬跳。"""
+    wave = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.8]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 9},
+    ])
+
+    cur = _bar_px(next(b for b in wave if b["age"] == 1))
+    decay = _bar_px(next(b for b in wave if b["age"] == 0))
+    trans = _bar_px(next(b for b in wave if b["age"] == 2))
+
+    assert trans == pytest.approx(decay + 0.65 * (cur - decay), abs=0.02)
+
+
+def test_capsule_wave_uses_absolute_level_not_window_max():
+    """条高是**绝对电平** —— 前端绝不按窗口内最大值归一化。
+
+    喂一串最大值只有 0.2 的电平:按窗口内归一化的话条子会顶到 20px,
+    按绝对电平则只有十来像素。
+    """
+    quiet = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.1, 0.2]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 9},
+    ])
+    loud = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.1, 0.9]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 9},
+    ])
+
+    quiet_h = _bar_px(next(b for b in quiet if b["age"] == 1))
+    loud_h = _bar_px(next(b for b in loud if b["age"] == 1))
+
+    # 归一化的话两串都会顶到 20px(MAX_HEIGHT)
+    assert quiet_h < 14
+    assert loud_h > 15
+    assert loud_h > quiet_h
+
+
+def test_capsule_wave_stops_when_recording_ends():
+    """离开录音阶段:条子不再推进(胶囊里换状态文字)。"""
+    wave = _capsule_wave([
+        {"op": "call", "fn": "setLevels", "args": ["[0.8]"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 2},
+        {"op": "call", "fn": "setResult", "args": ["识别完了"]},
+        {"op": "advance", "ms": BAR_TICK_MS * 5},
+    ])
+
+    # 停了之后一根都没再被改写
+    assert len([b for b in wave if b["touched"]]) == 2

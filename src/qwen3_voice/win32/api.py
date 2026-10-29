@@ -23,6 +23,7 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
 WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 
@@ -181,6 +182,13 @@ user32.UnregisterHotKey.restype = wt.BOOL
 user32.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]
 user32.GetMessageW.restype = ctypes.c_int
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
+# PostThreadMessageW:往**指定线程**的消息队列投递消息。
+# ⚠ user32 里**没有**裸的 PostThreadMessage 导出(只有 A/W 两个后缀版) ——
+#   写成 PostThreadMessage 会在 import 时就 AttributeError。
+# PostQuitMessage 只会投给**调用线程自己**的队列 —— 想叫停别的线程
+# 的 GetMessage 循环,必须用它(见 hotkey.py 的 stop())。
+user32.PostThreadMessageW.argtypes = [wt.DWORD, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostThreadMessageW.restype = wt.BOOL
 
 # 键盘输入
 user32.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_ulong]

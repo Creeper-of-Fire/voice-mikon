@@ -60,12 +60,23 @@ log = get_logger("win32.inject")
 PASTE_SETTLE = 0.15
 RESTORE_SETTLE = 1.0
 
+# 注入整体重试:总尝试次数与间隔。
+# 失败大多是**临时故障** —— 修饰键还没完全松开(热键 keyup 竞态)、
+# 剪贴板被别的程序占了一下、SendInput 偶发没投出去 —— 睡一小觉
+# 再来一次就好了,立刻报失败反而把一次成功的输入变成"注入失败"。
+INJECT_ATTEMPTS = 3
+INJECT_RETRY_DELAY = 0.2
+
 
 def paste_text(text: str, hwnd: int = 0, restore: bool = True,
                trailing_space: bool = True) -> bool:
     """把 text 粘贴到 hwnd 窗口的光标处。
 
     hwnd 为 0 表示不恢复焦点(粘贴到当前前台窗口)。
+
+    临时故障(修饰键未松开/剪贴板被占/事件没投出去)会整体重试
+    ``INJECT_ATTEMPTS`` 次;**粘贴已触发就绝不重试** —— 那会造成
+    重复文本,比失败更糟。
 
     返回**是否真的送到了目标窗口**。
 
@@ -80,14 +91,9 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
     if trailing_space and not text.endswith((" ", "\n", "。", "!", "?", "，")):
         text += " "
 
-    # 用户正按着 Ctrl/Alt/Shift 的话,发出去的其实是 Ctrl+Alt+V,
-    # 目标应用收到的是别的东西,粘贴根本不会触发。
-    # 这种时候宁可什么都不做,也不要往目标窗口塞莫名其妙的东西。
-    if modifiers_held():
-        log.debug("用户正按住修饰键,放弃注入")
-        return False
-
-    # ---- 备份原剪贴板(只备份文本)----
+    # ---- 备份原剪贴板(只备份文本,**只做一次**)----
+    # 必须在重试循环外:第一次尝试写过剪贴板之后,里面已经是我们的
+    # 文本,循环里再备份会把它误当成"原内容"还回去。
     # "读失败"和"里面没有文本"必须分得清:读失败说明我们**不知道**
     # 原内容是什么,也就没法归还 —— 那就干脆不还,把识别结果留在
     # 剪贴板里(总比"清空了又不还"强)。
@@ -98,9 +104,49 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
             log.warning("读不到原剪贴板内容(可能被别的程序占着),"
                         "本次不归还,识别结果将留在剪贴板")
 
+    for attempt in range(1, INJECT_ATTEMPTS + 1):
+        delivered, published_seq = _attempt_inject(text, hwnd, attempt)
+        if delivered:
+            # 恢复原剪贴板放到后台线程:_restore 里要等 RESTORE_SETTLE
+            # (约 1 秒)才动手,同步等它的话 UI 状态会滞后 —— 用户已经
+            # 看到文字进输入框了,胶囊却还转着"识别中"(实测被吐槽过)。
+            # 归属守卫(序号比对)在后台做完全等价:比对的是**这次成功
+            # 尝试**发布时的序号,谁先检查都一样。
+            #
+            # original 为 None 有两种情况:配置关了归还,或者原剪贴板里
+            # 确实没有文本。两种都不动 —— 识别结果留在剪贴板里,用户
+            # 自己还能用。
+            if original is not None:
+                threading.Thread(
+                    target=_restore, args=(original, text, published_seq),
+                    name="clipboard-restore", daemon=True,
+                ).start()
+            return True
+        if attempt < INJECT_ATTEMPTS:
+            log.info("注入未送达(第 %d/%d 次尝试),%.0fms 后重试",
+                     attempt, INJECT_ATTEMPTS, INJECT_RETRY_DELAY * 1000)
+            time.sleep(INJECT_RETRY_DELAY)
+
+    log.warning("注入重试 %d 次仍未送达,识别结果保留在剪贴板里", INJECT_ATTEMPTS)
+    return False
+
+
+def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int]:
+    """单次注入尝试,返回 ``(是否送达, 发布时的剪贴板序号)``。
+
+    任何一步失败都返回 False —— 由上层决定是否重试。
+    粘贴已触发(见下方 sent 判定)必须返回 True:重试会造成重复文本。
+    """
+    # 用户正按着 Ctrl/Alt/Shift 的话,发出去的其实是 Ctrl+Alt+V,
+    # 目标应用收到的是别的东西,粘贴根本不会触发。
+    # 多数是松热键的 keyup 竞态 —— 上层睡一下再试通常就过了。
+    if modifiers_held():
+        log.debug("用户正按住修饰键(第 %d 次尝试),放弃本次", attempt)
+        return False, 0
+
     if not clipboard.set_text(text):
-        log.debug("写入剪贴板失败")
-        return False
+        log.debug("写入剪贴板失败(第 %d 次尝试)", attempt)
+        return False, 0
     published_seq = clipboard.get_sequence_number()
 
     # 转写这 1 秒里用户可能切了窗口,把焦点还回去再贴
@@ -113,38 +159,18 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
     # **V↓ 送出去 = 目标应用已经收到"粘贴"这个动作了**:
     #   sent >= 2  粘贴已经触发(Ctrl↑ 没送出去只是键没抬起,
     #               api.send_ctrl_v 会补抬,不影响已经发生的粘贴)
-    #   sent <= 1  V 根本没送出去,**什么都没发生**
-    delivered = sent >= 2
-    if not delivered:
-        log.warning("Ctrl+V 一个事件都没送出去(sent=%d),目标没收到粘贴", sent)
-        # 没送出去:**不恢复剪贴板**,把识别结果留在里面。
-        # 恢复了就等于把这段话彻底弄丢(目标窗口没收到,剪贴板也没了),
-        # 那才是真的"刚说出口的话消失了"。
-        # 代价是用户原来的剪贴板内容被顶掉了 —— 这是"借用剪贴板"的
-        # 固有代价:宁可丢一份旧的,也不能丢刚说出口的。
-        log.info("注入未送达,识别结果保留在剪贴板里")
-        return False
+    #   sent <= 1  V 根本没送出去,**什么都没发生**(重试安全)
+    if sent < 2:
+        log.warning("Ctrl+V 一个事件都没送出去(sent=%d,第 %d 次尝试)",
+                    sent, attempt)
+        return False, published_seq
     if sent < 4:
         # 抬起事件没全部送达,但 V↓ 已经送出去 = 粘贴**已经触发**了。
         # api.send_ctrl_v 会把抬起事件补发掉(补发在微秒级,远快过
-        # 按键重复的最小间隔),所以这里绝不能重贴 —— 那会造成重复文本。
+        # 按键重复的最小间隔),所以绝不能重贴 —— 那会造成重复文本。
         log.info("Ctrl+V 只投递了 %d/4 个事件,粘贴已触发", sent)
     time.sleep(PASTE_SETTLE)
-
-    # 恢复原剪贴板放到后台线程:_restore 里要等 RESTORE_SETTLE(约 1 秒)
-    # 才动手,同步等它的话 UI 状态会滞后 —— 用户已经看到文字进输入框
-    # 了,胶囊却还转着"识别中"(实测被吐槽过)。归属守卫(序号比对)
-    # 在后台做完全等价:比对的是我们发布时的序号,谁先检查都一样。
-    #
-    # original 为 None 有两种情况:配置关了归还,或者原剪贴板里确实
-    # 没有文本(读到了但里面是空的/只有图片)。两种都不动 ——
-    # 识别结果留在剪贴板里,用户自己还能用。
-    if original is not None:
-        threading.Thread(
-            target=_restore, args=(original, text, published_seq),
-            name="clipboard-restore", daemon=True,
-        ).start()
-    return True
+    return True, published_seq
 
 
 def _restore(original: str | None, written: str,

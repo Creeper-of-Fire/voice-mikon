@@ -26,7 +26,7 @@ def test_validate_catches_bad_model():
 
 
 def test_validate_catches_bad_duration():
-    cfg = Config(min_duration=10, max_duration=5)
+    cfg = Config(max_duration=0)
     assert any("max_duration" in issue for issue in cfg.validate())
 
 

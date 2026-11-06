@@ -84,9 +84,10 @@ class Config:
         "USB PnP Audio", "USB Audio", "Realtek HD Audio Mic",
     ])
     sample_rate: int = 16000                  # ASR 模型要求的采样率;重采样由 qwen_asr 内部完成
-    min_duration: float = 0.3
     max_duration: float = 120.0
-    silence_rms: float = 0.002                # 低于此电平视为静音
+    # **只用于界面电平条的噪声门**(底噪以下的电平显示成 0),
+    # **不参与识别判定** —— 录到的音频一律整段丢给模型。
+    silence_rms: float = 0.002
     # 每轮录音结束后把原始音频存成 WAV(调试用)。
     # 默认开:出问题时需要**同一段真实录音**反复回放定位,
     # 光看日志不够。不想留就把这个开关关掉。
@@ -153,10 +154,8 @@ class Config:
                 f"当前 {self.asr_backend!r}")
         if self.sample_rate <= 0:
             issues.append("sample_rate 必须为正数")
-        if self.min_duration < 0:
-            issues.append("min_duration 不能为负")
-        if self.max_duration <= self.min_duration:
-            issues.append("max_duration 必须大于 min_duration")
+        if self.max_duration <= 0:
+            issues.append("max_duration 必须为正数")
         if self.silence_rms < 0:
             issues.append("silence_rms 不能为负")
         if self.theme not in THEME_MODES:

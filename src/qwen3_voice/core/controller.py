@@ -48,7 +48,7 @@ from ..asr.streaming import (
     make_preview_engine,
 )
 from ..audio.devices import choose_device
-from ..audio.recorder import Recorder, rms_of
+from ..audio.recorder import Recorder
 from ..audio.recording_store import save_recording
 from ..config import Config
 from ..logging_setup import get_logger
@@ -381,19 +381,15 @@ class VoiceController:
             except Exception as e:
                 log.debug("录音留存失败: %s", e)
 
-        if dur < self.config.min_duration:
-            self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="error", text="录音太短"))
-            self._emit(UIEvent(kind="preview", text=""))
-            return
-
-        rms = rms_of(audio)
-        if rms < self.config.silence_rms:
-            self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="error", text="没有检测到声音"))
-            self._emit(UIEvent(kind="preview", text=""))
-            return
-
+        # **不做任何前置判定**(时长 / 音量):录到多少就送多少,整段交给模型。
+        # 识别得到就是结果,识别不到就空 —— 该不该听,由模型说,不由本地阈值说。
+        #
+        # 以前这里有两道门("录音太短"、"没有检测到声音"),初衷是防呆:
+        # 怕用户误按热键白跑一次 GPU 推理。实际代价远大于收益:
+        #   - 静音门用的是**整段平均 RMS**,静音占比越高越容易被误杀 ——
+        #     说得越久、停顿越多,反而越容易被判成"没说话";
+        #   - 阈值卡在麦克风增益偏低时的语音主体电平附近,说话轻一点就整段丢。
+        # 用户宁可自己删掉一句识别错的,也不要自己的话被本地阈值替它拦下。
         self._set_state(State.PROCESSING)
         threading.Thread(target=self._process, args=(audio, native_rate, self._session),
                          name="asr-run", daemon=True).start()

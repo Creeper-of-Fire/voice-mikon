@@ -161,6 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     # 必须在创建任何窗口之前声明 DPI 感知,否则高分屏下布局全乱
     dpi_mode = set_dpi_awareness()
 
+    # 剪贴板 owner 窗口:**必须在主线程创建**(owner 窗口归创建它的
+    # 线程,线程退出窗口就没了,而 Windows 在 owner 窗口销毁时会
+    # 连带清空剪贴板 —— 写在录音线程上会把"识别结果留在剪贴板"
+    # 这个兜底直接废掉)。这里趁主线程还空闲时建好,活到进程结束。
+    from .win32 import clipboard
+
+    clipboard.ensure_owner_window()
+
     config = load_config()
     log = setup(config.log_file, config.log_level)
     logger = get_logger("main")
@@ -202,6 +210,12 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.tray import TrayIcon
 
     tray = TrayIcon(controller, panel=panel, config_path=config_path())
+
+    # 悬浮球右键菜单的两个出口(通用功能入口,用户拍板的第一批):
+    #   「设置」直接显示面板;「退出」复用托盘同一条清理路径
+    #   (热键注销 → 窗口销毁 → 主循环返回),不是简单 kill。
+    capsule.set_panel_opener(panel.show)
+    capsule.set_quit_handler(tray.quit)
 
     def run_tray():
         try:
@@ -249,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
         # 只关一个的话进程会变成"托盘没了但还活着"的僵尸
         panel.destroy()
         capsule.destroy()
+        # 剪贴板 owner 窗口随进程退出被销毁时,Windows 会连带清空
+        # 剪贴板 —— 注入失败时留在剪贴板里的识别结果就没了。
+        # 退出前先把所有权交还系统(owner 置 NULL),内容留住。
+        clipboard.release_ownership()
         logger.info("退出")
 
     # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、

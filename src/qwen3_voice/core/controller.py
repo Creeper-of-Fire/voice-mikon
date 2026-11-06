@@ -336,6 +336,13 @@ class VoiceController:
         if self.state == State.PROCESSING:
             log.debug("识别中,暂不开始新的录音")
             return False
+        if self.state == State.STARTING:
+            # 模型还在加载。这一挡是功能级的:放行的话录音能开,
+            # 停止时整段识别会直接抛"模型尚未加载"(日志里真实发生过)。
+            # 热键路径 toggle_recording 的 else 分支本来就不放行,
+            # 这里挡的是**点悬浮球**那条直通路径。
+            log.debug("模型还在加载,暂不能开始录音")
+            return False
 
         recorder = self._recorder_factory(self.config, self.input_device)
         if not recorder.start():
@@ -633,7 +640,11 @@ class VoiceController:
             # 失败也要把原文带出去:只报一句"文本注入失败",用户既看不到
             # 自己说了什么,也没法把它捞回来 —— 那段话就等于不存在了。
             # 胶囊会把它显示出来,并给一个「复制」按钮。
-            self._emit(UIEvent(kind="error", text="文本注入失败",
+            # 文案要点破**兜底出口**:识别结果此刻就留在剪贴板里(没送达
+            # 就不还,是注入层的规矩),用户按 Ctrl+V 立刻能贴出来 ——
+            # 不说清楚的话,报错的同时文字明明一按就出来,用户却不知道
+            # (实测:三连败后手动 Ctrl+V 贴出去了,看着错误提示一头雾水)。
+            self._emit(UIEvent(kind="error", text="注入失败，文字已留在剪贴板",
                                payload=text))
         # 最终结果到了,预览文字就没用了(最终结果始终来自整段识别,不是预览)
         self._emit(UIEvent(kind="preview", text=""))

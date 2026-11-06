@@ -137,6 +137,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `__capsule.setOrbMode(enabled)` | `enabled` boolean | **常驻悬浮球模式**开关;面板改开关时推,胶囊前端就绪时也补推一次 |
 | `__capsule.setOrbPosition(mode)` | `mode` ∈ `"follow"` \| `"pinned"` \| `"custom"` | 悬浮球的位置档位。pinned/custom **可拖**(位置归用户管,共用一份持久化位置);follow 不可拖(位置由光标决定),前端据此不响应拖动、也不给 `grab` 光标 |
 | `__capsule.setHideDelay(ms)` | `ms` number | 本轮结束后停多久再收起(毫秒)。常驻球模式下**前端自己**收回胶囊,所以 Python 把时长推给它,而不是等隐藏定时器响了再回头调一次前端(那是定时器线程去 evaluate_js,会破坏推送线程的串行顺序) |
+| `__capsule.setOrbHint(text)` | `text` string | 球的一句话操作反馈(比如点球时模型还在加载,推"模型加载中…"):球上方冒出、约 2 秒后自己淡掉。空串表示立即收掉。`starting` 状态下球会转圈(`body.orb-loading`),提示气泡是它的文字补充 |
 
 ### `setLevels` 的语义(重要)
 
@@ -309,6 +310,9 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | `begin_drag()` | None | 用户开始拖胶囊/悬浮球(Python 侧拖动期间不抢回焦点) |
 | `end_drag()` | None | 用户松手(Python 侧归还焦点 + 记住位置) |
 | `copy_result(text)` | bool | 把识别结果**手动**写进剪贴板(注入失败时的兜底出口)。写完要**读回校验**:读回来不是同一份就算失败。成功就把胶囊收掉 —— 用户拿到东西了,胶囊继续杵着就是干扰 |
+| `open_panel()` | None | 球菜单里的「设置」:打开设置面板。面板引用由入口注入(`set_panel_opener`),胶囊只认回调;没注入就忽略 |
+| `quit_app()` | None | 球菜单里的「退出」:退出整个程序。走入口注入的回调(`set_quit_handler`),和托盘「退出」同一条清理路径(热键注销 → 窗口销毁 → 主循环返回),不是简单 kill |
+| `selecting_text(selecting)` | None | 前端上报"用户正在/结束选文本"。选区非空期间守卫**不抢前台** —— 抢了 WebView2 就失去键盘焦点,用户按 Ctrl+C 复制不了(框选了却复制不了,实测踩过) |
 
 ---
 
@@ -335,9 +339,11 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | 环节 | 谁做 | 说明 |
 |---|---|---|
 | 显示球 | Python `capsule.py` | 前端就绪后**等 0.3s** 再露脸:窗口是固定尺寸的透明窗,必须等前端把"球"那一小块报上来、Python 裁好命中区之后才能露脸 |
-| 命中区 | 前端 → Python | 待机时只上报 `pill` 一块(球就是收窄的胶囊);展开后上报 `textbar` + `pill` 两块(和原来一样) |
+| 命中区 | 前端 → Python | 待机时只上报 `pill` 一块(球就是收窄的胶囊,Python 侧按**椭圆**裁);展开后上报 `textbar` + `pill` 两块(和原来一样) |
 | 点击/拖动 | 前端 | pinned/custom 档:按下后位移超过 **5 个逻辑像素**才算拖动,否则算点击。跟随档**没有拖动**(球拖不动),但仍要分清"点了一下"和"按着划走" —— 后者不该触发录音 |
-| 点球开始录音 | 前端 → Python → 控制器 | **先把前台还给用户**,再 `controller.start_recording()` |
+| 点球开始录音 | 前端 → Python → 控制器 | **先把前台还给用户**,再 `controller.start_recording()`;模型还在加载(`STARTING`)时控制器会拒绝,Python 侧随即推 `setOrbHint("模型加载中…")` —— "点了没反应"在用户眼里就是"球坏了",必须给一句提示 |
+| 右键菜单 | 前端 → Python | 球形态下右键弹通用功能菜单(展示框 + 一排小圆圈,以后加新功能都往这里放)。现有两项:「设置」→ `open_panel()`、「退出」→ `quit_app()`。菜单显示时命中区要把菜单**单独报一块**(`overlay`),不能并进球的包围盒(并进去就是一大片灰底,菜单还会被裁断) |
+| 模型加载态 | Python → 前端 | `setState('starting')` 时球上显示转圈(麦克风让位给 loader),就绪后回 `setState('idle')` 自动恢复麦克风 |
 | 拖球挪位置 | 前端 → Python | 发**绝对目标位置**(和面板/胶囊同一套机制),球的位置被夹回允许的范围 |
 | 记住位置 | Python | 存**球**的偏移(相对所在工作区的逻辑像素)+ 显示器设备名 |
 | 收回成球 | 前端 | 终态(`result`/`error`/`cancelled`)后停 `setHideDelay` 推来的时长,再收回球 |
@@ -617,26 +623,39 @@ pywebview 的透明窗口一旦被 `SetWindowPos` 改过尺寸,WebView2 就会
 |---|---|---|
 | 量矩形 | 前端 `capsule.js` | `offsetLeft/Top/Width/Height`(布局尺寸,**不受 transform 影响**),**CSS 逻辑像素**、相对视口 |
 | 上报 | 前端 → Python | `window.pywebview.api.update_regions(payload)`,60ms 合并一次;球↔胶囊形变期间**每 50ms 报一次**(宽度一直在变) |
-| 换算 | Python `capsule.py` | 逻辑 × DPI 缩放 = 物理像素,每边再外扩 8 物理像素 |
-| 裁窗口 | `win32/api.py` | `CreateRectRgn` ×N → `CombineRgn(RGN_OR)` → `SetWindowRgn` |
+| 换算 | Python `capsule.py` | 逻辑 × DPI 缩放 = 物理像素,每边再外扩 8 物理像素(椭圆/浮层用 2) |
+| 裁窗口 | `win32/api.py` | `CreateRectRgn` / `CreateEllipticRgn` ×N → `CombineRgn(RGN_OR)` → `SetWindowRgn` |
 
 payload 格式:
 
 ```json
-{"textbar": [x, y, w, h], "pill": [x, y, w, h]}
+{"textbar": [x, y, w, h], "pill": [x, y, w, h], "overlay": [x, y, w, h]}
 ```
 
-全 0 表示那块隐藏(不参与并集);两块都隐藏时裁成 1×1 的最小区域。
+全 0 表示那块隐藏(不参与并集);全隐藏时裁成 1×1 的最小区域。
 
 常驻悬浮球模式下,待机时只有 `pill` 那一块非零 —— 那颗球**就是**收窄到
 40×40 的胶囊;展开成胶囊后回到 `textbar` + `pill` 两块。
+`overlay` 是球的浮层(右键菜单 / 操作提示),**只在它可见时非零**。
 
 几个坑:
 
+- **裁形必须贴合可见内容,否则会露出 Form 灰底**:pywebview 的
+  transparent 分支**不设 `Form.BackColor`**,默认就是 WinForms 灰
+  `#F0F0F0` —— WebView2 透明的地方透出的是这块灰,不是桌面。裁出来的
+  形状比不透明内容大一点,就露一圈灰(用户看到的"球外面包着一块灰色
+  矩形")。所以:
+  - 球是**圆形** → 用**椭圆**裁(`CreateEllipticRgn`),矩形裁必然露四个角;
+  - 浮层**单独一块**上报,**不能并进 `pill` 的包围盒** —— 并进去就是
+    "球到菜单"的大矩形,中间全空白,整块都是灰(实测:球上方罩着一大片
+    灰色,菜单还被裁断)。
 - **量矩形要用 `offset*`,不能用 `getBoundingClientRect()`**:后者会把
   CSS `transform` 一起算进去,量到的是"动画中"的矩形。按它裁窗口,
   描边两端就被切掉(实测:上下边线在两端断开)。现在球↔胶囊的形变
   不用 transform(宽度靠 `max-width` 过渡),但这条规矩留着当保险。
+  → 推论:**定位也别用 `transform: translateX(-50%)`** —— 那样
+  `offset*` 量到的位置会偏半个身位,裁出来就把东西切掉(菜单被截断
+  就是这么来的)。用 `left/right + margin:auto` 居中。
 - **形变期间要持续上报**:球↔胶囊是 0.3s 的宽度过渡,布局宽度每帧
   都在变。只在头尾各报一次的话,中间那 0.3s 里窗口形状停在"球"那一
   小块,胶囊多出来的那部分点不到(会穿透到底下的应用)。

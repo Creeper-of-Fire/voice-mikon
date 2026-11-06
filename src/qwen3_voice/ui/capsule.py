@@ -99,7 +99,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import CAPSULE_POSITION_MODES, ORB_POSITION_MODES, THEME_MODES
 from ..core.controller import State, UIEvent, VoiceController
@@ -219,15 +219,28 @@ _STATE_NAMES = {
 # 会被切掉一圈,按钮可能点不中。
 REGION_MARGIN = 8
 
+# 椭圆裁形(球形态)用的余量(**物理**像素)。
+#
+# 矩形裁形比圆形球大,四角会露出 WebView2 客户区的灰底 —— 用椭圆
+# 裁才贴合。但矩形那 8 像素的余量是为抗锯齿边缘留的点击容错,放到
+# 椭圆上会露出一圈明显的灰环,所以椭圆用小得多的余量。
+ELLIPSE_MARGIN = 2
+
 # 前端上报的几块内容(顺序固定,并集的结果与顺序无关,但好读)
 #
-# textbar / pill  : "文字条 + 胶囊"。常驻悬浮球模式下,待机时那颗球
-#                    **就是**收窄的胶囊 —— 所以还是报 pill,没有第三块。
-_REGION_KEYS = ("textbar", "pill")
+# textbar / pill / overlay:
+#   textbar  上方的文字条
+#   pill     胶囊(常驻悬浮球模式下,待机时它**就是**那颗球)
+#   overlay  球的浮层(右键菜单 / 操作提示)—— 单独一块,不能并进 pill
+#
+# overlay 必须单独一块:并进 pill 就成了"球到菜单"的大包围盒,那块
+# 中间全是空白,空白落在窗口裁形里就会露出 WebView2 客户区的灰底
+# (实测:球上方罩着一大片灰)。分开报,裁形才能一块圆一块方。
+_REGION_KEYS = ("textbar", "pill", "overlay")
 
 
-def _parse_regions(payload: Any) -> list[tuple[float, float, float, float]] | None:
-    """把前端上报的矩形解析成 [(x, y, w, h), ...](**逻辑**像素)。
+def _parse_regions(payload: Any) -> dict[str, tuple[float, float, float, float]] | None:
+    """把前端上报的矩形解析成 ``{块名: (x, y, w, h)}``(**逻辑**像素)。
 
     payload 形如 ``{"textbar": [x, y, w, h], "pill": [x, y, w, h]}``;
     一块全 0 表示**那块隐藏**(不参与并集)。
@@ -244,7 +257,7 @@ def _parse_regions(payload: Any) -> list[tuple[float, float, float, float]] | No
     if not isinstance(payload, dict):
         return None
 
-    rects: list[tuple[float, float, float, float]] = []
+    out: dict[str, tuple[float, float, float, float]] = {}
     for key in _REGION_KEYS:
         raw = payload.get(key)
         if raw is None:
@@ -257,10 +270,10 @@ def _parse_regions(payload: Any) -> list[tuple[float, float, float, float]] | No
             x, y, w, h = (float(v) for v in raw)
         except (TypeError, ValueError):
             return None
-        rects.append((x, y, w, h))
-    if not rects:
+        out[key] = (x, y, w, h)
+    if not out:
         return None
-    return rects
+    return out
 
 
 class _CapsuleApi:
@@ -343,6 +356,30 @@ class _CapsuleApi:
         """
         self._capsule._move_orb_abs(x, y)
 
+    def open_panel(self) -> None:
+        """球菜单里的「设置」:打开面板。
+
+        面板的引用由入口在组装时注入(set_panel_opener)—— 胶囊自己
+        不知道面板存在,只认回调。没注入(比如面板建不起来)就忽略。
+        """
+        self._capsule._open_panel()
+
+    def quit_app(self) -> None:
+        """球菜单里的「退出」:退出整个程序。
+
+        走的回调由入口注入(set_quit_handler),和托盘的「退出」是
+        **同一条清理路径**(热键注销 → 窗口销毁 → 主循环返回)。
+        """
+        self._capsule._quit_from_menu()
+
+    def selecting_text(self, selecting: bool) -> None:
+        """前端上报"用户正在/结束选文本"。
+
+        选文本期间守卫**不抢前台** —— 抢了 WebView2 就失去键盘焦点,
+        用户按 Ctrl+C 复制不了(框选了却复制不了,实测踩过)。
+        """
+        self._capsule._on_selecting_text(selecting)
+
 
 class VoiceCapsule:
     """录音胶囊悬浮窗。"""
@@ -381,6 +418,11 @@ class VoiceCapsule:
         self._last_foreground = 0
         # 启动守卫只起一次
         self._guard_started = False
+        # 球菜单的两个出口(打开面板 / 退出程序):回调由入口在组装时
+        # 注入(set_panel_opener / set_quit_handler)—— 胶囊不引用面板
+        # 和托盘,只认回调。没注入就当没有这个功能。
+        self._panel_opener: Callable[[], None] | None = None
+        self._quit_handler: Callable[[], None] | None = None
 
         # 隐藏定时器:新一轮录音开始时要作废旧的,否则上一轮的
         # 定时器会把刚开始的胶囊又藏掉
@@ -409,6 +451,9 @@ class VoiceCapsule:
         # 松手时统一还一次(抢来抢去会让 WebView2 的鼠标捕获不稳)
         self._dragging = False
         self._drag_lock = threading.Lock()
+        # 用户正在文字条里选文本:这段时间守卫不抢前台(抢了 WebView2
+        # 就失去键盘焦点,Ctrl+C 复制不了)。前端上报,见 _on_selecting_text
+        self._selecting_text = False
         # 按下时的窗口位置:松手时对比一下,没动过就别去写配置
         self._drag_start_rect: tuple[int, int, int, int] | None = None
 
@@ -814,7 +859,8 @@ class VoiceCapsule:
                         and is_window_visible(hwnd)):
                     hide_window(hwnd)
                 elif (fg == hwnd and last_fg and last_fg != hwnd
-                      and not self._is_dragging()):
+                      and not self._is_dragging()
+                      and not self._is_selecting_text()):
                     # 前台被胶囊占了 → 还回去。
                     #
                     # 胶囊是"显示器"不是输入目标:WebView2 的内容窗口
@@ -826,6 +872,12 @@ class VoiceCapsule:
                     #
                     # 拖动期间除外:焦点来回跳会拖垮 WebView2 的
                     # 鼠标捕获(拖到一半就断了),松手时统一还一次。
+                    #
+                    # **用户正在文字条里选文本**时也除外:选文本靠鼠标
+                    # 拖,那一下会把 WebView2 激活成前台;守卫要是照抢,
+                    # WebView2 立刻失去**键盘焦点** —— 用户再按 Ctrl+C
+                    # 就复制不了(按键送给了别的窗口)。用户手动兜底
+                    # 拿回识别结果这条路必须通(实测踩到过)。
                     restore_foreground(last_fg)
             interval = (GUARD_INTERVAL if time.monotonic() < dense_until
                         else GUARD_SPARSE)
@@ -835,6 +887,19 @@ class VoiceCapsule:
         """用户此刻是不是正拖着胶囊。"""
         with self._drag_lock:
             return self._dragging
+
+    def _is_selecting_text(self) -> bool:
+        """用户此刻是不是正在文字条里选文本。
+
+        前端在选区非空时置位(见 capsule.js 的 selectionchange 监听)。
+        这段时间里守卫**不抢前台** —— 抢了 WebView2 就失去键盘焦点,
+        用户再按 Ctrl+C 复制不了(实测:框选了却复制不了)。
+        """
+        return self._selecting_text
+
+    def _on_selecting_text(self, selecting: bool) -> None:
+        """前端上报"用户开始/结束选文本"。"""
+        self._selecting_text = bool(selecting)
 
     def _restore_focus(self) -> None:
         """把前台窗口还给用户原来那个。
@@ -1045,26 +1110,66 @@ class VoiceCapsule:
         self._orb_regions_ready = True
 
         scale = self._scale()
+        # 球形态下"球"是圆的,用**椭圆**裁才贴合;胶囊形态用矩形。
+        # 形状不对的代价很直接:矩形比圆形球大,多出来的部分在窗口
+        # 裁形里却没有任何不透明内容 —— 露出的是 WebView2 客户区的
+        # Form 灰底(浅色主题下就是一块刺眼的浅灰方块)。
+        ball = self._orb_is_ball()
+        # 椭圆那一块**必须就是**列表里的那项(set_window_regions 按
+        # 坐标相等来认),不能另算一份 —— 两份坐标对不上就静默回落成
+        # 矩形,灰底照旧(实测踩过)。
+        ellipses: set[tuple[int, int, int, int]] = set()
+
+        def expand(rect, margin):
+            x, y, w, h = rect
+            return (
+                int(round(x * scale)) - margin,
+                int(round(y * scale)) - margin,
+                int(round((x + w) * scale)) + margin,
+                int(round((y + h) * scale)) + margin,
+            )
+
         physical: list[tuple[int, int, int, int]] = []
-        for (x, y, w, h) in rects:
+        for key in _REGION_KEYS:
+            rect = rects.get(key)
+            if rect is None:
+                continue
+            x, y, w, h = rect
             if w <= 0 or h <= 0:
                 continue        # 隐藏的块不参与并集
-            physical.append((
-                int(round(x * scale)) - REGION_MARGIN,
-                int(round(y * scale)) - REGION_MARGIN,
-                int(round((x + w) * scale)) + REGION_MARGIN,
-                int(round((y + h) * scale)) + REGION_MARGIN,
-            ))
+            if key == "pill" and ball:
+                # 球:椭圆裁,余量给小(大余量会露出一圈灰环)
+                piece = expand(rect, ELLIPSE_MARGIN)
+                ellipses.add(piece)
+            elif key == "overlay":
+                # 浮层(菜单/提示):矩形裁,余量给小(菜单是圆角矩形,
+                # 矩形比它大,四角会露一点灰 —— 但只是一圈窄边)
+                piece = expand(rect, ELLIPSE_MARGIN)
+            else:
+                piece = expand(rect, REGION_MARGIN)
+            physical.append(piece)
+
         if not physical:
-            # 两块都隐藏(正常不会发生):裁成 1×1 的最小区域 ——
+            # 都隐藏(正常不会发生):裁成 1×1 的最小区域 ——
             # 宁可"窗口点不到",也不要"整片空白继续挡着底下的应用"
             physical = [(0, 0, 1, 1)]
 
-        log.debug("裁窗口区域: %s", physical)
+        log.debug("裁窗口区域: %s (椭圆=%s)", physical, ellipses)
         try:
-            set_window_regions(hwnd, physical)
+            set_window_regions(hwnd, physical, ellipses=ellipses)
         except Exception as e:
             log.debug("裁窗口区域失败: %s", e)
+
+    def _orb_is_ball(self) -> bool:
+        """当前是不是"球形态"(常驻球待机、没展开成胶囊)。
+
+        判断依据用控制器状态:录音中 = 胶囊形态,其余 = 球形态。
+        """
+        try:
+            return (self._orb_enabled()
+                    and self.controller.state != State.RECORDING)
+        except Exception:
+            return False
 
     # ---------- 尺寸与位置 ----------
 
@@ -1588,9 +1693,40 @@ class VoiceCapsule:
             # 这一轮的注入落点:先记下来,别等开始录音时再猜
             self._target_hwnd = target
         try:
-            self.controller.start_recording()
+            ok = self.controller.start_recording()
         except Exception as e:
             log.debug("点悬浮球开始录音失败: %s", e)
+            return
+        if not ok and self.controller.state == State.STARTING:
+            # 模型还在加载:controller 拒绝了,但"点了没反应"在用户眼里
+            # 就是"球坏了"。给一句提示,别让人对着沉默发懵。
+            self._call_js("setOrbHint", "模型加载中…")
+
+    # ---------- 球菜单(右键通用功能入口) ----------
+
+    def set_panel_opener(self, fn: Callable[[], None] | None) -> None:
+        """注入「打开面板」的回调(入口组装时调)。"""
+        self._panel_opener = fn
+
+    def set_quit_handler(self, fn: Callable[[], None] | None) -> None:
+        """注入「退出程序」的回调(入口组装时调)。"""
+        self._quit_handler = fn
+
+    def _open_panel(self) -> None:
+        if self._panel_opener is None:
+            return
+        try:
+            self._panel_opener()
+        except Exception as e:
+            log.debug("球菜单打开面板失败: %s", e)
+
+    def _quit_from_menu(self) -> None:
+        if self._quit_handler is None:
+            return
+        try:
+            self._quit_handler()
+        except Exception as e:
+            log.debug("球菜单退出失败: %s", e)
 
     def _window_size(self) -> tuple[int, int] | None:
         """窗口当前的**物理**像素尺寸。

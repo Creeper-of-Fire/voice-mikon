@@ -242,15 +242,32 @@
     //
     // 文字条报全 0:待机时它虽然还占着布局(opacity:0),但那一块
     // 是透明的,不能吃底下应用的点击。
+    //
+    // 浮层(右键菜单 / 操作提示)单独报一块 **overlay**,**不能**并进
+    // 球的矩形:并进去就成了"球到菜单"的大包围盒,那块中间全是空白,
+    // 空白在窗口裁形里会露出 WebView2 客户区的灰底(实测:球上方罩着
+    // 一大片灰色)。分开报,Python 才能一块裁成圆、一块裁成方。
     if (ui.orbMode && !ui.expanded) {
+      var overlay = [0, 0, 0, 0];
+      var menuRect = rectOf(el.orbMenu);
+      if (menuRect[2] > 0 && menuRect[3] > 0) {
+        overlay = menuRect;
+      } else {
+        var hintRect = rectOf(el.orbHint);
+        if (hintRect[2] > 0 && hintRect[3] > 0) {
+          overlay = hintRect;
+        }
+      }
       return {
         textbar: [0, 0, 0, 0],
-        pill: rectOf(el.pill)
+        pill: rectOf(el.pill),
+        overlay: overlay
       };
     }
     return {
       textbar: rectOf(el.textbar),
-      pill: rectOf(el.pill)
+      pill: rectOf(el.pill),
+      overlay: [0, 0, 0, 0]
     };
   }
 
@@ -630,6 +647,142 @@
       // 展开态下不触发:那时松手只是"点了一下胶囊",不能再开一轮录音。
       callApi('start_recording');
     }
+  }
+
+  /* ==================== 球的右键菜单与操作提示 ==================== */
+
+  /* 右键菜单是球的**通用功能入口**(用户定的形态:展示框 + 一排小
+   * 圆圈,以后加新功能都往这里放)。现在两项:打开设置面板 / 退出。
+   * 退出走 Python 侧注入的回调,和托盘「退出」同一条清理路径。 */
+
+  var hintTimer = 0;
+  var menuFadeTimer = 0;
+
+  function closeOrbMenu(immediate) {
+    if (!el.orbMenu || el.orbMenu.hidden) {
+      return;
+    }
+    el.orbMenu.classList.remove('is-open');
+    var finish = function () {
+      if (el.orbMenu && !el.orbMenu.classList.contains('is-open')) {
+        el.orbMenu.hidden = true;
+        // 布局变了 → 命中区跟着收(菜单那块要还给底下的应用)
+        scheduleRegionReport();
+      }
+    };
+    if (menuFadeTimer) {
+      window.clearTimeout(menuFadeTimer);
+      menuFadeTimer = 0;
+    }
+    if (immediate) {
+      finish();
+    } else {
+      // 等淡出过渡(.12s)走完再彻底隐藏
+      menuFadeTimer = window.setTimeout(finish, 140);
+    }
+  }
+
+  function openOrbMenu() {
+    if (!el.orbMenu || !el.orbMenu.hidden) {
+      return;
+    }
+    // 提示气泡和菜单不同时出现
+    hideOrbHint();
+    if (menuFadeTimer) {
+      window.clearTimeout(menuFadeTimer);
+      menuFadeTimer = 0;
+    }
+    el.orbMenu.hidden = false;
+    window.requestAnimationFrame(function () {
+      el.orbMenu.classList.add('is-open');
+    });
+    // 命中区要把菜单框进来,不然看得见点不到(见 measureRegions)
+    scheduleRegionReport();
+  }
+
+  function onOrbContextMenu(e) {
+    // 只在**球形态**响应:展开成胶囊后右键没有菜单(那是录音操作区)
+    if (!ui.orbMode || ui.expanded) {
+      return;
+    }
+    e.preventDefault();
+    openOrbMenu();
+  }
+
+  // 点菜单以外的地方(含左键点球)收菜单;点菜单内部不算
+  function onDocMouseDownForMenu(e) {
+    if (!el.orbMenu || el.orbMenu.hidden) {
+      return;
+    }
+    if (e.target && e.target.closest && e.target.closest('.orb-menu')) {
+      return;
+    }
+    closeOrbMenu();
+  }
+
+  function showOrbHint(text) {
+    if (!el.orbHint) {
+      return;
+    }
+    var value = text == null ? '' : String(text);
+    if (!value.trim()) {
+      hideOrbHint();
+      return;
+    }
+    el.orbHint.textContent = value;
+    if (hintTimer) {
+      window.clearTimeout(hintTimer);
+      hintTimer = 0;
+    }
+    el.orbHint.hidden = false;
+    window.requestAnimationFrame(function () {
+      el.orbHint.classList.add('is-open');
+    });
+    scheduleRegionReport();
+    hintTimer = window.setTimeout(hideOrbHint, 2200);
+  }
+
+  function hideOrbHint() {
+    if (hintTimer) {
+      window.clearTimeout(hintTimer);
+      hintTimer = 0;
+    }
+    if (!el.orbHint || el.orbHint.hidden) {
+      return;
+    }
+    el.orbHint.classList.remove('is-open');
+    window.setTimeout(function () {
+      if (el.orbHint && !el.orbHint.classList.contains('is-open')) {
+        el.orbHint.hidden = true;
+        scheduleRegionReport();
+      }
+    }, 240);
+  }
+
+  /* 用户在文字条里选文本时,通知 Python 别抢前台。
+   *
+   * 为什么:选文本是鼠标拖,那一下会把 WebView2 激活成前台窗口;
+   * Python 侧的守卫线程发现"前台是胶囊"就立刻抢回去(正常情况这是
+   * 好事 —— 防止用户的键盘输入跑进胶囊)。但抢回去 WebView2 就失去
+   * 了**键盘焦点**,用户再按 Ctrl+C 就复制不了 —— 用户手动框选
+   * 兜底拿回识别结果这条路直接断掉(实测踩过)。
+   *
+   * 所以选区非空期间,守卫让焦点留在 WebView2 上。 */
+  var selectingText = false;
+
+  function reportSelectingText(on) {
+    if (selectingText === on) {
+      return;
+    }
+    selectingText = on;
+    callApi('selecting_text', on);
+  }
+
+  function onSelectionChange() {
+    var sel = window.getSelection();
+    var text = sel ? String(sel.toString()) : '';
+    // 选区非空 = 用户正在选;空 = 选完了(或者没选)
+    reportSelectingText(!!text.trim());
   }
 
   /* ==================== 胶囊阶段 ==================== */
@@ -1068,7 +1221,28 @@
     // 胶囊本体当拖拽把手(只有「自定义」位置模式才真的拖得动)
     if (el.pill) {
       el.pill.addEventListener('mousedown', onDragStart, false);
+      // 球形态右键 → 通用功能菜单(展开成胶囊后右键无效)
+      el.pill.addEventListener('contextmenu', onOrbContextMenu, false);
     }
+
+    // 菜单里的两个出口(点击后 Python 侧才真正执行)
+    if (el.menuSettings) {
+      el.menuSettings.addEventListener('click', function () {
+        closeOrbMenu(true);
+        callApi('open_panel');
+      });
+    }
+    if (el.menuQuit) {
+      el.menuQuit.addEventListener('click', function () {
+        closeOrbMenu(true);
+        callApi('quit_app');
+      });
+    }
+    // 点菜单以外的地方收菜单
+    document.addEventListener('mousedown', onDocMouseDownForMenu, false);
+
+    // 选文本时告诉 Python 别抢焦点(否则 Ctrl+C 复制不了)
+    document.addEventListener('selectionchange', onSelectionChange, false);
 
     // 复制：注入失败时把识别结果手动写进剪贴板
     if (el.copyBtn) {
@@ -1082,7 +1256,14 @@
   window.__capsule = {
     setState: function (state) {
       ui.state = state;
+      // 模型加载态(球上转圈):starting → body.orb-loading,离开即摘
+      if (document.body) {
+        document.body.classList.toggle('orb-loading', state === 'starting');
+      }
       if (state === 'recording') {
+        // 录音开始:菜单和提示都收掉(上一轮的浮层不该带进新一轮)
+        closeOrbMenu(true);
+        hideOrbHint();
         setPhase('recording');
         cancelCollapse();
         if (ui.orbMode) {
@@ -1145,8 +1326,10 @@
           writeText(raw, 'error');
           setPhase('error', '点右侧复制');
         } else {
-          // 预览关着:文字条不出现,全文只能靠这个按钮拿走
-          setPhase('error', msg + ' · 点右侧复制');
+          // 预览关着:错误文案进胶囊的 label 位(一行截断即可)。
+          // message 本身要点破兜底出口(见 controller),这里不再拼
+          // "点右侧复制" —— 拼了必截断,反而把关键信息挤没了。
+          setPhase('error', msg);
         }
       } else if (ui.previewEnabled) {
         writeText(msg, 'error');
@@ -1206,6 +1389,10 @@
       // 跟随档下球不可拖(位置由光标决定)。
       applyOrbPosition(mode);
     },
+    setOrbHint: function (text) {
+      // 球的一句操作反馈(点球时模型还在加载等):球上方冒出、几秒后淡掉。
+      showOrbHint(text);
+    },
     setHideDelay: function (ms) {
       // 一轮结束后停多久再收回球(毫秒)。
       var v = Number(ms);
@@ -1227,6 +1414,10 @@
     el.okBtn = $('okBtn');
     el.copyBtn = $('copyBtn');
     el.barOrb = $('barOrb');
+    el.orbMenu = $('orbMenu');
+    el.menuSettings = $('menuSettings');
+    el.menuQuit = $('menuQuit');
+    el.orbHint = $('orbHint');
 
     // 参与球↔胶囊动效的两个元素 —— 动效停下来时要重报命中区
     // (见 scheduleRegionReportAfterMotion 的说明)。

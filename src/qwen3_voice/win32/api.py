@@ -536,8 +536,9 @@ def set_no_activate_tree(hwnd: int) -> int:
     return changed
 
 
-def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]]) -> bool:
-    """把窗口的命中区域裁成几个矩形的**并集**(物理像素、窗口坐标)。
+def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
+                       ellipses: set[tuple[int, int, int, int]] | None = None) -> bool:
+    """把窗口的命中区域裁成几块的**并集**(物理像素、窗口坐标)。
 
     为什么要裁:胶囊是**固定尺寸**的透明窗口 —— 透明窗口一旦被 resize,
     WebView2 的透明背景就废(见 capsule.py 的说明),所以窗口里留了一大片
@@ -549,6 +550,15 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]]) -> boo
     左上角,不是客户区)。胶囊是 frameless 的,窗口原点 == 客户区原点,
     所以前端 ``getBoundingClientRect()`` 的视口坐标可以直接拿来用。
 
+    ``ellipses`` 里的那些块用**椭圆**而不是矩形(坐标相等匹配)。
+
+    为什么需要椭圆:窗口裁出来的区域里,WebView2 透明的地方透出的是
+    **Form 的灰底**(pywebview 的 transparent 分支不设 Form.BackColor,
+    默认就是 WinForms 的 #F0F0F0)。所以裁形只要比不透明内容大一点,
+    就会露出一圈灰。球形态尤其明显:球是**圆形**,用矩形裁就是四个角
+    露灰(用户看到的"球周围包着一小块灰色背景")。用椭圆裁,形状精确
+    贴合圆球,一丝灰都不露。
+
     区域句柄的生命周期(照 MSDN 的语义写,别想当然):
       - ``SetWindowRgn`` **成功后区域归系统所有**,而且系统**不拷贝**,
         调用方绝不能再碰这个句柄、更不能 DeleteObject —— 系统自己会删;
@@ -557,11 +567,17 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]]) -> boo
     if not hwnd or not rects:
         return False
 
+    ellipses = ellipses or set()
     region = None
     try:
         for (left, top, right, bottom) in rects:
-            piece = gdi32.CreateRectRgn(int(left), int(top),
-                                        int(right), int(bottom))
+            piece = None
+            if (left, top, right, bottom) in ellipses:
+                piece = gdi32.CreateEllipticRgn(int(left), int(top),
+                                                int(right), int(bottom))
+            else:
+                piece = gdi32.CreateRectRgn(int(left), int(top),
+                                            int(right), int(bottom))
             if not piece:
                 continue
             if region is None:

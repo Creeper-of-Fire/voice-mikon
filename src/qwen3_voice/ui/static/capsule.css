@@ -619,3 +619,114 @@ body.orb-mode.orb-dragging .recording-pill {
     animation: none !important;
   }
 }
+
+/* ---------------- 模型加载态(球上转圈) ----------------
+ * STARTING 状态下球还在,但模型没就绪:点球会被 Python 拒绝。
+ * 视觉上把麦克风换成转圈 —— "这个球暂时不能用"一眼可读。
+ * Python 推 setState('starting') → body.orb-loading,离开即摘。 */
+
+/* 加载中:麦克风退场,loader 顶上并旋转(复用 bar-spin) */
+body.orb-loading.orb-idle .bar-orb .orb-mic { display: none; }
+body.orb-loading.orb-idle .bar-orb .orb-loader {
+  display: block;
+  animation: bar-spin 1.1s linear infinite;
+}
+/* 非加载态:loader 一律不出现 */
+.bar-orb .orb-loader { display: none; }
+
+/* ---------------- 球的右键菜单(通用功能入口) ----------------
+ * 用户定的形态:一个展示框,里面一排小圆圈,以后加新功能都往这里放。
+ * 挂在 body 上、absolute 定位到球正上方(球永远在窗口底边居中)。
+ * 硬规矩照旧:透明窗口上不写 box-shadow / backdrop-filter,
+ * 层次只靠"深底 + 半透明描边"。 */
+
+.orb-menu {
+  position: absolute;
+  /* 球顶(距窗底 50px)再留 8px 间隙 */
+  bottom: 58px;
+  /* ⚠ 居中**不能**用 transform:translateX(-50%) —— 前端量命中区用
+     offset*(布局坐标,不含 transform),用了 transform 量到的位置会
+     偏半个身位,裁出来的窗口形状就把菜单切掉一半(实测:小圆圈被
+     截断)。left/right + margin:auto 居中,offset* 就是视觉位置。 */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: fit-content;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--deep);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  /* 淡入只动 opacity —— 不碰布局测量 */
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+
+/* ⚠ `hidden` 属性靠的是 UA 样式表的 display:none,而上面这条规则里
+   写了 display:flex —— **作者样式优先级更高**,hidden 就被架空了,
+   菜单元素会一直占着布局(虽然 opacity:0 看不见),命中区包围盒
+   被它撑大一大块 → 那块没有不透明内容的区域露出 WebView2 客户区
+   的灰底(实测:一启动就一整块灰色矩形)。
+   这条必须写死:**hidden 就是不参与布局**。 */
+.orb-menu[hidden] {
+  display: none;
+}
+
+.orb-menu.is-open {
+  opacity: 1;
+}
+
+.orb-menu-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--state-bg);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background-color .12s ease;
+}
+
+.orb-menu-btn:hover { background: var(--cancel-btn); }
+
+/* 退出是重操作:hover 给警示色,平时和设置长得一样(低调) */
+.orb-menu-btn.orb-menu-quit:hover {
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+/* ---------------- 球的操作提示(气泡) ----------------
+ * "点球时模型还在加载"这类一句话反馈:球上方冒出、几秒后自己淡掉。
+ * 同一套深底 + 描边;动画全用 opacity,JS 负责定时收尾。 */
+
+.orb-hint {
+  position: absolute;
+  bottom: 58px;
+  /* 居中不用 transform(理由同 .orb-menu) */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: fit-content;
+  padding: 6px 12px;
+  background: var(--deep);
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity .18s ease;
+}
+
+/* 同 .orb-menu:hidden 必须真的不占布局 */
+.orb-hint[hidden] {
+  display: none;
+}
+
+.orb-hint.is-open { opacity: 1; }

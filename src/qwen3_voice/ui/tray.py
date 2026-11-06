@@ -133,6 +133,11 @@ class TrayIcon:
         log.info("托盘请求重启")
         self._quit()
 
+    def quit(self, *_args) -> None:
+        """公开的退出入口:悬浮球右键菜单的「退出」也走这条清理路径
+        (和托盘「退出」完全一样:热键注销 → 窗口销毁 → 主循环返回)。"""
+        self._quit()
+
     def _quit(self, *_args) -> None:
         try:
             self.controller.shutdown()

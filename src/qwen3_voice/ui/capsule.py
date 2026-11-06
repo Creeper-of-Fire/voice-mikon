@@ -107,6 +107,7 @@ from ..logging_setup import get_logger
 from ..win32 import clipboard
 from ..win32.api import (
     bring_to_top,
+    enable_layered_window,
     get_foreground_window,
     get_window_rect,
     get_work_area,
@@ -118,6 +119,7 @@ from ..win32.api import (
     set_tool_window_style,
     set_window_regions,
     show_window_no_activate,
+    upload_transparent_surface,
 )
 from ..win32.caret import capture_anchor, warmup
 from ..win32.monitors import (
@@ -217,14 +219,34 @@ _STATE_NAMES = {
 # 每边外扩的余量(**物理**像素):逻辑坐标换物理像素有取整误差,
 # 抗锯齿的边缘还可能差半个像素 —— 不留余量的话,文字条/胶囊的边
 # 会被切掉一圈,按钮可能点不中。
-REGION_MARGIN = 8
+#
+# 余量从 8 收到 3:窗口区域现在**同时**是"视觉裁剪"和"命中区"。
+# 透明做成真透明之后,窗口里 WebView2 透明的地方透出的是**桌面**,
+# 裁出来多一圈就多一圈"看不见但能点"的边(点空白处会被胶囊吃掉),
+# 裁少了则把抗锯齿的边缘切硬。余量 3 物理像素足够盖住 175% 缩放下
+# 约 1.75 像素的抗锯齿带,又不至于把一大片空白收回窗口里。
+REGION_MARGIN = 3
 
 # 椭圆裁形(球形态)用的余量(**物理**像素)。
 #
-# 矩形裁形比圆形球大,四角会露出 WebView2 客户区的灰底 —— 用椭圆
-# 裁才贴合。但矩形那 8 像素的余量是为抗锯齿边缘留的点击容错,放到
-# 椭圆上会露出一圈明显的灰环,所以椭圆用小得多的余量。
-ELLIPSE_MARGIN = 2
+# 矩形裁形比圆形球大,四角会多出一块 —— 用椭圆裁才贴合圆球。
+# 同样收到 3:球周围那一圈多出来的边在真透明下是"能点但看不见",
+# 用户点球旁边的空气却点到了胶囊。
+ELLIPSE_MARGIN = 3
+
+# 圆角矩形的圆角半径(**逻辑** CSS 像素,取自 capsule.css)。
+#
+# 裁形要贴合真实外形,不然边缘会被切:胶囊是**跑道形**(radius 999px,
+# 两端是半圆),文字条是 14px 圆角,浮层是 12px 圆角。
+# 用椭圆裁胶囊会把跑道形的两端切掉一大块(实测误切 17.9%)。
+TEXTBAR_RADIUS_PX = 14
+OVERLAY_RADIUS_PX = 12
+
+# 命中刷新间隔(秒):见 _guard_loop 里的说明。
+#
+# 0.5s:实测一次刷新能管 1s 上下(退化快慢与别的窗口有没有重绘有关),
+# 留一倍余量。
+HIT_REFRESH_INTERVAL = 0.5
 
 # 前端上报的几块内容(顺序固定,并集的结果与顺序无关,但好读)
 #
@@ -442,6 +464,9 @@ class VoiceCapsule:
         # 前端报过命中区没有(SetWindowRgn 裁好窗口形状了)。
         # 没裁好之前不能露脸 —— 那片透明空白会吃掉底下的点击。
         self._orb_regions_ready = False
+        # 已经上传过的透明 surface 的窗口尺寸(见 _ensure_transparent_surface)。
+        # 尺寸没变就不用重传 —— 重传会吞掉 WebView2 的画面。
+        self._surface_size: tuple[int, int] | None = None
 
         # 跟随输入模式的定位信号点:按热键那一刻捕获一次,**这一轮
         # 录音内不再动**(位置可预期比位置聪明更重要)。
@@ -792,6 +817,11 @@ class VoiceCapsule:
         hwnd = self._native_handle()
         if hwnd:
             set_tool_window_style(hwnd)
+            # 加 WS_EX_LAYERED:窗口支持逐像素 alpha,WebView2 的透明
+            # 背景才能真的透出桌面(而不是 pywebview 没设 Form.BackColor
+            # 留下的那块 WinForms 灰底),命中判定也才能按 alpha 走。
+            # 必须在窗口显示**之前**加:换扩展样式会让系统重算窗口样子。
+            enable_layered_window(hwnd)
 
     def _on_window_shown(self) -> None:
         """窗口已创建。
@@ -845,6 +875,8 @@ class VoiceCapsule:
         # 记住用户当前在哪个窗口 —— 万一胶囊抢了前台,还回**它**
         # (动态跟踪:录音中途用户切了窗口,还的就是切换后的那个)
         last_fg = self._focus_restore
+        # 下一次刷新命中图的时间(见下面的说明)
+        next_hit_refresh = time.monotonic() + HIT_REFRESH_INTERVAL
         while not self._destroyed:
             hwnd = self._native_handle()
             if hwnd:
@@ -879,6 +911,20 @@ class VoiceCapsule:
                     # 就复制不了(按键送给了别的窗口)。用户手动兜底
                     # 拿回识别结果这条路必须通(实测踩到过)。
                     restore_foreground(last_fg)
+                # 刷新命中图。
+                #
+                # 窗口区域裁好之后,Windows 不会立刻按新形状判命中 ——
+                # 要等 DWM **重新合成**一次才生效(实测:裁完形状不刷新,
+                # 形状里面点不动,球和胶囊都成了摆设)。合成由"把窗口
+                # 提到置顶组顶端"触发,所以这里定期刷一次:
+                # 形变期间由 _on_update_regions 顺带刷,静止期间靠这个兜底。
+                #
+                # 代价:胶囊会被反复提到置顶组最顶端。它本来就是常驻置顶
+                # 窗口,置顶组内部的顺序用户基本感知不到。
+                if time.monotonic() >= next_hit_refresh:
+                    next_hit_refresh = time.monotonic() + HIT_REFRESH_INTERVAL
+                    if is_window_visible(hwnd):
+                        bring_to_top(hwnd)
             interval = (GUARD_INTERVAL if time.monotonic() < dense_until
                         else GUARD_SPARSE)
             time.sleep(interval)
@@ -996,6 +1042,9 @@ class VoiceCapsule:
             return
         try:
             set_tool_window_style(hwnd)
+            # 透明底子必须在显示前就位:分层窗口没有 surface 时是
+            # 一块黑,不是"还没画完"。
+            self._ensure_transparent_surface(hwnd)
             # WebView2 的子窗口没有 NOACTIVATE:鼠标点在子窗口上照样
             # 激活整棵树、抢走前台(点 ✓ 结束录音时文字就会注入给胶囊
             # 自己)。每次显示都重刷:WebView2 重建页面会换掉子窗口。
@@ -1108,17 +1157,24 @@ class VoiceCapsule:
         # 窗口形状裁好了 → 球可以露脸了(之前那片透明空白会吃掉
         # 底下应用的点击)
         self._orb_regions_ready = True
+        # 透明底子也在这时上传:窗口尺寸到这时候已经定了(前端量过了),
+        # 上早了会拿到建窗时的尺寸。
+        self._ensure_transparent_surface(hwnd)
 
         scale = self._scale()
-        # 球形态下"球"是圆的,用**椭圆**裁才贴合;胶囊形态用矩形。
-        # 形状不对的代价很直接:矩形比圆形球大,多出来的部分在窗口
-        # 裁形里却没有任何不透明内容 —— 露出的是 WebView2 客户区的
-        # Form 灰底(浅色主题下就是一块刺眼的浅灰方块)。
+        # 裁形要**贴合真实外形**:
+        #   球     -> 圆形(椭圆)
+        #   胶囊   -> 跑道形(圆角矩形,两端是半圆)
+        #   文字条 -> 14px 圆角矩形
+        #   浮层   -> 12px 圆角矩形
+        # 形状不对的代价很直接:裁形比内容大,多出来的那圈是"看不见
+        # 却能点"的边(点空白处会被胶囊吃掉);裁形比内容小,边缘被切硬。
         ball = self._orb_is_ball()
-        # 椭圆那一块**必须就是**列表里的那项(set_window_regions 按
+        # 形状那一项**必须就是**列表里的那项(set_window_regions 按
         # 坐标相等来认),不能另算一份 —— 两份坐标对不上就静默回落成
-        # 矩形,灰底照旧(实测踩过)。
+        # 矩形(实测踩过)。
         ellipses: set[tuple[int, int, int, int]] = set()
+        round_rects: dict[tuple[int, int, int, int], int] = {}
 
         def expand(rect, margin):
             x, y, w, h = rect
@@ -1138,15 +1194,22 @@ class VoiceCapsule:
             if w <= 0 or h <= 0:
                 continue        # 隐藏的块不参与并集
             if key == "pill" and ball:
-                # 球:椭圆裁,余量给小(大余量会露出一圈灰环)
+                # 球:圆形,椭圆裁
                 piece = expand(rect, ELLIPSE_MARGIN)
                 ellipses.add(piece)
-            elif key == "overlay":
-                # 浮层(菜单/提示):矩形裁,余量给小(菜单是圆角矩形,
-                # 矩形比它大,四角会露一点灰 —— 但只是一圈窄边)
-                piece = expand(rect, ELLIPSE_MARGIN)
-            else:
+            elif key == "pill":
+                # 胶囊:跑道形 —— 圆角半径取高度的一半,两端就是半圆。
+                # 拿椭圆裁会把跑道形的两端切掉一大块(实测误切 17.9%)。
                 piece = expand(rect, REGION_MARGIN)
+                round_rects[piece] = int(round(h * scale / 2))
+            elif key == "overlay":
+                # 浮层(菜单/提示):12px 圆角矩形
+                piece = expand(rect, REGION_MARGIN)
+                round_rects[piece] = int(round(OVERLAY_RADIUS_PX * scale))
+            else:
+                # 文字条:14px 圆角矩形
+                piece = expand(rect, REGION_MARGIN)
+                round_rects[piece] = int(round(TEXTBAR_RADIUS_PX * scale))
             physical.append(piece)
 
         if not physical:
@@ -1154,11 +1217,47 @@ class VoiceCapsule:
             # 宁可"窗口点不到",也不要"整片空白继续挡着底下的应用"
             physical = [(0, 0, 1, 1)]
 
-        log.debug("裁窗口区域: %s (椭圆=%s)", physical, ellipses)
+        log.debug("裁窗口区域: %s (椭圆=%s 圆角=%s)",
+                  physical, ellipses, round_rects)
         try:
-            set_window_regions(hwnd, physical, ellipses=ellipses)
+            set_window_regions(hwnd, physical, ellipses=ellipses,
+                               round_rects=round_rects)
         except Exception as e:
             log.debug("裁窗口区域失败: %s", e)
+
+        # 换了窗口区域之后,Windows 的**命中图**不会自动跟着更新:
+        # 实测改完 region,球和胶囊都点不动(空白区倒是正常穿透了),
+        # 只有让 DWM 重新合成一次(把窗口提到置顶组顶端)命中才生效。
+        # 这一步不能省 —— 少了它,胶囊就成了看得见点不着的摆设。
+        bring_to_top(hwnd)
+
+    def _ensure_transparent_surface(self, hwnd: int) -> None:
+        """给分层窗口上传"几乎全透明"的 surface —— 真透明的底子。
+
+        没有它,窗口虽然已经是 layered(WebView2 的透明背景能透出桌面),
+        但它自己的**命中判定**仍然是"整窗都算本窗口":点空白处会被
+        胶囊吃掉。surface 的 alpha 决定命中(逐像素),窗口区域
+        (SetWindowRgn)决定形状,两者合起来才是"空白穿透、球可点"。
+
+        只在窗口尺寸变化时重传:重传会吞掉 WebView2 的画面(DWM 要按
+        新的 surface 重新裁剪子窗口,而 WebView2 不会主动重绘),
+        而胶囊是固定尺寸的,正常一辈子只传一次。
+        """
+        rect = get_window_rect(hwnd)
+        if not rect:
+            return
+        left, top, right, bottom = rect
+        size = (right - left, bottom - top)
+        if size[0] <= 0 or size[1] <= 0:
+            return
+        if self._surface_size == size:
+            return
+        try:
+            if upload_transparent_surface(hwnd):
+                self._surface_size = size
+                log.debug("已上传透明 surface: %sx%s", size[0], size[1])
+        except Exception as e:
+            log.debug("上传透明 surface 失败: %s", e)
 
     def _orb_is_ball(self) -> bool:
         """当前是不是"球形态"(常驻球待机、没展开成胶囊)。

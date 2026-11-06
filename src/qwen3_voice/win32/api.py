@@ -157,12 +157,94 @@ COMPLEXREGION = 3
 gdi32.CreateRectRgn.argtypes = [ctypes.c_int, ctypes.c_int,
                                 ctypes.c_int, ctypes.c_int]
 gdi32.CreateRectRgn.restype = wt.HRGN
+gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int]
+gdi32.CreateRoundRectRgn.restype = wt.HRGN
 gdi32.CombineRgn.argtypes = [wt.HRGN, wt.HRGN, wt.HRGN, ctypes.c_int]
 gdi32.CombineRgn.restype = ctypes.c_int
 gdi32.DeleteObject.argtypes = [wt.HANDLE]
 gdi32.DeleteObject.restype = wt.BOOL
 user32.SetWindowRgn.argtypes = [wt.HWND, wt.HRGN, wt.BOOL]
 user32.SetWindowRgn.restype = wt.BOOL
+
+# ---------------- 分层窗口(WS_EX_LAYERED):窗口内容自己上传 ----------------
+#
+# 为什么不用 WinForms 的 TransparencyKey:
+#   TransparencyKey 走的是"PrintWindow 抓窗口画面 -> 按键色抠 alpha ->
+#   UpdateLayeredWindow"。而 PrintWindow **抓不到 WebView2 的
+#   DirectComposition 内容**(实测:重绘一次,WebView2 的画面就被吞掉,
+#   屏幕上只剩 Form 的背景色;显隐切换能救回来)。这条路在 WebView2 上不成立。
+#
+# 自己上传 surface 就没有这个问题,而且带来一个关键好处:
+#   **视觉**和**命中测试**读的是两样东西。
+#     - 视觉:WebView2 的 DComp 内容盖在 surface 之上,半透明元素照旧
+#       与桌面混合(真透明);
+#     - 命中:Windows 对 layered 窗口是**逐像素**看 surface 的 alpha 的,
+#       alpha=0 处点击穿透,alpha>0 处算本窗口 -> 命中区可以用
+#       SetWindowRgn 精确表达(空白区穿透、球/胶囊可点)。
+WS_EX_LAYERED = 0x00080000
+ULW_ALPHA = 0x00000002          # UpdateLayeredWindow:用位图自带的 alpha
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01             # BlendFunction.AlphaFormat:源位图自带 alpha
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    """CreateDIBSection 用的位图头(32bpp、top-down)。"""
+
+    _fields_ = [
+        ("biSize", wt.DWORD),
+        ("biWidth", wt.LONG),
+        ("biHeight", wt.LONG),
+        ("biPlanes", wt.WORD),
+        ("biBitCount", wt.WORD),
+        ("biCompression", wt.DWORD),
+        ("biSizeImage", wt.DWORD),
+        ("biXPelsPerMeter", wt.LONG),
+        ("biYPelsPerMeter", wt.LONG),
+        ("biClrUsed", wt.DWORD),
+        ("biClrImportant", wt.DWORD),
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", wt.DWORD * 3),
+    ]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", ctypes.c_byte),
+        ("BlendFlags", ctypes.c_byte),
+        ("SourceConstantAlpha", ctypes.c_byte),
+        ("AlphaFormat", ctypes.c_byte),
+    ]
+
+
+gdi32.CreateDIBSection.argtypes = [wt.HDC, ctypes.POINTER(BITMAPINFO),
+                                   wt.UINT, ctypes.POINTER(ctypes.c_void_p),
+                                   wt.HANDLE, wt.DWORD]
+gdi32.CreateDIBSection.restype = wt.HBITMAP
+gdi32.CreateCompatibleDC.argtypes = [wt.HDC]
+gdi32.CreateCompatibleDC.restype = wt.HDC
+gdi32.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+gdi32.SelectObject.restype = wt.HGDIOBJ
+gdi32.DeleteDC.argtypes = [wt.HDC]
+gdi32.DeleteDC.restype = wt.BOOL
+user32.GetDC.argtypes = [wt.HWND]
+user32.GetDC.restype = wt.HDC
+user32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
+user32.UpdateLayeredWindow.argtypes = [
+    wt.HWND, wt.HDC,
+    ctypes.POINTER(wt.POINT), ctypes.POINTER(wt.SIZE),
+    wt.HDC, ctypes.POINTER(wt.POINT),
+    wt.DWORD, ctypes.POINTER(BLENDFUNCTION), wt.DWORD,
+]
+user32.UpdateLayeredWindow.restype = wt.BOOL
 
 # 剪贴板
 user32.OpenClipboard.argtypes = [wt.HWND]
@@ -537,7 +619,9 @@ def set_no_activate_tree(hwnd: int) -> int:
 
 
 def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
-                       ellipses: set[tuple[int, int, int, int]] | None = None) -> bool:
+                       ellipses: set[tuple[int, int, int, int]] | None = None,
+                       round_rects: dict[tuple[int, int, int, int], int] | None = None
+                       ) -> bool:
     """把窗口的命中区域裁成几块的**并集**(物理像素、窗口坐标)。
 
     为什么要裁:胶囊是**固定尺寸**的透明窗口 —— 透明窗口一旦被 resize,
@@ -550,14 +634,16 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
     左上角,不是客户区)。胶囊是 frameless 的,窗口原点 == 客户区原点,
     所以前端 ``getBoundingClientRect()`` 的视口坐标可以直接拿来用。
 
-    ``ellipses`` 里的那些块用**椭圆**而不是矩形(坐标相等匹配)。
+    ``ellipses`` 里的那些块用**椭圆**而不是矩形(坐标相等匹配);
+    ``round_rects`` 里的块用**圆角矩形**(键是坐标,值是圆角半径的物理像素)。
 
-    为什么需要椭圆:窗口裁出来的区域里,WebView2 透明的地方透出的是
-    **Form 的灰底**(pywebview 的 transparent 分支不设 Form.BackColor,
-    默认就是 WinForms 的 #F0F0F0)。所以裁形只要比不透明内容大一点,
-    就会露出一圈灰。球形态尤其明显:球是**圆形**,用矩形裁就是四个角
-    露灰(用户看到的"球周围包着一小块灰色背景")。用椭圆裁,形状精确
-    贴合圆球,一丝灰都不露。
+    形状要**贴合真实外形**:裁出来的区域里,WebView2 透明的地方透出的是
+    桌面的颜色(真透明之后)。形状只要比不透明内容大一点,就会露出一圈
+    多余的"能点但看不见"的边;反过来比内容小一点,就会把内容的边缘切掉。
+    所以:
+      - 胶囊是**跑道形**(两端是半圆),用矩形裁会把两端切掉一截 ——
+        规格里说的 17.9% 误切就是拿椭圆裁跑道形裁出来的;
+      - 球是**圆形**,用矩形裁四个角会多出一块。
 
     区域句柄的生命周期(照 MSDN 的语义写,别想当然):
       - ``SetWindowRgn`` **成功后区域归系统所有**,而且系统**不拷贝**,
@@ -568,6 +654,7 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
         return False
 
     ellipses = ellipses or set()
+    round_rects = round_rects or {}
     region = None
     try:
         for (left, top, right, bottom) in rects:
@@ -575,6 +662,14 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
             if (left, top, right, bottom) in ellipses:
                 piece = gdi32.CreateEllipticRgn(int(left), int(top),
                                                 int(right), int(bottom))
+            elif (left, top, right, bottom) in round_rects:
+                # 圆角半径 = 宽/高的较小值 -> 变成"跑道形"(胶囊)
+                radius = max(0, min(int(round_rects[(left, top, right, bottom)]),
+                                    int(right) - int(left),
+                                    int(bottom) - int(top)))
+                piece = gdi32.CreateRoundRectRgn(int(left), int(top),
+                                                 int(right), int(bottom),
+                                                 radius, radius)
             else:
                 piece = gdi32.CreateRectRgn(int(left), int(top),
                                             int(right), int(bottom))
@@ -603,6 +698,108 @@ def set_window_regions(hwnd: int, rects: list[tuple[int, int, int, int]],
         if region is not None:
             # 只有失败路径会走到这:区域还在我们手里,得自己释放
             gdi32.DeleteObject(region)
+
+
+def enable_layered_window(hwnd: int) -> bool:
+    """给窗口加 ``WS_EX_LAYERED``:窗口内容改由我们自己上传。
+
+    加了它,窗口才支持**逐像素 alpha** —— 真透明(能透出桌面)和
+    "点击按 alpha 决定穿透与否"都靠它。
+
+    必须在窗口显示**之前**加:换扩展样式会让系统重算窗口的样子。
+    """
+    if not hwnd:
+        return False
+    try:
+        ex = user32.GetWindowLongPtrW(wt.HWND(hwnd), GWL_EXSTYLE)
+        if ex & WS_EX_LAYERED:
+            return True
+        return bool(user32.SetWindowLongPtrW(
+            wt.HWND(hwnd), GWL_EXSTYLE, ex | WS_EX_LAYERED))
+    except Exception:
+        return False
+
+
+def upload_transparent_surface(hwnd: int, alpha: int = 1) -> bool:
+    """给分层窗口上传一张"几乎全透明"的 surface(整窗同一个 alpha)。
+
+    alpha 为什么不是 0:
+      Windows 对 layered 窗口是**逐像素**看 surface 的 alpha 决定命中的。
+      整窗 alpha=0 的话,系统认为整个窗口都是透明的 —— 连 WebView2
+      画出来的那颗球也一起算成透明,球就点不到了(实测)。
+      给整窗一个极小的 alpha(默认 1/255):
+        - 命中:整窗都算"本窗口",形状交给 ``SetWindowRgn`` 去表达;
+        - 视觉:1/255 的黑几乎看不见 —— 实测半透明卡片从 (15,15,255)
+          变成 (15,15,254),蓝通道差 1,肉眼与像素验收都够。
+
+    为什么用黑色:surface 的颜色会参与 WebView2 半透明元素的混合
+    (DComp 内容盖在 surface 之上,底下就是 surface 的颜色)。黑色
+    让混合结果只暗一点点;换成任何有彩色都会把界面染色。
+
+    注意:重新上传会**吞掉 WebView2 的画面**(DWM 要按新的 surface 重新
+    裁剪子窗口,而 WebView2 不会主动重绘),所以这张 surface 只在
+    窗口尺寸变化时才重传。
+    """
+    if not hwnd:
+        return False
+    rect = wt.RECT()
+    if not user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(rect)):
+        return False
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return False
+    alpha = max(0, min(255, int(alpha)))
+
+    bmi = BITMAPINFO()
+    bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth = width
+    bmi.bmiHeader.biHeight = -height        # 负数 = top-down,和屏幕坐标一致
+    bmi.bmiHeader.biPlanes = 1
+    bmi.bmiHeader.biBitCount = 32
+    bmi.bmiHeader.biCompression = BI_RGB
+
+    hdc_screen = user32.GetDC(None)
+    if not hdc_screen:
+        return False
+    hbm = None
+    hdc_mem = None
+    old_obj = None
+    try:
+        ppv = ctypes.c_void_p()
+        hbm = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bmi),
+                                     DIB_RGB_COLORS, ctypes.byref(ppv),
+                                     None, 0)
+        if not hbm:
+            return False
+        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+        if not hdc_mem:
+            return False
+        old_obj = gdi32.SelectObject(hdc_mem, hbm)
+        # BGRA 每像素四字节:[B,G,R,A];RGB 全 0(黑),A 统一
+        pixels = bytes((0, 0, 0, alpha)) * (width * height)
+        ctypes.memmove(ppv, pixels, len(pixels))
+
+        pt_src = wt.POINT(0, 0)
+        pt_dst = wt.POINT(rect.left, rect.top)
+        size = wt.SIZE(width, height)
+        blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+        return bool(user32.UpdateLayeredWindow(
+            wt.HWND(hwnd), hdc_screen,
+            ctypes.byref(pt_dst), ctypes.byref(size),
+            hdc_mem, ctypes.byref(pt_src),
+            0, ctypes.byref(blend), ULW_ALPHA))
+    except Exception:
+        return False
+    finally:
+        # 位图被选进内存 DC 后不能直接删(删不掉),先选回原来的
+        if hdc_mem and old_obj:
+            gdi32.SelectObject(hdc_mem, old_obj)
+        if hbm:
+            gdi32.DeleteObject(hbm)
+        if hdc_mem:
+            gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(None, hdc_screen)
 
 
 def show_error_box(text: str, caption: str = "Qwen3 语音输入") -> bool:

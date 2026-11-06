@@ -22,16 +22,103 @@ from __future__ import annotations
 
 import sys
 import threading
+from pathlib import Path
+from typing import NamedTuple
 
 from .config import load_config
 from .core.controller import VoiceController
 from .logging_setup import get_logger, setup
-from .paths import config_path
+from .paths import PROJECT_DIR, config_path
 from .win32.dpi import set_dpi_awareness
 from .win32.hotkey import HotkeyError, HotkeyListener
 
 
-def _spawn_restart(logger) -> None:
+class _Entry(NamedTuple):
+    """「当初是怎么被拉起来的」—— 重启必须原样复刻它。
+
+    argv0  入口的 argv[0](已展开成绝对路径):
+            - 脚本入口(桌面快捷方式走的就是这条)→ 那个 .pyw 的路径
+            - ``-m qwen3_voice``                   → 包里的 __main__.py
+    frozen 是否是 PyInstaller 打包出来的 exe
+    """
+
+    argv0: str | None
+    frozen: bool
+
+
+def _capture_entry() -> _Entry:
+    """在启动早期把入口信息记下来。
+
+    必须趁早取:后面 GUI 库有可能动 sys.argv,那时候再问就不准了。
+
+    相对路径在这里就展开成绝对路径 —— 到退出时工作目录可能已经变了,
+    那时再解析相对路径就会指向别的地方。
+    """
+    argv = getattr(sys, "argv", None) or []
+    argv0 = argv[0] if argv else None
+    if argv0:
+        try:
+            argv0 = str(Path(argv0).resolve())
+        except (OSError, RuntimeError):
+            argv0 = None
+    return _Entry(argv0=argv0, frozen=bool(getattr(sys, "frozen", False)))
+
+
+def _project_root_of(path: Path) -> Path:
+    """从入口反推项目根(向上找带 pyproject.toml 的那一级)。
+
+    桌面快捷方式的「起始于」就是项目根,重启时的工作目录要跟它一致。
+    找不到标记文件就退回 paths.PROJECT_DIR —— 包自己知道自己在哪。
+    """
+    for d in (path.parent, *path.parent.parents):
+        if (d / "pyproject.toml").is_file():
+            return d
+    return PROJECT_DIR
+
+
+def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
+    """算出重启该用的命令行、工作目录,以及要提醒用户的话。
+
+    原则:**忠实复刻当初的启动方式**。三种入口分别对应:
+      - 脚本(launch.pyw):[同一个解释器, 同一个脚本的绝对路径]
+      - ``-m qwen3_voice``:argv0 是包里的 __main__.py → 保持 ``-m``
+      - 冻结 exe(PyInstaller):[exe 自己]
+
+    为什么不能一律 ``-m``:解释器可能压根看不见这个包 ——
+    桌面快捷方式用的是 base 目录的 pythonw.exe,而 qwen3_voice 只装在
+    venv 里(base 下 find_spec 返回 None,实测),拿 base 去 ``-m`` 只会
+    ModuleNotFoundError;再叠上 pythonw 没有控制台 → 静默闪退。
+    """
+    if entry.frozen:
+        # 打包成 exe 之后入口就是 exe 自己,再起一个自己就行
+        exe = Path(sys.executable)
+        return [sys.executable], str(exe.parent), None
+
+    argv0 = entry.argv0
+    if argv0:
+        script = Path(argv0)
+        if script.name == "__main__.py":
+            # ``python -m qwen3_voice``:解释器本来就看得见包,保持 -m
+            return ([sys.executable, "-m", "qwen3_voice"],
+                    str(_project_root_of(script)), None)
+
+        if script.suffix.lower() in (".py", ".pyw"):
+            if script.is_file():
+                # 脚本入口(桌面快捷方式走的就是这条):同一个解释器
+                # + 同一个脚本 —— 脚本自己会挂 venv,等于完整复刻
+                return ([sys.executable, str(script)],
+                        str(_project_root_of(script)), None)
+            return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
+                    f"入口脚本 {script} 不存在,退回 -m qwen3_voice")
+
+        return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
+                f"入口 {script} 不是 .py/.pyw 脚本,退回 -m qwen3_voice")
+
+    return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
+            "认不出当初的启动方式,退回 -m qwen3_voice")
+
+
+def _spawn_restart(logger, entry: _Entry | None = None) -> None:
     """以分离方式拉起一个新的自身实例(重启的第二步)。
 
     调用时机有讲究:必须在**全部清理之后**(热键已注销、窗口已销毁、
@@ -41,23 +128,35 @@ def _spawn_restart(logger) -> None:
 
     分离(DETACHED_PROCESS):新进程不继承控制台、不挂在旧进程上 ——
     旧进程退出后它照常活,终端里 Ctrl+C 也只影响旧进程。
+
+    命令行必须**忠实复刻当初的启动方式**(见 _restart_plan):
+    换一种方式拉起来,新进程可能根本起不来,而且是静默地起不来。
     """
     import subprocess
+
+    if entry is None:
+        entry = _capture_entry()
+    cmd, cwd, note = _restart_plan(entry)
+    if note:
+        logger.warning("重启:%s", note)
 
     flags = 0
     if sys.platform == "win32":
         flags = (subprocess.DETACHED_PROCESS
                  | subprocess.CREATE_NEW_PROCESS_GROUP)
     try:
-        subprocess.Popen([sys.executable, "-m", "qwen3_voice"],
-                         creationflags=flags, close_fds=True)
-        logger.info("重启:已拉起新实例")
+        subprocess.Popen(cmd, cwd=cwd, creationflags=flags, close_fds=True)
+        logger.info("重启:已拉起新实例(%s)", " ".join(cmd))
     except Exception as e:
         logger.error("重启失败,请手动启动程序: %s", e)
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
+
+    # 趁 sys.argv 还没被动过,把「当初是怎么被拉起来的」记下来 ——
+    # 托盘「重启」要靠它原样复刻启动方式(见 _restart_plan)。
+    entry = _capture_entry()
 
     # 必须在创建任何窗口之前声明 DPI 感知,否则高分屏下布局全乱
     dpi_mode = set_dpi_awareness()
@@ -155,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、
     # 窗口已销毁、模型已卸载),现在拉新实例才不会撞车
     if getattr(tray, "restart_requested", False):
-        _spawn_restart(logger)
+        _spawn_restart(logger, entry)
     return 0
 
 

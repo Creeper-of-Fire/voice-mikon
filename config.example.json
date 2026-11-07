@@ -13,7 +13,6 @@
   ],
   "sample_rate": 16000,
   "max_duration": 120.0,
-  "silence_rms": 0.002,
   "save_recordings": true,
   "language": null,
   "hotwords": [

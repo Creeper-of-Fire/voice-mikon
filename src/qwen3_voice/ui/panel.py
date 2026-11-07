@@ -111,6 +111,19 @@ PUSH_INTERVAL = 1.0 / 30.0
 DB_FLOOR = -70.0
 DB_CEIL = 0.0
 
+# 显示门的动态门限 = max(LEVEL_GATE_MIN, 底噪估计 × LEVEL_GATE_FACTOR)。
+#
+# 系数 1.5:比底噪高 50% 以内都算底噪(门限附近的过渡帧不闪)。
+# 之前的门限是固定常数(config.silence_rms=0.002),按 10-29 那次录音
+# 标定;换环境后底噪抬高 9 dB,门被整个穿过,安静时电平条 65% 满格
+# —— 固定值在环境面前活不过一次换麦/换房间,现在门随底噪走。
+#
+# 绝对下限 1e-5 只是兜底:防止"底噪估计接近 0"(近哑设备)时门
+# 坍缩成 0,让任何数值都算"有声"。真正的静音判零由 dbfs_to_unit
+# 自带的 rms<=1e-6 承担,两层各管各的。
+LEVEL_GATE_FACTOR = 1.5
+LEVEL_GATE_MIN = 1e-5
+
 # 控制器状态 -> 前端状态字符串
 _STATE_NAMES = {
     State.STARTING: "starting",
@@ -199,9 +212,10 @@ def dbfs_to_unit(rms: float, floor_rms: float = 0.0) -> float:
     对数域而不是线性域,是因为人耳对 loudness 的感知接近对数,
     线性映射会让正常说话的音量全部挤在 0.05 以下。
 
-    `floor_rms` 是**噪声门**:低于它的直接判 0。不加这个门的话,
-    安静房间的底噪(-62 dBFS 实测)映射出来还有 0.11,会被前端当成
-    "有声音",电平条一直显示 7px 高度,看着像一直在响。
+    `floor_rms` 是**噪声门**:低于它的直接判 0。门限不是常数 ——
+    由调用方用噪声底估计动态算(见 ``_push_levels``):固定门限是
+    按"某次录音"标定的,环境一变就失效(2026-11 实测:换环境后
+    底噪抬高 9 dB,固定门被整个穿过,安静时电平条 65% 满格)。
     """
     if rms <= floor_rms or rms <= 1e-6:
         return 0.0
@@ -326,8 +340,19 @@ class _EventPump:
             elapsed = recorder.elapsed
         except Exception:
             return
-        mapped = [dbfs_to_unit(v, self.controller.config.silence_rms)
-                  for v in raw]
+        # 门限随底噪走(见 LEVEL_GATE_FACTOR 的说明);底噪估计还没
+        # 收敛(None,冷启动头一秒)就退回绝对下限 —— 宁可让头几帧
+        # 底噪照常显示,也不能把轻声开头错杀成 0。
+        floor = None
+        try:
+            floor = recorder.noise_floor()
+        except Exception:
+            pass
+        if floor is not None:
+            gate = max(LEVEL_GATE_MIN, floor * LEVEL_GATE_FACTOR)
+        else:
+            gate = LEVEL_GATE_MIN
+        mapped = [dbfs_to_unit(v, gate) for v in raw]
         for sink in list(self._sinks):
             try:
                 sink.push_levels(mapped, elapsed)

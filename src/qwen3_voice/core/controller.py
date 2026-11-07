@@ -443,14 +443,22 @@ class VoiceController:
     # ---------- 实时预览 ----------
 
     def _make_preview_engine(self, sample_rate: int,
-                             partial) -> StreamingEngine:
+                             partial,
+                             noise_floor=None) -> StreamingEngine:
         """造预览位的引擎。
 
         默认按模块级常量 ``PREVIEW_ENGINE_KIND`` 选(分句 / 整段回退),
         测试可以覆盖这个方法换成假引擎。
+
+        ``noise_floor`` 是 Recorder 的底噪估计读数(callable),分句引擎
+        的 VAD 门随它走 —— 门限是"测出来的",不是按某次录音标定的固定值
+        (固定门被环境变化穿透过,实测切句判定整轮失效)。不是本项目的
+        Recorder(鸭子类型进来的假录音器)就没有这个方法,传 None,
+        引擎自己退到兜底门。
         """
         return make_preview_engine(PREVIEW_ENGINE_KIND, self.engine,
-                                   sample_rate, partial=partial)
+                                   sample_rate, partial=partial,
+                                   noise_floor=noise_floor)
 
     def _make_final_engine(self, sample_rate: int) -> StreamingEngine:
         """造最终位的引擎。
@@ -505,7 +513,8 @@ class VoiceController:
             native_rate = self.config.sample_rate
 
         engine = self._make_preview_engine(
-            native_rate, self._make_partial_callback(self._session))
+            native_rate, self._make_partial_callback(self._session),
+            noise_floor=getattr(recorder, "noise_floor", None))
         stop = threading.Event()
         thread = threading.Thread(
             target=self._preview_loop, args=(stop, engine, pull),

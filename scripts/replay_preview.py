@@ -49,7 +49,9 @@ from qwen3_voice.asr.streaming import (
     SENTENCE_MIN_SECONDS,
     SENTENCE_SILENCE_SECONDS,
     VAD_FRAME_MS,
-    VAD_SILENCE_RMS,
+    VAD_GATE_CLOSE_FACTOR,
+    VAD_GATE_MIN,
+    VAD_GATE_OPEN_FACTOR,
     SentencePreviewEngine,
 )
 from qwen3_voice.audio.recorder import RECORDER_BLOCK_SIZE
@@ -147,6 +149,8 @@ class ReplayReport:
     sentences: list[str] = field(default_factory=list)
     final_text: str = ""
     elapsed: float = 0.0
+    # 本次回放用的底噪估计(整段 p10);None = 音频太短没估出来
+    noise_floor: float | None = None
 
     @property
     def voiced_frames(self) -> int:
@@ -187,14 +191,16 @@ class DiagnosticPreviewEngine(SentencePreviewEngine):
         self._pending: Segment | None = None
 
     def _process_frame(self, frame: np.ndarray) -> None:
+        # 先让父类跑完这一帧的滞后双门判定,再记录结果 ——
+        # 判定逻辑只有父类一份(门限随注入的底噪估计走),钩子只旁观。
         rms = self._rms(frame)
+        super()._process_frame(frame)
         self.frames.append(FrameInfo(
             index=len(self.frames),
             samples=len(frame),
             rms=rms,
-            silent=rms < self._silence_rms,
+            silent=not self._in_speech,
         ))
-        super()._process_frame(frame)
 
     def _flush(self, notify: bool = True) -> None:
         # 读的是父类的私有状态 —— 断句原因必须和父类的判断顺序一致:
@@ -245,8 +251,29 @@ class DiagnosticPreviewEngine(SentencePreviewEngine):
 # 回放主体
 
 
-def replay(audio: np.ndarray, sample_rate: int, asr_engine,
-           *, realtime: bool = False,
+def _estimate_noise_floor(audio: np.ndarray,
+                          sample_rate: int) -> float | None:
+    """整段音频的底噪估计(与 NoiseFloorTracker 同口径:p10)。
+
+    回放有完整音频,不必边"录"边估;帧长取 VAD 的 20ms,和引擎
+    判定用的帧一致。音频太短(不足 50 帧 = 1 秒)返回 None,
+    引擎自己退到兜底门。
+    """
+    frame = max(1, int(VAD_FRAME_MS / 1000 * sample_rate))
+    arr = np.asarray(audio, dtype=np.float32)
+    if np.issubdtype(audio.dtype, np.integer):
+        arr = arr / 32768.0
+    usable = len(arr) - len(arr) % frame
+    if usable <= 0:
+        return None
+    frames = arr[:usable].reshape(-1, frame)
+    rms_list = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+    if len(rms_list) < 50:
+        return None
+    return float(np.percentile(rms_list, 10))
+
+
+def replay(audio: np.ndarray, sample_rate: int, asr_engine,           *, realtime: bool = False,
            block_size: int = RECORDER_BLOCK_SIZE,
            verbose: bool = False) -> ReplayReport:
     """把音频按录音器的真实粒度喂给分句引擎,顺便收集诊断数据。
@@ -271,7 +298,15 @@ def replay(audio: np.ndarray, sample_rate: int, asr_engine,
     def on_partial(text: str) -> None:
         partials.append((time.monotonic() - t_start, text))
 
-    engine = DiagnosticPreviewEngine(asr_engine, sample_rate, partial=on_partial)
+    # 回放有完整音频,底噪用**整段**按 20ms 帧算 p10 一次估好
+    # (与运行时 NoiseFloorTracker 同一个口径:p10 低分位数),
+    # 注入恒定 provider —— 判定与线上一致:门随底噪走。
+    # 旧的固定 VAD_SILENCE_RMS 已退役(被换环境后的底噪穿透过)。
+    report.noise_floor = _estimate_noise_floor(audio, sample_rate)
+    engine = DiagnosticPreviewEngine(
+        asr_engine, sample_rate, partial=on_partial,
+        noise_floor=(lambda: report.noise_floor)
+        if report.noise_floor is not None else None)
 
     block_duration = block_size / max(1, sample_rate)
     t_start = time.monotonic()
@@ -324,7 +359,8 @@ def diagnose(report: ReplayReport) -> list[str]:
 
     if report.voiced_frames == len(report.frames):
         hints.append("✗ 全部判成有声 —— VAD 断不出句,"
-                     f"检查底噪(阈值 {VAD_SILENCE_RMS})")
+                     f"检查底噪(本次估计 {report.noise_floor},"
+                     "门=底噪×2.5 开 / ×1.5 关)")
     elif not report.speech_segments:
         hints.append("✗ 有有声帧但一次都没断句 —— 静音段太短或阈值太高,"
                      f"当前要求连续 {SENTENCE_SILENCE_SECONDS}s 静音")
@@ -358,7 +394,11 @@ def format_report(report: ReplayReport) -> str:
                  f"({report.block_size / max(1, report.sample_rate) * 1000:.1f}ms),"
                  f"共 {report.blocks} 块")
     lines.append(f"节奏      : {'真实时间(realtime)' if report.realtime else '快速(fast,不 sleep)'}")
-    lines.append(f"VAD       : rms < {VAD_SILENCE_RMS} 判静音,"
+    floor_desc = ("未估出(音频太短,门=兜底)" if report.noise_floor is None
+                  else f"{report.noise_floor:.5f}")
+    lines.append(f"VAD       : 底噪估计 {floor_desc},"
+                 f"开门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_OPEN_FACTOR):.5f}"
+                 f" / 关门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_CLOSE_FACTOR):.5f},"
                  f"连续 {SENTENCE_SILENCE_SECONDS}s 断句,"
                  f"单句 {SENTENCE_MIN_SECONDS}~{SENTENCE_MAX_SECONDS}s,"
                  f"帧长 {VAD_FRAME_MS}ms")

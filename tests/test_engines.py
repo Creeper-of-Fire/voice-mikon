@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 from qwen3_voice.asr.streaming import (
-    VAD_SILENCE_RMS,
     FullPassEngine,
     PreviewEngineKind,
     SentencePreviewEngine,
@@ -362,32 +361,78 @@ def test_custom_thresholds_are_respected():
     assert len(fake.calls) == 1
 
 
-# ---------------- VAD 静音阈值(实测定标,别随手改) ----------------
+# ---------------- VAD 门限:自适应底噪,不再钉固定值 ----------------
 #
-# 提交 172dfd0 按真机实测把它从 0.01 改成 0.0015:
-# 底噪峰 -63~-60 dB(0.0009~0.0011),语音主体 -53~-40 dB(0.002~0.01),
-# 峰值才 -33 dB —— 没有干净的双峰分界,0.01 会把语音主体大半判成静音
-# (实测 94% 的帧被判静音),一句话被切成碎片,预览大量缺字。
-#
-# 这个数字是**实测定标**出来的,不是随手写的。改回去预览就会碎,
-# 而那种问题在单测里看不出来 —— 所以这里把它钉死。
+# 旧版 VAD_SILENCE_RMS=0.0015 按 10-29 那次录音(底噪 -63~-60 dB)标定,
+# 换环境后底噪抬到 -52.6 dB,门被整个穿过,静音断句永不触发 ——
+# 固定阈值钉得再死也防不住环境变化,已退役。现在门限 =
+# max(兜底, 注入的底噪估计 × 开/关门系数),测试注入固定估计来复现行为。
 
-def test_vad_silence_threshold_is_locked_to_the_calibrated_value():
-    assert VAD_SILENCE_RMS == 0.0015
+def test_vad_adaptive_gate_separates_noise_from_speech():
+    """门限随注入的底噪估计走:底噪判静音,比底噪高的语音判有声。
 
+    注入底噪估计 0.001(≈ -60 dB,旧环境的量级):
+      开门 = 0.001×2.5 = 0.0025;关门 = 0.001×1.5 = 0.0015。
+    底噪帧(0.001)低于关门门 → 静音;语音主体(0.01)高于开门门 → 有声。
+    """
+    noise = 0.001
+    eng = sentence_engine(FakeEngine(),
+                          noise_floor=lambda: noise)
 
-def test_vad_threshold_separates_quiet_noise_from_speech():
-    """门限两侧:安静房间底噪判静音,语音主体判有声。"""
-    eng = sentence_engine(FakeEngine())
-    assert eng._silence_rms == VAD_SILENCE_RMS
-
-    # 底噪(实测 -60 dB ≈ 0.001)整块喂进去:不该断出句子
-    eng.feed((np.ones(1600) * int(0.001 * 32768)).astype(np.int16))
+    # 底噪(旧环境 -60 dB ≈ 0.001)整块喂进去:不该断出句子
+    eng.feed((np.ones(1600) * int(noise * 32768)).astype(np.int16))
     eng.feed(quiet(0.4))
     assert eng.partials == []
 
     # 语音主体(实测 -40 dB ≈ 0.01)同样喂:应该断出一句
-    eng2 = sentence_engine(FakeEngine())
+    eng2 = sentence_engine(FakeEngine(),
+                           noise_floor=lambda: noise)
     eng2.feed((np.ones(6400) * int(0.01 * 32768)).astype(np.int16))
     eng2.feed(quiet(0.4))
     assert eng2.partials == ["文本-6400"]
+
+
+def test_vad_gate_tracks_new_noise_floor():
+    """换环境(底噪抬高 9 dB)不用改任何常量:注入新估计,门就跟着走。
+
+    同样的 0.003 帧序列(≈ -50.5 dB,新环境的底噪量级):
+      旧门(0.0015)判它"有声" —— 这正是当年切句失效的根因;
+      注入新估计 0.002 → 开门 0.005,0.003 低于关门门 → 判静音。
+    """
+    eng = sentence_engine(FakeEngine(),
+                          noise_floor=lambda: 0.002)
+    eng.feed((np.ones(1600) * int(0.003 * 32768)).astype(np.int16))
+    eng.feed(quiet(0.4))
+    assert eng.partials == []
+
+
+def test_vad_floor_not_ready_falls_back_to_min_gate():
+    """底噪估计没收敛(None,冷启动):退到兜底门,宁可包底噪不切碎。
+
+    兜底门极低(1e-4),底噪帧全部判"有声" —— 句首会包进一点底噪,
+    识别不在乎;轻声开头反而不会丢。
+    """
+    eng = sentence_engine(FakeEngine(),
+                          noise_floor=lambda: None)
+    eng.feed((np.ones(1600) * int(0.001 * 32768)).astype(np.int16))
+    eng.feed(tone(0.4))
+    eng.feed(quiet(0.4))
+    # 一整句被认出来(底噪只是混在句首,不影响断句)
+    assert len(eng.partials) == 1
+
+
+def test_vad_hysteresis_keeps_speech_through_gate_dip():
+    """滞回带:说话中途电平短暂跌破开门门(但高于关门门)不算停。
+
+    底噪估计 0.001 → 开门 0.0025 / 关门 0.0015。
+    中段帧 0.002 落在滞回带内:说话态不退出,句子不断。
+    """
+    eng = sentence_engine(FakeEngine(),
+                          noise_floor=lambda: 0.001)
+    loud = (np.ones(3200) * int(0.02 * 32768)).astype(np.int16)
+    dip = (np.ones(3200) * int(0.002 * 32768)).astype(np.int16)
+    eng.feed(loud)       # 进入说话态
+    eng.feed(dip)        # 滞回带内:说话态保持
+    eng.feed(loud)       # 又响起来:同一句话继续
+    eng.feed(quiet(0.4)) # 真正的静音:这才断句
+    assert len(eng.partials) == 1

@@ -143,7 +143,7 @@ def test_rms_scales_with_amplitude():
 #   1. **电平必须推绝对值**:按 dBFS 对数映射,不做窗口内归一化 ——
 #      归一化之后波形永远看着是满的,用户就看不出自己声音大不大了。
 #   2. **电平条要加噪声门**:安静房间的底噪实测 -62 dBFS,
-#      不加门映射出来还有 0.11,超过前端 0.30 的死区 ——
+#      不加门映射出来还有 0.11,电平条会看着像一直在响 ——
 #      电平条一直显示 7px 高度,看着像一直在响。
 
 def test_dbfs_to_unit_endpoints():
@@ -171,15 +171,16 @@ def test_dbfs_to_unit_is_monotonic():
 
 
 def test_dbfs_to_unit_noise_gate_kills_background_noise():
-    """噪声门:安静房间底噪(-62 dBFS 实测)必须判 0。
+    """噪声门:门限以下的 RMS 必须判 0。
 
-    不加门的话,底噪映射出来是 0.11 —— 会超过前端 0.30 的死区,
-    电平条会一直显示 7px 高度,看着像一直在响(README 那条坑)。
+    门限本身是**动态的**(调用方用底噪估计算,见 panel._push_levels);
+    这里用任意固定值验证 dbfs_to_unit 的判定行为。真实链路里
+    门限 = max(1e-5, 底噪估计 × 1.5),底噪永远落在门下。
     """
     noise_rms = 10 ** (-62 / 20)          # ≈ 7.9e-4
-    floor = 0.002                         # config.silence_rms 的默认值
+    floor = 0.002                         # 任意门限(仅测试用)
 
-    # 不加门:底噪被映射成 0.11(这就是那条坑)
+    # 不加门:底噪被映射成 0.11(曾经的坑:固定门被新环境的底噪穿过)
     assert dbfs_to_unit(noise_rms) == pytest.approx(0.114, abs=0.005)
     # 加了门:直接判 0
     assert dbfs_to_unit(noise_rms, floor_rms=floor) == 0.0

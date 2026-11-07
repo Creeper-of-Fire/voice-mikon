@@ -38,14 +38,28 @@ log = get_logger("asr.stream")
 
 # ---- 调参默认值(都集中在这里,方便按真机效果微调)----
 
-# VAD 静音阈值(归一化 RMS,0..1)。
-# 实测定自用户真实录音(20261029-170527,USB 麦,增益偏低):
-#   底噪峰 -63~-60dB(0.0009~0.0011),语音主体 -53~-40dB(0.002~0.01),
-#   峰值才 -33dB —— 没有干净的双峰分界,0.01 会把语音主体大半判成
-#   静音,一句话被切成碎片后大量丢失(实测 94% 帧被判静音)。
-# 取 0.0015(≈-56.5dB,底噪峰的 ~1.5 倍):宁可把一点底噪包进句子
-# (识别不在乎句首尾多点底噪),也不能把语音切碎(碎句被丢,预览缺字)。
-VAD_SILENCE_RMS = 0.0015
+# VAD 切句门**不再用固定绝对阈值**。
+#
+# 旧做法:VAD_SILENCE_RMS = 0.0015,按 2026-10-29 那次真机录音标定
+# (USB 麦增益偏低,底噪峰 -63~-60 dB)。换环境后底噪抬到 -52.6 dB
+# (2026-11-07 实测),底噪 RMS 0.0017~0.0023 **全部高过门限** ——
+# "连续静音 0.3s"的判定永不触发,句子只能等 20s 强切,预览基本不出字。
+# 固定阈值在环境面前活不过一次换麦/换房间,已退役。
+#
+# 现做法:门限 = max(VAD_GATE_MIN, 底噪估计 × 系数),底噪估计由
+# 调用方注入(``noise_floor`` callable,Recorder 持有那个滑动窗口
+# p10 估计器,见 audio/noise.py)。估计还没收敛(None,冷启动头一秒)
+# 时门退到 VAD_GATE_MIN —— 宁可把底噪包进句子(识别不在乎句首尾
+# 一点底噪),也不能把轻声开头判成静音(旧注释的教训:0.01 的门
+# 曾把 94% 的语音帧判成静音,句子碎成渣,预览大量缺字)。
+VAD_GATE_OPEN_FACTOR = 2.5   # 开门:超过底噪 2.5 倍才算"说话了"
+VAD_GATE_CLOSE_FACTOR = 1.5  # 关门:低于底噪 1.5 倍才算"停了"
+VAD_GATE_MIN = 1e-4          # 估计不可用时的兜底门(≈ -80 dBFS)
+
+# 开关门限为什么要不一样(**滞后**):门限附近若只有一个门,RMS 在
+# 门附近抖一下,"有声/静音"就翻转一次,silence_run 反复清零,
+# 一句话永远攒不出 0.3s 的连续静音 —— 该切的时候切不出来。
+# 开门严(2.5×)、关门松(1.5×),中间留一条滞回带,状态才稳。
 
 # 连续静音多久算断句(秒)
 SENTENCE_SILENCE_SECONDS = 0.3
@@ -291,14 +305,17 @@ class SentencePreviewEngine(StreamingEngine):
 
     def __init__(self, engine: ASRBackend, sample_rate: int = 16000,
                  partial: Callable[[str], None] | None = None,
-                 silence_rms: float = VAD_SILENCE_RMS,
+                 noise_floor: Callable[[], float | None] | None = None,
                  silence_seconds: float = SENTENCE_SILENCE_SECONDS,
                  max_seconds: float = SENTENCE_MAX_SECONDS,
                  min_seconds: float = SENTENCE_MIN_SECONDS,
                  frame_ms: float = VAD_FRAME_MS):
         super().__init__(engine, sample_rate)
         self._partial = partial
-        self._silence_rms = float(silence_rms)
+        # 底噪估计的供给口:callable,每帧问一次当前底噪(None=还没收敛)。
+        # 不直接依赖 Recorder —— 依赖的是"谁来供数"这个窄接口,测试里
+        # 可以给个固定值的 lambda,行为完全可复现。
+        self._noise_floor = noise_floor
         self._silence_samples = max(1, int(silence_seconds * self._sample_rate))
         self._max_samples = max(1, int(max_seconds * self._sample_rate))
         self._min_samples = max(1, int(min_seconds * self._sample_rate))
@@ -310,6 +327,24 @@ class SentencePreviewEngine(StreamingEngine):
         self._silence_run = 0                 # 连续静音的样本数
         self._trailing_silence = 0            # 句尾连续静音的样本数(切句时裁掉)
         self._sentences: list[str] = []
+        # 滞后双门的状态:"现在算说话中吗"。True 时用关门判定,
+        # False 时用开门判定(见 VAD_GATE_* 的说明)。
+        self._in_speech = False
+
+    # ---------- VAD 门 ----------
+
+    def _gates(self) -> tuple[float, float]:
+        """当前(开门, 关门)门限。估计没收敛就双双退到兜底门。"""
+        floor = None
+        if self._noise_floor is not None:
+            try:
+                floor = self._noise_floor()
+            except Exception:
+                floor = None
+        if floor is None or floor <= 0:
+            return VAD_GATE_MIN, VAD_GATE_MIN
+        return (max(VAD_GATE_MIN, floor * VAD_GATE_OPEN_FACTOR),
+                max(VAD_GATE_MIN, floor * VAD_GATE_CLOSE_FACTOR))
 
     # ---------- 接口 ----------
 
@@ -348,8 +383,21 @@ class SentencePreviewEngine(StreamingEngine):
             yield data[start:start + step]
 
     def _process_frame(self, frame: np.ndarray) -> None:
-        """处理一个分析帧:更新 VAD 状态,必要时断句。"""
-        silent = self._rms(frame) < self._silence_rms
+        """处理一个分析帧:更新 VAD 状态,必要时断句。
+
+        判定用**滞后双门**(见模块头 VAD_GATE_* 的说明):
+          - 不在说话态:frame_rms 越过开门门(2.5×底噪)才进说话态;
+          - 说话态中:frame_rms 跌破关门门(1.5×底噪)才算停。
+        """
+        level = self._rms(frame)
+        gate_open, gate_close = self._gates()
+        if self._in_speech:
+            if level < gate_close:
+                self._in_speech = False
+        elif level > gate_open:
+            self._in_speech = True
+        silent = not self._in_speech
+
         if not silent and self._speech_samples == 0:
             # 有声来了,但这一句前面还挂着静音(断句后残留的那点尾巴)——
             # 把它扔掉:句子从头开始,别让静音混进识别。
@@ -415,7 +463,6 @@ class SentencePreviewEngine(StreamingEngine):
         self._speech_samples = 0
         self._silence_run = 0
         self._trailing_silence = 0
-
     def _recognize(self, audio: np.ndarray) -> str:
         """识别一句。失败只丢这一句,引擎不能死。"""
         try:
@@ -440,12 +487,18 @@ class SentencePreviewEngine(StreamingEngine):
 
 def make_preview_engine(kind: PreviewEngineKind | str,
                         engine: ASRBackend, sample_rate: int = 16000,
-                        partial: Callable[[str], None] | None = None) -> StreamingEngine:
+                        partial: Callable[[str], None] | None = None,
+                        noise_floor: Callable[[], float | None] | None = None
+                        ) -> StreamingEngine:
     """按 kind 造一颗预览引擎。
 
     kind 是 ``PreviewEngineKind.SENTENCE`` 就分句(默认),
     是 ``FULL_PASS`` 就退回旧行为(整段重识别)。
+
+    ``noise_floor`` 是底噪估计的供给口(仅分句引擎用,整段引擎不切句),
+    见 ``SentencePreviewEngine`` 的说明。
     """
     if kind == PreviewEngineKind.FULL_PASS:
         return FullPassEngine(engine, sample_rate, partial=partial)
-    return SentencePreviewEngine(engine, sample_rate, partial=partial)
+    return SentencePreviewEngine(engine, sample_rate, partial=partial,
+                                 noise_floor=noise_floor)

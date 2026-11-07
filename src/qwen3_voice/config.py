@@ -85,9 +85,6 @@ class Config:
     ])
     sample_rate: int = 16000                  # ASR 模型要求的采样率;重采样由 qwen_asr 内部完成
     max_duration: float = 120.0
-    # **只用于界面电平条的噪声门**(底噪以下的电平显示成 0),
-    # **不参与识别判定** —— 录到的音频一律整段丢给模型。
-    silence_rms: float = 0.002
     # 每轮录音结束后把原始音频存成 WAV(调试用)。
     # 默认开:出问题时需要**同一段真实录音**反复回放定位,
     # 光看日志不够。不想留就把这个开关关掉。
@@ -156,8 +153,6 @@ class Config:
             issues.append("sample_rate 必须为正数")
         if self.max_duration <= 0:
             issues.append("max_duration 必须为正数")
-        if self.silence_rms < 0:
-            issues.append("silence_rms 不能为负")
         if self.theme not in THEME_MODES:
             issues.append(
                 f"theme 只能是 {' / '.join(THEME_MODES)},当前 {self.theme!r}")

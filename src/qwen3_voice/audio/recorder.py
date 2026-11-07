@@ -21,6 +21,7 @@ import numpy as np
 
 from ..logging_setup import get_logger
 from .devices import supported_rate
+from .noise import NoiseFloorTracker
 
 log = get_logger("audio.recorder")
 
@@ -78,6 +79,16 @@ class Recorder:
         self._levels: deque[float] = deque(maxlen=level_window)
         # 已经取走到第几帧了(drain_chunks 的游标)
         self._chunk_cursor = 0
+        # 环境底噪估计(滑动窗口 p10):显示门和 VAD 切句门的共同数据源。
+        # 块长 1024/原生采样率 ≈ 64ms(16k),48 帧 ≈ 3 秒窗口,
+        # 攒够 16 帧(约 1 秒)才开始给估计 —— 之前返回 None,调用方兜底。
+        #
+        # ⚠️ **跨轮保留**:故意不在 start()/stop() 里重置。底噪是房间
+        # 和设备的属性,不会一轮一变;留着上一轮的窗口,第二轮录音
+        # 一开始就有先验,不用再等一秒冷启动。换设备才需要重新收敛,
+        # 而 Recorder 本身就是换设备就重建的。
+        self._noise = NoiseFloorTracker(
+            window=level_window, min_samples=min(16, level_window))
 
     # ---------- 状态 ----------
 
@@ -93,6 +104,15 @@ class Recorder:
         """最近的音量电平序列(用于实时波形)。"""
         with self._lock:
             return list(self._levels)
+
+    def noise_floor(self) -> float | None:
+        """环境底噪估计(线性 RMS);样本不足返回 None。
+
+        显示门(电平条)和切句门(VAD)都从这里取 —— 底噪是房间和
+        设备的属性,只能有一个真相。冷启动(窗口没攒够)返回 None,
+        调用方自行兜底,别把 None 当 0 用。
+        """
+        return self._noise.floor()
 
     # ---------- 控制 ----------
 
@@ -130,7 +150,11 @@ class Recorder:
         with self._lock:
             self._frames.append(indata.copy())
             arr = np.asarray(indata, dtype=np.float32).reshape(-1) / 32768.0
-            self._levels.append(float(np.sqrt(np.mean(arr**2))))
+            rms = float(np.sqrt(np.mean(arr**2)))
+            self._levels.append(rms)
+            # 同一个 RMS 顺手喂给底噪估计器 —— 它和电平条看的是
+            # 同一串帧,不该有第二份数据源
+            self._noise.update(rms)
 
     def stop(self) -> np.ndarray:
         """停止录音并返回**原生采样率**的单声道 int16 音频。

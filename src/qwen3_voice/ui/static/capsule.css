@@ -52,6 +52,14 @@
   --err-fg: #fecaca;
   --err-icon: #fca5a5;
 
+  /* 警告态:内容**已经拿到了**(识别成功、字也在剪贴板里),
+     只是没送进目标窗口 —— 这种情况用琥珀色而不是错误红:
+     红是"彻底失败",琥珀是"成了但没到",用户该做的动作不一样。 */
+  --warn-bg: #2a1f0b;
+  --warn-stroke: #fbbf244d;
+  --warn-fg: #fde68a;
+  --warn-icon: #fcd34d;
+
   --cancel-btn: #3a3a3e;
   --cancel-btn-hover: #4a4a4f;
 
@@ -90,6 +98,10 @@
     --err-stroke: rgba(229, 72, 77, 0.35);
     --err-fg: #b91c1c;
     --err-icon: #b91c1c;
+    --warn-bg: #fffbeb;
+    --warn-stroke: rgba(217, 119, 6, 0.35);
+    --warn-fg: #b45309;
+    --warn-icon: #b45309;
     --cancel-btn: #ececee;
     --cancel-btn-hover: #e4e4e7;
     --state-bg: rgba(17, 17, 19, 0.08);
@@ -110,6 +122,10 @@
   --err-stroke: rgba(229, 72, 77, 0.35);
   --err-fg: #b91c1c;
   --err-icon: #b91c1c;
+  --warn-bg: #fffbeb;
+  --warn-stroke: rgba(217, 119, 6, 0.35);
+  --warn-fg: #b45309;
+  --warn-icon: #b45309;
   --cancel-btn: #ececee;
   --cancel-btn-hover: #e4e4e7;
   --state-bg: rgba(17, 17, 19, 0.08);
@@ -215,9 +231,15 @@ body {
   display: none;
 }
 
-/* 可拖动:只有「自定义」位置模式才给这个提示 */
+/* 可拖动:只有「自定义」位置模式才给这个提示。
+   光标用 grab(小手)而不是 move(四向十字):move 看着像"能挪动
+   窗口",grab 才是在说"这块能抓着拖"。拖动进行中换 grabbing。 */
 .can-drag .recording-pill {
-  cursor: move;
+  cursor: grab;
+}
+
+body.capsule-dragging .recording-pill {
+  cursor: grabbing;
 }
 
 /* 错误态：暗红底 + 红描边 + 浅红字（沿用 OpenType 的 error 配色） */
@@ -225,6 +247,35 @@ body {
   background: var(--err-bg);
   border-color: var(--err-stroke);
   color: var(--err-fg);
+}
+
+/* 警告态：琥珀底 + 琥珀描边。
+   用于"内容拿到了、只是没送出去"——文字还在剪贴板里,
+   用户自己能捞回来,不是彻底失败。 */
+.textbar.is-warning {
+  background: var(--warn-bg);
+  border-color: var(--warn-stroke);
+  color: var(--warn-fg);
+}
+
+/* 报告与正文要有一道**明确的界**:上面是失败说明(报告),
+   下面是识别出来的正文 —— 用户真正要的东西。
+   报告是短句、正文可能是长段,没有分隔就分不清哪句是哪句。 */
+.textbar-report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.textbar.has-report .textbar-report {
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--warn-stroke);
+  /* 报告钉在顶部:正文再长(文字条内部会滚动),失败原因也一直看得见。
+     background: inherit 是必需的 —— 钉住的内容从底下滚过时,
+     不铺底色会透出下面的正文。 */
+  position: sticky;
+  top: 0;
+  background: inherit;
 }
 
 /* 取消态：中性灰,不惊动用户 */
@@ -411,7 +462,11 @@ body {
 .recording-pill.error { background: var(--err-bg); border-color: var(--err-stroke); }
 .recording-pill.error .bar-label { color: var(--err-fg); }
 .recording-pill.error .bar-state { background: var(--state-bg); color: var(--err-icon); }
-.recording-pill:not(.recording):not(.done):not(.error):not(.cancelled) .bar-state svg { animation: bar-spin 1.1s linear infinite; }
+/* 警告态:内容拿到了、只是没送出去 —— 琥珀色,别跟"彻底失败"一个色 */
+.recording-pill.warning { background: var(--warn-bg); border-color: var(--warn-stroke); }
+.recording-pill.warning .bar-label { color: var(--warn-fg); }
+.recording-pill.warning .bar-state { background: var(--state-bg); color: var(--warn-icon); }
+.recording-pill:not(.recording):not(.done):not(.error):not(.warning):not(.cancelled) .bar-state svg { animation: bar-spin 1.1s linear infinite; }
 @keyframes bar-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .bar-state svg { animation: none !important; } }
 

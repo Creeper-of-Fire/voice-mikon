@@ -11,6 +11,10 @@
   <div class="stack" id="stack">
     <!-- 上方：文字条。录音时是实时预览,结束/出错/取消时定格成最终文案 -->
     <div class="textbar" id="textbar">
+      <!-- 失败报告：在正文**上方**，与正文之间有一道明确的分隔。
+           内容拿到了（报告 + 正文都显示在这块），失败原因不该被
+           挤进正文里让人分不清哪句是哪句。 -->
+      <div class="textbar-report" id="textbarReport"></div>
       <div class="textbar-text" id="textbarText"></div>
     </div>
 

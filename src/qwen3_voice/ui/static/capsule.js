@@ -74,11 +74,15 @@
     processing: '识别中…',
     done: '已输入',
     error: '出错了',
+    /* 警告态:识别是成功的,内容也在(剪贴板里),只是没送进目标窗口。
+       胶囊里只放这么一句短的 —— 详细报告在上面的文字条里,
+       一长串塞进胶囊会把胶囊撑得很宽,看着奇怪。 */
+    warning: '没送出去',
     cancelled: '已取消'
   };
 
   // 阶段类名(和 OpenType 一样用 class 挂在胶囊上)
-  var PHASES = ['recording', 'processing', 'done', 'error', 'cancelled'];
+  var PHASES = ['recording', 'processing', 'done', 'error', 'warning', 'cancelled'];
 
   // 文字条在还没有内容时的占位
   var PLACEHOLDER = '正在聆听…';
@@ -407,8 +411,11 @@
     // 两种情况都要把文字条清空:留着上一轮的旧内容,
     // 切回"开"的时候会闪一下
     if (el.textbar) {
-      el.textbar.classList.remove('is-error', 'is-cancelled');
+      el.textbar.classList.remove('is-error', 'is-warning', 'is-cancelled', 'has-report');
       el.textbar.classList.add('is-empty');
+    }
+    if (el.textbarReport) {
+      el.textbarReport.textContent = '';
     }
     if (el.textbarText) {
       el.textbarText.textContent = '';
@@ -821,24 +828,35 @@
 
   /* ==================== 文字条 ==================== */
 
-  // 写文字条内容。kind 决定配色：normal / error / cancelled
+  // 写文字条内容。kind 决定配色：normal / warning / error / cancelled
+  //
+  // report 是**失败报告**(可选):显示在正文**上方**,中间有分隔。
+  // 有原文时,正文是"识别出来的内容",报告是"为什么没送出去" ——
+  // 两段话混在一起,用户分不清哪句是自己要的。
   //
   // 预览关掉的时候**一个字都不写**:文字条整块都不该出现
   // (CSS 里 .no-preview 把它 display:none,这里保证内容也是空的,
   //  免得切回"开"的时候闪出上一轮的旧内容)。
-  function writeText(text, kind) {
+  function writeText(text, kind, report) {
     if (!ui.previewEnabled) {
       return;
     }
     var value = text == null ? '' : String(text);
+    var note = report == null ? '' : String(report);
     if (el.textbar) {
-      el.textbar.classList.remove('is-empty', 'is-error', 'is-cancelled');
+      el.textbar.classList.remove('is-empty', 'is-error', 'is-warning', 'is-cancelled');
       if (kind === 'error') {
         el.textbar.classList.add('is-error');
+      } else if (kind === 'warning') {
+        el.textbar.classList.add('is-warning');
       } else if (kind === 'cancelled') {
         el.textbar.classList.add('is-cancelled');
       }
-      el.textbar.classList.toggle('is-empty', !value.trim());
+      el.textbar.classList.toggle('is-empty', !value.trim() && !note.trim());
+      el.textbar.classList.toggle('has-report', !!note.trim());
+    }
+    if (el.textbarReport) {
+      el.textbarReport.textContent = note.trim() ? note : '';
     }
     if (el.textbarText) {
       el.textbarText.textContent = value.trim() ? value : PLACEHOLDER;
@@ -1154,6 +1172,10 @@
     drag.startWinX = window.screenX;
     drag.startWinY = window.screenY;
     drag.pending = null;
+    // 拖动期间光标换成"抓"的手势(grabbing),放手恢复 grab
+    if (document.body) {
+      document.body.classList.add('capsule-dragging');
+    }
     document.addEventListener('mousemove', onDragMove, false);
     document.addEventListener('mouseup', onDragEnd, false);
     // 告诉 Python:拖动期间别抢回焦点(焦点来回跳会拖垮鼠标捕获)
@@ -1193,6 +1215,9 @@
     drag.active = false;
     document.removeEventListener('mousemove', onDragMove, false);
     document.removeEventListener('mouseup', onDragEnd, false);
+    if (document.body) {
+      document.body.classList.remove('capsule-dragging');
+    }
     if (drag.raf) {
       cancelAnimationFrame(drag.raf);
       drag.raf = 0;
@@ -1287,12 +1312,12 @@
     },
     setPreview: function (text) {
       // 实时预览：每次都是整体替换（后端每次重新识别全部音频）。
-      // 终态(done/error/cancelled)后,控制器还会紧跟一对
-      // preview("") 用来清预览 —— 那一下会把刚定格的结果/红底错误
+      // 终态(done/error/warning/cancelled)后,控制器还会紧跟一对
+      // preview("") 用来清预览 —— 那一下会把刚定格的结果/警告色
       // 文案抹回占位符(后端同批先发 result 再发 preview)。
       // 终态的清场只认 resetForRecording(新一轮录音)。
       if (ui.phase === 'done' || ui.phase === 'error'
-          || ui.phase === 'cancelled') {
+          || ui.phase === 'warning' || ui.phase === 'cancelled') {
         return;
       }
       // 预览关着:文字条整块都不出现,一个字都不写
@@ -1314,24 +1339,30 @@
       var raw = payload == null ? '' : String(payload);
       ui.errorPayload = raw;
       ui.copying = false;
-      // 带原文 = 注入失败那一类:文字条显示**识别原文**(用户要的
-      // 就是这段话),胶囊里给一个「复制」按钮。没有原文的错误
-      // (没听清 / 识别失败)不给按钮 —— 没东西可复制。
+      // 带原文 = 注入失败那一类:识别是**成功**的,内容也拿到了
+      // (字在剪贴板里),只是没送进目标窗口。这不是"彻底失败",
+      // 是**警告** —— 文字条用琥珀色,报告排在正文上方,中间有分隔,
+      // 胶囊里只留一句短提示(长文案会把胶囊撑宽,看着奇怪)。
+      // 没有原文的错误(没听清 / 识别失败)才是真的失败 —— 错误色。
       var canCopy = !!raw.trim();
       if (el.pill) {
         el.pill.classList.toggle('can-copy', canCopy);
       }
-      // 失败原因(msg)**一律进胶囊里的 label 位**,不进文字条:
-      // 文字条是给"识别出来的内容"看的,把失败原因混进去,两段话
-      // 挤在一起谁也分不清;胶囊那个位本来就是放状态文字的。
-      // 文字条也不染成错误色 —— 错误态由胶囊承担,文字条只管内容。
-      if (canCopy && ui.previewEnabled) {
-        writeText(raw, 'normal');
+      if (canCopy) {
+        if (ui.previewEnabled) {
+          writeText(raw, 'warning', msg);
+          setPhase('warning');
+        } else {
+          // 预览关着:文字条整块不显示,报告只能进胶囊的 label 位
+          // (一行截断即可)。
+          setPhase('warning', msg);
+        }
       } else if (ui.previewEnabled) {
-        // 没有原文可捞:文字条只能显示失败原因(但不染色)
-        writeText(msg, 'normal');
+        writeText(msg, 'error');
+        setPhase('error');
+      } else {
+        setPhase('error', msg);
       }
-      setPhase('error', msg);
       scheduleCollapse();
     },
     setCancelled: function () {
@@ -1400,6 +1431,7 @@
   function bindDom() {
     el.textbar = $('textbar');
     el.textbarText = $('textbarText');
+    el.textbarReport = $('textbarReport');
     el.pill = $('pill');
     el.waveform = $('waveform');
     el.barLabel = $('barLabel');

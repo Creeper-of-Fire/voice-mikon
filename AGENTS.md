@@ -29,20 +29,30 @@ portable 约定(数据只进 `data/`)见上级目录 `../AGENTS.md`。
   销毁时**连带清空剪贴板** —— 建在录音线程上会让"识别结果留在剪贴板"
   这个兜底直接失效,还会让后续 `OpenClipboard(死句柄)` 全线失败。
   进程退出前要 `release_ownership()`(把所有权转给 NULL,内容留住)。
-- **窗口裁形必须贴合可见内容,否则会露出 Form 灰底**:pywebview 的
-  transparent 分支**不设 `Form.BackColor`**,默认就是 WinForms 灰
-  `#F0F0F0` —— WebView2 透明的地方透出的是这块灰,不是桌面。所以
-  `SetWindowRgn` 裁出来的形状只要比不透明内容大一点,就露一圈灰
-  (用户看到的"球外面包着一块灰色矩形")。
-  - 球是**圆形** → 用**椭圆**裁(`CreateEllipticRgn`),矩形裁必然露四个角
-  - 浮层(右键菜单/提示)必须**单独上报一块**(`overlay`),不能并进球的
-    包围盒 —— 并进去就是"球到菜单"的大矩形,中间全空白,全是灰
-  - 别再去"重设 WebView2 透明底色"治这个 —— 根因不是 WebView2 丢透明,
-    是裁形不对(那次误诊的修法已经撤掉了)
+- **真透明与裁形(2026-11-07 重定型)**:
+  - 灰底的根因不在裁形:pywebview 建 hidden 窗口的透明 hack
+    (`Opacity=0 → Show() → Hide() → Opacity=1`,winforms 后端的
+    ``on_navigation_start``)会**摘掉 WS_EX_LAYERED**,窗口退回
+    WinForms 默认灰底 `#F0F0F0`。修法见 ``capsule.py`` 的
+    `_ensure_transparent_surface`:shown 事件(正好落在 hack 之后)
+    补挂 layered + force 重传透明 surface —— 顺序必须先挂 layered
+    再传 surface,反了 UpdateLayeredWindow 必然失败。修完之后
+    WebView2 透明的地方透出的是桌面,不再是灰底。
+  - 裁形:胶囊与球**统一按矩形**裁,不再按"控制器状态猜形态"分圆/
+    椭圆 —— 状态切换和形状变化不是同一拍,收回动画期间状态先切、
+    形状后变,会把长条胶囊裁成怪椭圆(实测)。矩形多出的四角是
+    "看不见但能点"的边,有鼠标穿透兜着,不影响观感。文字条/浮层
+    仍按圆角矩形裁(14px/12px)。`api.py` 的 `ellipses` 形参已无
+    调用方(退役中的死代码)。
+  - 浮层(右键菜单/提示)必须**单独上报一块**(`overlay`),不能并进球
+    的包围盒 —— 并进去就是"球到菜单"的大矩形,中间全变成穿透盲区,
+    菜单还会被裁断。
+  - 别再去"重设 WebView2 透明底色"治灰底 —— 根因是 pywebview 摘了
+    layered,不是 WebView2 丢透明。
 - **HTML 的 `hidden` 属性会被作者样式的 `display` 架空**:UA 样式表的
   `[hidden]{display:none}` 优先级低于作者的 `.x{display:flex}` —— 元素
   照样占布局(只是 `opacity:0` 看不见),实测把命中区包围盒撑大一大块,
-  连带露出上面那条灰底。给弹层加 `display` 时必须同时写
+  留下一大片能点但看不见的空边。给弹层加 `display` 时必须同时写
   `.x[hidden]{display:none}`。
 
 ## 词表

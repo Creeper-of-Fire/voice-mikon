@@ -339,7 +339,7 @@ Python 侧通过 `window.evaluate_js(...)` 调用 JS 全局命名空间 `window.
 | 环节 | 谁做 | 说明 |
 |---|---|---|
 | 显示球 | Python `capsule.py` | 前端就绪后**等 0.3s** 再露脸:窗口是固定尺寸的透明窗,必须等前端把"球"那一小块报上来、Python 裁好命中区之后才能露脸 |
-| 命中区 | 前端 → Python | 待机时只上报 `pill` 一块(球就是收窄的胶囊,Python 侧按**椭圆**裁);展开后上报 `textbar` + `pill` 两块(和原来一样) |
+| 命中区 | 前端 → Python | 待机时只上报 `pill` 一块(球就是收窄的胶囊,Python 侧按**矩形**裁);展开后上报 `textbar` + `pill` 两块(和原来一样) |
 | 点击/拖动 | 前端 | pinned/custom 档:按下后位移超过 **5 个逻辑像素**才算拖动,否则算点击。跟随档**没有拖动**(球拖不动),但仍要分清"点了一下"和"按着划走" —— 后者不该触发录音 |
 | 点球开始录音 | 前端 → Python → 控制器 | **先把前台还给用户**,再 `controller.start_recording()`;模型还在加载(`STARTING`)时控制器会拒绝,Python 侧随即推 `setOrbHint("模型加载中…")` —— "点了没反应"在用户眼里就是"球坏了",必须给一句提示 |
 | 右键菜单 | 前端 → Python | 球形态下右键弹通用功能菜单(展示框 + 一排小圆圈,以后加新功能都往这里放)。现有两项:「设置」→ `open_panel()`、「退出」→ `quit_app()`。菜单显示时命中区要把菜单**单独报一块**(`overlay`),不能并进球的包围盒(并进去就是一大片灰底,菜单还会被裁断) |
@@ -625,8 +625,8 @@ pywebview 的透明窗口一旦被 `SetWindowPos` 改过尺寸,WebView2 就会
 |---|---|---|
 | 量矩形 | 前端 `capsule.js` | `offsetLeft/Top/Width/Height`(布局尺寸,**不受 transform 影响**),**CSS 逻辑像素**、相对视口 |
 | 上报 | 前端 → Python | `window.pywebview.api.update_regions(payload)`,60ms 合并一次;球↔胶囊形变期间**每 50ms 报一次**(宽度一直在变) |
-| 换算 | Python `capsule.py` | 逻辑 × DPI 缩放 = 物理像素,每边再外扩 8 物理像素(椭圆/浮层用 2) |
-| 裁窗口 | `win32/api.py` | `CreateRectRgn` / `CreateEllipticRgn` ×N → `CombineRgn(RGN_OR)` → `SetWindowRgn` |
+| 换算 | Python `capsule.py` | 逻辑 × DPI 缩放 = 物理像素,每边再外扩 3 物理像素(全部块统一,盖住抗锯齿带) |
+| 裁窗口 | `win32/api.py` | `CreateRectRgn`(胶囊/球) / `CreateRoundRectRgn`(文字条/浮层) ×N → `CombineRgn(RGN_OR)` → `SetWindowRgn` |
 
 payload 格式:
 
@@ -642,15 +642,17 @@ payload 格式:
 
 几个坑:
 
-- **裁形必须贴合可见内容,否则会露出 Form 灰底**:pywebview 的
-  transparent 分支**不设 `Form.BackColor`**,默认就是 WinForms 灰
-  `#F0F0F0` —— WebView2 透明的地方透出的是这块灰,不是桌面。裁出来的
-  形状比不透明内容大一点,就露一圈灰(用户看到的"球外面包着一块灰色
-  矩形")。所以:
-  - 球是**圆形** → 用**椭圆**裁(`CreateEllipticRgn`),矩形裁必然露四个角;
-  - 浮层**单独一块**上报,**不能并进 `pill` 的包围盒** —— 并进去就是
-    "球到菜单"的大矩形,中间全空白,整块都是灰(实测:球上方罩着一大片
-    灰色,菜单还被裁断)。
+- **灰底的根因是 pywebview 摘了 layered,不是裁形**:它的建窗透明
+  hack(`Opacity=0 → Show() → Hide() → Opacity=1`)会摘掉
+  `WS_EX_LAYERED`,窗口退回 WinForms 灰底 `#F0F0F0`。修法在
+  `capsule.py` 的 `_ensure_transparent_surface`(shown 事件补挂
+  layered + force 重传 surface,先挂再传)。
+- **胶囊与球统一按矩形裁**(2026-11-07 拍板):按控制器状态猜形态分圆/
+  椭圆会在收回动画期间把长条胶囊裁成怪椭圆(状态先切、形状后变);
+  矩形多出的四角是"看不见但能点"的边,有鼠标穿透兜着。文字条/浮层
+  仍按圆角矩形裁(14px/12px)。
+- 浮层**单独一块**上报,**不能并进 `pill` 的包围盒** —— 并进去就是
+  "球到菜单"的大矩形,中间全变成穿透盲区(实测:菜单还被裁断)。
 - **量矩形要用 `offset*`,不能用 `getBoundingClientRect()`**:后者会把
   CSS `transform` 一起算进去,量到的是"动画中"的矩形。按它裁窗口,
   描边两端就被切掉(实测:上下边线在两端断开)。现在球↔胶囊的形变

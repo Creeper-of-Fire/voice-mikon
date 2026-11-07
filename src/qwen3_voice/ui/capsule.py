@@ -227,13 +227,6 @@ _STATE_NAMES = {
 # 约 1.75 像素的抗锯齿带,又不至于把一大片空白收回窗口里。
 REGION_MARGIN = 3
 
-# 椭圆裁形(球形态)用的余量(**物理**像素)。
-#
-# 矩形裁形比圆形球大,四角会多出一块 —— 用椭圆裁才贴合圆球。
-# 同样收到 3:球周围那一圈多出来的边在真透明下是"能点但看不见",
-# 用户点球旁边的空气却点到了胶囊。
-ELLIPSE_MARGIN = 3
-
 # 圆角矩形的圆角半径(**逻辑** CSS 像素,取自 capsule.css)。
 #
 # 裁形要贴合真实外形,不然边缘会被切:胶囊是**跑道形**(radius 999px,
@@ -1171,14 +1164,18 @@ class VoiceCapsule:
         self._ensure_transparent_surface(hwnd)
 
         scale = self._scale()
-        # 裁形要**贴合真实外形**:
-        #   球     -> 圆形(椭圆)
-        #   胶囊   -> 跑道形(圆角矩形,两端是半圆)
-        #   文字条 -> 14px 圆角矩形
-        #   浮层   -> 12px 圆角矩形
-        # 形状不对的代价很直接:裁形比内容大,多出来的那圈是"看不见
-        # 却能点"的边(点空白处会被胶囊吃掉);裁形比内容小,边缘被切硬。
-        ball = self._orb_is_ball()
+        # 裁形:
+        #   胶囊/球 -> 矩形
+        #   文字条  -> 14px 圆角矩形
+        #   浮层    -> 12px 圆角矩形
+        #
+        # 胶囊和球都按**矩形**裁,不按"猜出来的形态"分圆/椭圆:
+        # 猜形态靠的是控制器状态(录音中=胶囊,其余=球),而状态切换
+        # 和形状变化不是同一拍 —— 收回动画期间状态先切、形状后变,
+        # 那一拍就会把长条胶囊裁成一个奇怪的椭圆(实测见过)。
+        # 矩形不会切出这种怪形状;四角多出来的那点边是"看不见但
+        # 能点"的区域,有鼠标穿透兜着,不影响观感。
+        #
         # 形状那一项**必须就是**列表里的那项(set_window_regions 按
         # 坐标相等来认),不能另算一份 —— 两份坐标对不上就静默回落成
         # 矩形(实测踩过)。
@@ -1202,15 +1199,9 @@ class VoiceCapsule:
             x, y, w, h = rect
             if w <= 0 or h <= 0:
                 continue        # 隐藏的块不参与并集
-            if key == "pill" and ball:
-                # 球:圆形,椭圆裁
-                piece = expand(rect, ELLIPSE_MARGIN)
-                ellipses.add(piece)
-            elif key == "pill":
-                # 胶囊:跑道形 —— 圆角半径取高度的一半,两端就是半圆。
-                # 拿椭圆裁会把跑道形的两端切掉一大块(实测误切 17.9%)。
+            if key == "pill":
+                # 胶囊与球统一按矩形裁(见上面的说明)
                 piece = expand(rect, REGION_MARGIN)
-                round_rects[piece] = int(round(h * scale / 2))
             elif key == "overlay":
                 # 浮层(菜单/提示):12px 圆角矩形
                 piece = expand(rect, REGION_MARGIN)
@@ -1286,17 +1277,6 @@ class VoiceCapsule:
                 log.info("已上传透明 surface: %sx%s", size[0], size[1])
         except Exception as e:
             log.info("上传透明 surface 失败: %s", e)
-
-    def _orb_is_ball(self) -> bool:
-        """当前是不是"球形态"(常驻球待机、没展开成胶囊)。
-
-        判断依据用控制器状态:录音中 = 胶囊形态,其余 = 球形态。
-        """
-        try:
-            return (self._orb_enabled()
-                    and self.controller.state != State.RECORDING)
-        except Exception:
-            return False
 
     # ---------- 尺寸与位置 ----------
 

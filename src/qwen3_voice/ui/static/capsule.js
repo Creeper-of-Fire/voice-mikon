@@ -1316,28 +1316,22 @@
       ui.copying = false;
       // 带原文 = 注入失败那一类:文字条显示**识别原文**(用户要的
       // 就是这段话),胶囊里给一个「复制」按钮。没有原文的错误
-      // (没听清 / 识别失败)只显示文案,不给按钮 —— 没东西可复制。
+      // (没听清 / 识别失败)不给按钮 —— 没东西可复制。
       var canCopy = !!raw.trim();
       if (el.pill) {
         el.pill.classList.toggle('can-copy', canCopy);
       }
-      if (canCopy) {
-        if (ui.previewEnabled) {
-          writeText(raw, 'error');
-          setPhase('error', '点右侧复制');
-        } else {
-          // 预览关着:错误文案进胶囊的 label 位(一行截断即可)。
-          // message 本身要点破兜底出口(见 controller),这里不再拼
-          // "点右侧复制" —— 拼了必截断,反而把关键信息挤没了。
-          setPhase('error', msg);
-        }
+      // 失败原因(msg)**一律进胶囊里的 label 位**,不进文字条:
+      // 文字条是给"识别出来的内容"看的,把失败原因混进去,两段话
+      // 挤在一起谁也分不清;胶囊那个位本来就是放状态文字的。
+      // 文字条也不染成错误色 —— 错误态由胶囊承担,文字条只管内容。
+      if (canCopy && ui.previewEnabled) {
+        writeText(raw, 'normal');
       } else if (ui.previewEnabled) {
-        writeText(msg, 'error');
-        setPhase('error');
-      } else {
-        // 预览关着:错误文案进胶囊的 label 位(一行截断即可)
-        setPhase('error', msg);
+        // 没有原文可捞:文字条只能显示失败原因(但不染色)
+        writeText(msg, 'normal');
       }
+      setPhase('error', msg);
       scheduleCollapse();
     },
     setCancelled: function () {

@@ -834,10 +834,19 @@ class VoiceCapsule:
 
         样式其实在 ``_on_before_show`` 里已经设过一次(那时句柄刚可用),
         这里再设一遍是兜底:万一 pywebview 换了版本、before_show 没触发。
+
+        这里还是**补挂 WS_EX_LAYERED 并重传 surface** 的唯一时机:
+        pywebview 建 hidden 窗口的透明 hack(``Opacity=0 → Show() →
+        Hide() → Opacity=1``)跑在 ``before_show`` 之后,会把 layered
+        摘掉。不补的话,窗口退回 WinForms 的默认灰底,内容四周套一圈
+        灰边(见 ``_ensure_transparent_surface`` 的说明)。
         """
         hwnd = self._native_handle()
         if hwnd:
             set_tool_window_style(hwnd)
+            # 补挂 layered + 重传 surface:shown 落在 pywebview 那串
+            # 透明 hack 之后,这时候挂才不会被它摘掉
+            self._ensure_transparent_surface(hwnd, force=True)
         # 窗口建得比事件晚(启动瞬间就按热键)时,这里补一次显示
         if self._state == State.RECORDING:
             self._show()
@@ -1231,7 +1240,7 @@ class VoiceCapsule:
         # 这一步不能省 —— 少了它,胶囊就成了看得见点不着的摆设。
         bring_to_top(hwnd)
 
-    def _ensure_transparent_surface(self, hwnd: int) -> None:
+    def _ensure_transparent_surface(self, hwnd: int, force: bool = False) -> None:
         """给分层窗口上传"几乎全透明"的 surface —— 真透明的底子。
 
         没有它,窗口虽然已经是 layered(WebView2 的透明背景能透出桌面),
@@ -1242,6 +1251,23 @@ class VoiceCapsule:
         只在窗口尺寸变化时重传:重传会吞掉 WebView2 的画面(DWM 要按
         新的 surface 重新裁剪子窗口,而 WebView2 不会主动重绘),
         而胶囊是固定尺寸的,正常一辈子只传一次。
+
+        **两步的顺序不能反**:必须先把 WS_EX_LAYERED 挂上,再传 surface。
+        UpdateLayeredWindow 要求目标窗口是 layered 的,不然直接失败 ——
+        窗口就退回 WinForms 自己画的默认灰底(#F0F0F0),内容四周套着
+        一圈灰边(实测:球 60px,灰边 1~2px)。
+
+        之所以还要再挂一次 layered:pywebview 建 hidden 窗口时有自己
+        的一串透明 hack(winforms 后端 EdgeChrome.on_navigation_start:
+        ``Opacity=0 → Show() → Hide() → Opacity=1``),它会**摘掉**
+        WS_EX_LAYERED。那串 hack 跑在 ``before_show`` **之后**,所以
+        ``_on_before_show`` 里挂的 layered 会被它清掉 —— 只能在
+        ``shown`` 事件里补挂(见 ``_on_window_shown``)。
+
+        force=True 时无视尺寸缓存强行重传:补挂 layered 之后必须重传
+        一次,否则窗口虽然又是 layered,却还挂着摘钩前那张旧 surface。
+        只在 ``shown`` 那个时机用 —— 那时 WebView2 还没画东西,重传
+        吞不掉画面。
         """
         rect = get_window_rect(hwnd)
         if not rect:
@@ -1250,14 +1276,16 @@ class VoiceCapsule:
         size = (right - left, bottom - top)
         if size[0] <= 0 or size[1] <= 0:
             return
-        if self._surface_size == size:
+        if self._surface_size == size and not force:
             return
         try:
+            # 先挂 layered 再传 surface:顺序反了 surface 一定传不上去
+            enable_layered_window(hwnd)
             if upload_transparent_surface(hwnd):
                 self._surface_size = size
-                log.debug("已上传透明 surface: %sx%s", size[0], size[1])
+                log.info("已上传透明 surface: %sx%s", size[0], size[1])
         except Exception as e:
-            log.debug("上传透明 surface 失败: %s", e)
+            log.info("上传透明 surface 失败: %s", e)
 
     def _orb_is_ball(self) -> bool:
         """当前是不是"球形态"(常驻球待机、没展开成胶囊)。

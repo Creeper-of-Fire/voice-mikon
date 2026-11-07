@@ -1,0 +1,2 @@
+# 构建产物 —— 不入库(exe 由 launcher\build.ps1 生成)
+/bin/

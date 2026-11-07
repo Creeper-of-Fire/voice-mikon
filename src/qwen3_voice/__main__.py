@@ -79,10 +79,11 @@ def _project_root_of(path: Path) -> Path:
 def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
     """算出重启该用的命令行、工作目录,以及要提醒用户的话。
 
-    原则:**忠实复刻当初的启动方式**。三种入口分别对应:
+    原则:**忠实复刻当初的启动方式**。四种入口分别对应:
       - 脚本(launch.pyw):[同一个解释器, 同一个脚本的绝对路径]
       - ``-m qwen3_voice``:argv0 是包里的 __main__.py → 保持 ``-m``
       - 冻结 exe(PyInstaller):[exe 自己]
+      - 薄壳 exe(runtime\\bin\\Qwen3Voice.exe):[exe 自己,不带任何参数]
 
     为什么不能一律 ``-m``:解释器可能压根看不见这个包 ——
     桌面快捷方式用的是 base 目录的 pythonw.exe,而 qwen3_voice 只装在
@@ -101,6 +102,20 @@ def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
             # ``python -m qwen3_voice``:解释器本来就看得见包,保持 -m
             return ([sys.executable, "-m", "qwen3_voice"],
                     str(_project_root_of(script)), None)
+
+        if script.suffix.lower() == ".exe":
+            # 薄壳入口(runtime\bin\Qwen3Voice.exe):这个 exe **自己**就是
+            # 跑 Python 的进程(CPython 被装进了它),所以重启只要再起一个
+            # 自己,而且**不能带参数** ——
+            #   Qwen3Voice.exe -m qwen3_voice 是错的:壳根本不转发参数给
+            #   Python,那样起来的新实例会当成有参数而行为异常。
+            # exe 的父目录(runtime\)里放着 pyvenv.cfg 和 launcher.toml,
+            # 新实例照样找得到 venv,工作目录取它的上一级即可。
+            exe = Path(sys.executable)
+            if exe.suffix.lower() != ".exe":
+                # 理论上不会走到这(sys.executable 就是这个壳),兜底用 argv0
+                exe = script
+            return ([str(exe)], str(exe.parent.parent), None)
 
         if script.suffix.lower() in (".py", ".pyw"):
             if script.is_file():

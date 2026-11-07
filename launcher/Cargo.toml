@@ -1,0 +1,24 @@
+[package]
+name = "qwen3-voice-launcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Qwen3 语音输入的启动壳 —— 让真正跑 Python 的那个进程映像名是 Qwen3Voice.exe"
+license = "AGPL-3.0-or-later"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "Qwen3Voice"
+path = "src/main.rs"
+
+# 唯一的依赖:只用在 build.rs 里嵌图标 + 版本资源,运行期零依赖。
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

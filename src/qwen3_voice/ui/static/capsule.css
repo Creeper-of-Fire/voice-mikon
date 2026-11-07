@@ -410,10 +410,10 @@ body.capsule-dragging .recording-pill {
   border-radius: 3px;
   background: currentColor;
   color: var(--wave);
-  transition: transform 80ms linear, height 75ms ease-out;
+  transition: transform 140ms linear, height 75ms ease-out;
 }
 
-/* 静音条（电平 ≤ 0.04）：灰色，而不是录音红 */
+/* 静音条（电平 ≤ DEAD_ZONE）：灰色，而不是录音红 */
 .waveform i.is-silent {
   color: var(--wave-dim);
 }

@@ -54,6 +54,15 @@ portable 约定(数据只进 `data/`)见上级目录 `../AGENTS.md`。
   照样占布局(只是 `opacity:0` 看不见),实测把命中区包围盒撑大一大块,
   留下一大片能点但看不见的空边。给弹层加 `display` 时必须同时写
   `.x[hidden]{display:none}`。
+- **附属工具放 `companions/`,架构彻底独立**(用户拍板,现有
+  `companions/qr_scanner/` 二维码扫描):与主包**零 import**(双向都不
+  认识对方);主程序只经 `__main__.make_qr_scanner_launcher` 用
+  subprocess 拉起
+  独立进程 —— 不等它、不接管它、它崩了不相干。工具 UI 用自己的技术栈
+  (tkinter),**不碰 pywebview**。依赖进主项目 pyproject 的可选组
+  (`[project.optional-dependencies]`),共用主程序同一个 venv。
+  往球菜单加新功能时按这个模式走:菜单按钮 + `JsApi` 桥接方法 +
+  `set_xxx` 注入回调,工具本体进 companions。
 
 ## 词表
 - 词表以用户在 `data/hotwords_user.tsv` 的编辑为准(可指定必收/拉黑),

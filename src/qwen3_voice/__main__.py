@@ -166,6 +166,42 @@ def _spawn_restart(logger, entry: _Entry | None = None) -> None:
         logger.error("重启失败,请手动启动程序: %s", e)
 
 
+def make_qr_scanner_launcher():
+    """构造「拉起二维码扫描附属工具」的回调(球菜单「二维码扫描」用)。
+
+    附属工具住在 companions/qr_scanner,**架构上完全独立**:它不
+    import 本包,我们也只负责把它作为独立进程拉起 —— 不等它、不看
+    它的输出、不管它的死活;它崩了不影响语音主程序,依赖缺失时它
+    自己会弹窗报告。
+
+    定位用 PROJECT_DIR(源码布局:包知道自己住在仓库里)—— 本项目
+    就是源码运行,从 site-packages 反推 companions 反而不可靠。
+    """
+    import subprocess
+
+    tool_dir = PROJECT_DIR / "companions" / "qr_scanner"
+    logger = get_logger("main")  # main() 里的 logger 是局部变量,这里自己拿
+
+    def launch() -> None:
+        if not (tool_dir / "qr_scanner" / "__main__.py").is_file():
+            logger.error("二维码扫描工具不见了:%s", tool_dir)
+            return
+        try:
+            # CREATE_NO_WINDOW:python.exe 是控制台程序,从 GUI 进程
+            # 拉起会闪黑框,压掉。cwd 指到工具目录,-m 才找得到包。
+            subprocess.Popen(
+                [sys.executable, "-m", "qr_scanner"],
+                cwd=str(tool_dir),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                close_fds=True,
+            )
+            logger.info("二维码扫描:已拉起附属工具(%s)", tool_dir)
+        except OSError as e:
+            logger.error("拉起二维码扫描工具失败: %s", e)
+
+    return launch
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 
@@ -226,11 +262,13 @@ def main(argv: list[str] | None = None) -> int:
 
     tray = TrayIcon(controller, panel=panel, config_path=config_path())
 
-    # 悬浮球右键菜单的两个出口(通用功能入口,用户拍板的第一批):
-    #   「设置」直接显示面板;「退出」复用托盘同一条清理路径
-    #   (热键注销 → 窗口销毁 → 主循环返回),不是简单 kill。
+    # 悬浮球右键菜单的三个出口(通用功能入口,用户拍板的第一批):
+    #   「设置」直接显示面板;「二维码扫描」拉起附属工具(独立进程);
+    #   「退出」复用托盘同一条清理路径(热键注销 → 窗口销毁 → 主循环
+    #   返回),不是简单 kill。
     capsule.set_panel_opener(panel.show)
     capsule.set_quit_handler(tray.quit)
+    capsule.set_qr_scanner_launcher(make_qr_scanner_launcher())
 
     def run_tray():
         try:

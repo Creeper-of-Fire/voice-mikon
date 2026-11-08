@@ -675,7 +675,8 @@
   /* ==================== 球的右键菜单与操作提示 ==================== */
 
   /* 右键菜单是球的**通用功能入口**(用户定的形态:展示框 + 一排小
-   * 圆圈,以后加新功能都往这里放)。现在两项:打开设置面板 / 退出。
+   * 圆圈,以后加新功能都往这里放)。现在三项:打开设置面板 /
+   * 二维码扫描(附属工具,独立进程) / 退出。
    * 退出走 Python 侧注入的回调,和托盘「退出」同一条清理路径。 */
 
   var hintTimer = 0;
@@ -1269,11 +1270,17 @@
       el.pill.addEventListener('contextmenu', onOrbContextMenu, false);
     }
 
-    // 菜单里的两个出口(点击后 Python 侧才真正执行)
+    // 菜单里的三个出口(点击后 Python 侧才真正执行)
     if (el.menuSettings) {
       el.menuSettings.addEventListener('click', function () {
         closeOrbMenu(true);
         callApi('open_panel');
+      });
+    }
+    if (el.menuQr) {
+      el.menuQr.addEventListener('click', function () {
+        closeOrbMenu(true);
+        callApi('launch_qr_scanner');
       });
     }
     if (el.menuQuit) {
@@ -1461,6 +1468,7 @@
     el.barOrb = $('barOrb');
     el.orbMenu = $('orbMenu');
     el.menuSettings = $('menuSettings');
+    el.menuQr = $('menuQr');
     el.menuQuit = $('menuQuit');
     el.orbHint = $('orbHint');
 

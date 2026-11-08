@@ -387,6 +387,14 @@ class _CapsuleApi:
         """
         self._capsule._quit_from_menu()
 
+    def launch_qr_scanner(self) -> None:
+        """球菜单里的「二维码扫描」:拉起附属工具(独立进程)。
+
+        拉起器由入口注入(set_qr_scanner_launcher)—— 胶囊只知道
+        "有个工具能拉",工具在哪、怎么跑一概不知(架构隔离)。
+        """
+        self._capsule._launch_qr_from_menu()
+
     def selecting_text(self, selecting: bool) -> None:
         """前端上报"用户正在/结束选文本"。
 
@@ -433,11 +441,13 @@ class VoiceCapsule:
         self._last_foreground = 0
         # 启动守卫只起一次
         self._guard_started = False
-        # 球菜单的两个出口(打开面板 / 退出程序):回调由入口在组装时
-        # 注入(set_panel_opener / set_quit_handler)—— 胶囊不引用面板
-        # 和托盘,只认回调。没注入就当没有这个功能。
+        # 球菜单的三个出口(打开面板 / 二维码扫描 / 退出程序):回调由
+        # 入口在组装时注入(set_panel_opener / set_qr_scanner_launcher /
+        # set_quit_handler)—— 胶囊不引用面板、托盘和附属工具,只认回调。
+        # 没注入就当没有这个功能。
         self._panel_opener: Callable[[], None] | None = None
         self._quit_handler: Callable[[], None] | None = None
+        self._qr_launcher: Callable[[], None] | None = None
 
         # 隐藏定时器:新一轮录音开始时要作废旧的,否则上一轮的
         # 定时器会把刚开始的胶囊又藏掉
@@ -1819,6 +1829,10 @@ class VoiceCapsule:
         """注入「退出程序」的回调(入口组装时调)。"""
         self._quit_handler = fn
 
+    def set_qr_scanner_launcher(self, fn: Callable[[], None] | None) -> None:
+        """注入「拉起二维码扫描工具」的回调(入口组装时调)。"""
+        self._qr_launcher = fn
+
     def _open_panel(self) -> None:
         if self._panel_opener is None:
             return
@@ -1826,6 +1840,14 @@ class VoiceCapsule:
             self._panel_opener()
         except Exception as e:
             log.debug("球菜单打开面板失败: %s", e)
+
+    def _launch_qr_from_menu(self) -> None:
+        if self._qr_launcher is None:
+            return
+        try:
+            self._qr_launcher()
+        except Exception as e:
+            log.debug("球菜单拉起二维码扫描失败: %s", e)
 
     def _quit_from_menu(self) -> None:
         if self._quit_handler is None:

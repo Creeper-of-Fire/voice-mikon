@@ -36,6 +36,13 @@ hotwords = ["jieba>=0.42"]
 # pip install -e ".[uia]"
 uia = ["comtypes>=1.2"]
 
+# 附属工具「二维码扫描」(companions/qr_scanner,悬浮球右键菜单拉起)
+# 用的两个,装不上不影响语音本体 —— 菜单点击时工具自己会弹窗报告。
+#   mss —— 多显示器截屏(物理像素坐标系,与选区窗口一致)
+#   pyzbar —— zbar 码解码(Windows wheel 自带 DLL,零外部依赖)
+# pip install -e ".[qr]"
+qr = ["mss>=10", "pyzbar>=0.1.9"]
+
 [project.scripts]
 qwen3-voice = "qwen3_voice.__main__:main"
 

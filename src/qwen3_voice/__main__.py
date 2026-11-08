@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
@@ -170,12 +171,14 @@ def make_qr_scanner_launcher():
     """构造「拉起二维码扫描附属工具」的回调(球菜单「二维码扫描」用)。
 
     附属工具住在 companions/qr_scanner,**架构上完全独立**:它不
-    import 本包,我们也只负责把它作为独立进程拉起 —— 不等它、不看
-    它的输出、不管它的死活;它崩了不影响语音主程序,依赖缺失时它
-    自己会弹窗报告。
+    import 本包,我们也只负责把它作为**独立进程**拉起 —— 不等它、
+    不看它的输出、不管它的死活;它崩了不影响语音主程序,依赖缺失时
+    它自己会弹窗报告。
 
-    定位用 PROJECT_DIR(源码布局:包知道自己住在仓库里)—— 本项目
-    就是源码运行,从 site-packages 反推 companions 反而不可靠。
+    拉起用的是**本环境真正的 python.exe**(_python_exe_for_children):
+    拉起附属工具就是拉起一个真正的运行时进程,跟壳无关 —— 壳的职责
+    只是"以 Qwen3Voice.exe 的映像名跑主程序",永远不会参与这件事
+    (工具以后换成 Node/Bash 也一样,壳不可能也不应该兼容所有运行时)。
     """
     import subprocess
 
@@ -185,21 +188,91 @@ def make_qr_scanner_launcher():
     def launch() -> None:
         if not (tool_dir / "qr_scanner" / "__main__.py").is_file():
             logger.error("二维码扫描工具不见了:%s", tool_dir)
+            _warn_dialog(
+                "二维码扫描工具缺失:\n{}\n\n可能是不完整的仓库拷贝。".format(tool_dir)
+            )
+            return
+        python_exe = _python_exe_for_children()
+        if python_exe is None:
+            logger.error(
+                "拉不起二维码扫描:认不出本环境的 python.exe(sys.executable=%s)",
+                sys.executable,
+            )
+            _warn_dialog(
+                "拉不起二维码扫描:认不出本环境的 python.exe。\n"
+                "(sys.executable = {})\n\n"
+                "薄壳场景需要 runtime\\launcher.toml 的 venv_site_packages "
+                "指向真实 venv,且该 venv 的 Scripts\\python.exe 存在。".format(
+                    sys.executable
+                )
+            )
             return
         try:
             # CREATE_NO_WINDOW:python.exe 是控制台程序,从 GUI 进程
             # 拉起会闪黑框,压掉。cwd 指到工具目录,-m 才找得到包。
             subprocess.Popen(
-                [sys.executable, "-m", "qr_scanner"],
+                [str(python_exe), "-m", "qr_scanner"],
                 cwd=str(tool_dir),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 close_fds=True,
             )
-            logger.info("二维码扫描:已拉起附属工具(%s)", tool_dir)
+            logger.info("二维码扫描:已拉起附属工具(%s, %s)", python_exe, tool_dir)
         except OSError as e:
             logger.error("拉起二维码扫描工具失败: %s", e)
+            _warn_dialog(f"拉起二维码扫描工具失败:\n{e}")
 
-    return launch
+
+def _python_exe_for_children(exe: str | None = None) -> Path | None:
+    """返回本环境**真正的解释器**,拉起附属子进程时用;认不出返回 None。
+
+    为什么不能直接拿 sys.executable:薄壳场景(runtime\\bin\\Qwen3Voice.exe)
+    它指向**壳自己** —— 嵌入式初始化按进程映像推导,壳不转发参数,
+    拉起它只会得到第二个主程序(实测:点「二维码扫描」弹出的是新悬浮球)。
+
+    定位(两条路,认不出就 None):
+    - sys.executable 本来就是 python*.exe(脚本 / ``-m`` 入口)→ 直接用。
+      注意:脚本入口若用 base 解释器挂 venv,子进程会缺依赖 —— 工具自己
+      会弹窗报告,不算静默故障。
+    - 薄壳场景:从壳旁的 launcher.toml(venv_site_packages)反推真 venv:
+      site-packages 的上两级是 venv 根,python.exe 在 Scripts\\ 下。
+      这条配置正是壳挂载主程序依赖用的「真实 venv」,同源,不是猜。
+
+    ``exe`` 参数给测试用:模拟薄壳场景时传壳的路径进来。
+    """
+    exe_path = Path(sys.executable if exe is None else exe)
+    if exe_path.stem.lower() in ("python", "pythonw"):
+        return exe_path
+
+    site_pkgs = (
+        os.environ.get("QWEN3_VOICE_VENV_SITE", "").strip()
+        or _launcher_toml_site_packages(exe_path.parent.parent / "launcher.toml")
+    )
+    if not site_pkgs:
+        return None
+    candidate = Path(site_pkgs).parent.parent / "Scripts" / "python.exe"
+    return candidate if candidate.is_file() else None
+
+
+def _launcher_toml_site_packages(toml_path: Path) -> str:
+    """读 launcher.toml 的 venv_site_packages(壳同款配置键);读不到返回空串。"""
+    import tomllib
+
+    try:
+        with open(toml_path, "rb") as f:
+            value = tomllib.load(f).get("venv_site_packages", "")
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _warn_dialog(text: str) -> None:
+    """附属工具拉不起来的提示(和启动期致命错误同一个出口,必须让人看见)。"""
+    try:
+        from .win32.api import show_error_box
+
+        show_error_box(text)
+    except Exception:
+        pass  # 连弹窗都起不来,日志里那份就是全部了
 
 
 def main(argv: list[str] | None = None) -> int:

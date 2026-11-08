@@ -221,6 +221,8 @@ def make_qr_scanner_launcher():
             logger.error("拉起二维码扫描工具失败: %s", e)
             _warn_dialog(f"拉起二维码扫描工具失败:\n{e}")
 
+    return launch
+
 
 def _python_exe_for_children(exe: str | None = None) -> Path | None:
     """返回本环境**真正的解释器**,拉起附属子进程时用;认不出返回 None。

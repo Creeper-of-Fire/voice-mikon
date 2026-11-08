@@ -393,6 +393,7 @@ class _CapsuleApi:
         拉起器由入口注入(set_qr_scanner_launcher)—— 胶囊只知道
         "有个工具能拉",工具在哪、怎么跑一概不知(架构隔离)。
         """
+        log.info("js bridge: launch_qr_scanner 到达 Python")
         self._capsule._launch_qr_from_menu()
 
     def selecting_text(self, selecting: bool) -> None:
@@ -1832,6 +1833,7 @@ class VoiceCapsule:
     def set_qr_scanner_launcher(self, fn: Callable[[], None] | None) -> None:
         """注入「拉起二维码扫描工具」的回调(入口组装时调)。"""
         self._qr_launcher = fn
+        log.info("球菜单「二维码扫描」回调注入: %s", "成功" if fn is not None else "空")
 
     def _open_panel(self) -> None:
         if self._panel_opener is None:
@@ -1842,12 +1844,15 @@ class VoiceCapsule:
             log.debug("球菜单打开面板失败: %s", e)
 
     def _launch_qr_from_menu(self) -> None:
+        # 每一环都留 INFO 痕:菜单点了没反应时,日志必须能说出断在哪
+        log.info("球菜单「二维码扫描」点击进入(回调%s)", "已注入" if self._qr_launcher else "**未注入**")
         if self._qr_launcher is None:
             return
         try:
             self._qr_launcher()
         except Exception as e:
-            log.debug("球菜单拉起二维码扫描失败: %s", e)
+            # 曾是 debug:INFO 日志级别下被吞,点击无声失败查不到现场(踩过)
+            log.error("球菜单拉起二维码扫描失败: %s", e)
 
     def _quit_from_menu(self) -> None:
         if self._quit_handler is None:

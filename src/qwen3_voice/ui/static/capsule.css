@@ -472,20 +472,26 @@ body.capsule-dragging .recording-pill {
 
 /* ---------------- 复制按钮（注入失败时的兜底出口） ---------------- */
 
-/* 默认不出现。只有错误态、而且确实带着可复制的原文时,
+/* 默认不出现。只有错误/警告态、而且确实带着可复制的原文时,
    JS 才给胶囊加 .can-copy —— 那时才把这个按钮亮出来。
-   (不能只靠 .error:识别失败、没听清这些错误没有原文可复制。) */
+   (不能只靠 .error:识别失败、没听清这些错误没有原文可复制。)
+   warning(注入失败带原文)也要亮:它不只是"注入没送达"的提示,
+   有时连剪贴板里都没留下结果 —— 这时按钮是唯一的手动重试出口,
+   必须常驻(用户拍板:相当于手动重试,不能在警告态被藏掉)。 */
 .recording-pill .bar-copy { display: none; }
-.recording-pill.error.can-copy .bar-copy {
+.recording-pill.error.can-copy .bar-copy,
+.recording-pill.warning.can-copy .bar-copy {
   display: grid;
   background: var(--state-bg);
   color: var(--fg);
 }
-.recording-pill.error.can-copy .bar-copy:hover { background: var(--cancel-btn-hover); }
+.recording-pill.error.can-copy .bar-copy:hover,
+.recording-pill.warning.can-copy .bar-copy:hover { background: var(--cancel-btn-hover); }
 
-/* 有复制按钮时,错误图标让位 —— 文案已经说明了出错,
+/* 有复制按钮时,状态图标让位 —— 文案已经说明了出错,
    两个图标并排反而挤。 */
-.recording-pill.error.can-copy .bar-state { display: none; }
+.recording-pill.error.can-copy .bar-state,
+.recording-pill.warning.can-copy .bar-state { display: none; }
 
 /* ---------------- 阶段切换 ---------------- */
 

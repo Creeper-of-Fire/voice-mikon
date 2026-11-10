@@ -137,6 +137,7 @@ from .placement import (
     orb_screen_position,
     orb_window_position,
 )
+from .webview_tweaks import focus_webview
 
 log = get_logger("ui.capsule")
 
@@ -403,6 +404,16 @@ class _CapsuleApi:
         用户按 Ctrl+C 复制不了(框选了却复制不了,实测踩过)。
         """
         self._capsule._on_selecting_text(selecting)
+
+    def focus_textbar(self) -> None:
+        """前端上报"用户按下了文字条":胶囊临时成为前台。
+
+        窗口是 WS_EX_NOACTIVATE,鼠标点击不会激活它 —— WebView2 拿
+        不到键盘焦点,选字后的 Ctrl+C、右键菜单的复制全都使不上劲。
+        文字条是内容区,按下它就是要选字复制,此刻把前台与焦点送
+        过去是明确意图,不算抢。
+        """
+        self._capsule._focus_textbar()
 
 
 class VoiceCapsule:
@@ -1861,6 +1872,18 @@ class VoiceCapsule:
             self._quit_handler()
         except Exception as e:
             log.debug("球菜单退出失败: %s", e)
+
+    def _focus_textbar(self) -> None:
+        """把前台与键盘焦点送给文字条(文字条被按下时,见 JsApi.focus_textbar)。
+
+        restore_foreground 自带 AttachThreadInput,能绕过 Windows 的
+        前台锁(WS_EX_NOACTIVATE 只挡"鼠标点击自动激活",不挡程序化
+        激活);WebView2 控件的内部焦点由 focus_webview 回 UI 线程补。
+        """
+        hwnd = self._native_handle()
+        if hwnd:
+            restore_foreground(hwnd)
+        focus_webview(self._window)
 
     def _window_size(self) -> tuple[int, int] | None:
         """窗口当前的**物理**像素尺寸。

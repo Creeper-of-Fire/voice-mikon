@@ -882,14 +882,20 @@
     scheduleRegionReport();
   }
 
-  /* ==================== 错误态的复制 ==================== */
+  /* ==================== 错误/警告态的复制 ==================== */
 
   // 注入失败时,那段话可能哪儿都没有:目标窗口没收到,剪贴板里
-  // 也未必留下。这个按钮是用户唯一能把内容捞回来的出口 ——
-  // 点一下 → Python 写剪贴板 → **读回校验** → 确认写进去了,
-  // 胶囊自己关掉。写不进去就留在原地,让用户再试一次。
-  function setCopyHint(text) {
-    setPhase('error', text);
+  // 也未必留下(送达判定只认"Ctrl+V 事件投出去了",目标窗口没真正
+  // 收到时,程序以为是成功,还会把原剪贴板恢复回去)。复制按钮是
+  // 用户捞回内容的出口 —— 点一下 → Python 写剪贴板 → **读回校验**
+  // → 确认写进去了,胶囊自己关掉。写不进去就留在原地,再试一次。
+  // 反馈只改胶囊 label 文案,**不动 phase**:警告态下复制失败若把
+  // phase 切到 error,琥珀会变错误红,用户会误以为整轮识别都失败
+  // 了(实际只是这一次没写进去,可以再试)。
+  function setCopyNote(text) {
+    if (el.barLabel) {
+      el.barLabel.textContent = text;
+    }
   }
 
   function onCopyClick() {
@@ -901,7 +907,7 @@
       return;
     }
     ui.copying = true;
-    setCopyHint('复制中…');
+    setCopyNote('复制中…');
     callApiAsync('copy_result', text).then(function (ok) {
       ui.copying = false;
       if (ok) {
@@ -916,7 +922,7 @@
           setExpanded(false);
         }
       } else {
-        setCopyHint('复制失败,再试一次');
+        setCopyNote('复制失败,再试一次');
       }
     });
   }
@@ -1298,6 +1304,14 @@
     // 复制：注入失败时把识别结果手动写进剪贴板
     if (el.copyBtn) {
       el.copyBtn.addEventListener('click', onCopyClick);
+    }
+    if (el.textbar) {
+      // 按下文字条:让胶囊临时成为前台、WebView2 拿到键盘焦点 ——
+      // 窗口默认 NOACTIVATE(不抢用户输入焦点),不主动送焦点的话,
+      // 选字后的 Ctrl+C、右键菜单的复制全都使不上劲(实测踩过)。
+      el.textbar.addEventListener('mousedown', function () {
+        callApi('focus_textbar');
+      }, false);
     }
   }
 

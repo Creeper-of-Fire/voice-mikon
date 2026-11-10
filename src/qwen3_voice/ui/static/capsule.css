@@ -761,6 +761,21 @@ body.orb-loading.orb-idle .bar-orb .orb-loader {
   color: var(--err-fg);
 }
 
+/* ---------------- 可选性(网页本性,不对抗) ----------------
+ * 界面就是网页:可选的内容(识别文字正文)保持网页默认 —— 能选,
+ * 选中后 Ctrl+C 可复制(文字条按下时由 capsule.py 送入前台与
+ * WebView2 焦点,见 webview_tweaks)。
+ * 但 UI 装饰选中一坨毫无意义还污染选区,显式声明不可选:
+ *   - recording-pill  胶囊本体(按钮/图标/计时/状态文字)
+ *   - textbar-report  失败报告行:放的是「没送出去」这类状态短句,
+ *                     不是识别原文(原文在 textbar-text,保持可选)
+ *   - orb-menu / orb-hint  球的菜单与操作提示
+ * 这是"网页默认可选"原则下唯一的例外清单。 */
+.recording-pill,
+.textbar-report,
+.orb-menu,
+.orb-hint { user-select: none; }
+
 /* ---------------- 球的操作提示(气泡) ----------------
  * "点球时模型还在加载"这类一句话反馈:球上方冒出、几秒后自己淡掉。
  * 同一套深底 + 描边;动画全用 opacity,JS 负责定时收尾。 */

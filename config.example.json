@@ -3,6 +3,7 @@
   "model": "0.6B",
   "model_root": "D:\\Dev\\Environments\\models",
   "asr_backend": "local",
+  "backend": "local",
   "dashscope_model": "qwen3-asr-flash",
   "dashscope_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "input_device": null,
@@ -10,6 +11,9 @@
     "USB PnP Audio",
     "USB Audio",
     "Realtek HD Audio Mic"
+  ],
+  "device_hints": [
+    "USB"
   ],
   "sample_rate": 16000,
   "max_duration": 120.0,
@@ -34,6 +38,12 @@
   "orb_position": "follow",
   "orb_geometry": "",
   "orb_monitor": "",
+  "orb": {
+    "enabled": true,
+    "standby": "resident",
+    "geometry": "",
+    "monitor": ""
+  },
   "log_file": "",
   "log_level": "INFO"
 }

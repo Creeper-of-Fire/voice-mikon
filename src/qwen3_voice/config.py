@@ -50,11 +50,49 @@ CAPSULE_POSITION_MODES = ("follow", "bottom", "custom")
 # 但球的档里没有 bottom,却有 pinned)。两边各自演化,不许互相参照。
 ORB_POSITION_MODES = ("follow", "pinned", "custom")
 
+# 悬浮球的待机策略两态(悬球窗口的"待机期"怎么过):
+#   resident   窗口常驻,球形态待机(热键反馈即时)
+#   on_demand  待机时整个窗口销毁,零 WebView2/GPU 占用
+#               (热键时再建窗、恢复位置、展开)
+# 与上面的 ORB_POSITION_MODES(位置档)是两回事:一个管"待不待机",
+# 一个管"球在哪儿"。
+ORB_STANDBY_MODES = ("resident", "on_demand")
+
 # 识别后端(互斥,同一时刻只留一个):
 #   local      本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
 #   dashscope  阿里云百炼 DashScope 网络接口(OpenAI 兼容 HTTP)
 # API Key **不进配置文件** —— 只从环境变量 DASHSCOPE_API_KEY 读。
 ASR_BACKENDS = ("local", "dashscope")
+
+
+@dataclass
+class OrbConfig:
+    r"""悬浮球的配置(v2 schema 里的嵌套 orb 段)。
+
+    单独一个 dataclass,和 v2 的写法保持一致 —— 球的几何位置、
+    所在显示器、待不待机都收在这一段里,不再散成平铺字段。
+
+    字段:
+        enabled   悬浮球开不开
+        standby   待机策略:resident(窗口常驻) / on_demand(待机时销毁窗口)
+        geometry  球的位置记忆:"dx,dy",相对所在工作区左上角的逻辑像素偏移
+        monitor   球的位置记忆的显示器设备名(如 \\.\DISPLAY1):
+                  还原时先找那块屏,找不到就退回当前屏
+    """
+
+    enabled: bool = True
+    standby: str = "resident"
+    geometry: str = ""
+    monitor: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OrbConfig":
+        """只接受已知子键,忽略未知子键(避免旧配置文件导致崩溃)。"""
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(k for k in data if k not in known)
+        if unknown:
+            log.warning("配置键 'orb' 含未知子键(已忽略):%s", ", ".join(unknown))
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -138,6 +176,20 @@ class Config:
     log_file: str = ""
     log_level: str = "INFO"
 
+    # ---- v2 schema 新增字段(expand 阶段:与上面的旧字段并存)
+    #
+    # 下面的 backend / device_hints / orb 是 v2 写法,目前**还没有消费方** ——
+    # 引擎和音频仍读旧的 asr_backend / device_name_hints / floating_orb 等。
+    # 等 host 窗口层落地、contract 阶段把旧字段退役时,再统一切到这组。
+    #
+    # ⚠ backend 与旧的 asr_backend、device_hints 与旧的 device_name_hints
+    #   语义相同(只是 v2 改了名),并存期间**不要**两边都当真值用。
+    #   orb 与旧的 floating_orb / orb_position / orb_geometry / orb_monitor
+    #   同理:v2 把球的几何/显示器/待机策略收进了 orb 这一段。
+    backend: str = "local"                     # local / dashscope(v2 改名)
+    device_hints: list[str] = field(default_factory=lambda: ["USB"])
+    orb: OrbConfig = field(default_factory=OrbConfig)
+
     # ---------- 校验 ----------
 
     def validate(self) -> list[str]:
@@ -166,6 +218,34 @@ class Config:
                 "orb_position 只能是 "
                 f"{' / '.join(ORB_POSITION_MODES)},"
                 f"当前 {self.orb_position!r}")
+
+        # ---- v2 schema 新增字段的校验 ----
+        # 类型检查照 v2 写法(backend 枚举 / device_hints 字符串列表 /
+        # orb.enabled 布尔 / orb.standby 枚举 / orb.geometry、orb.monitor
+        # 字符串),但按本文件的风格统一汇进 issues 列表。
+        if self.backend not in ASR_BACKENDS:
+            issues.append(
+                f"backend 只能是 {' / '.join(ASR_BACKENDS)},"
+                f"当前 {self.backend!r}")
+        if not isinstance(self.device_hints, list) or not all(
+                isinstance(h, str) for h in self.device_hints):
+            issues.append("device_hints 必须是字符串列表")
+        if not isinstance(self.orb, OrbConfig):
+            issues.append(f"orb 必须是对象,当前 {type(self.orb).__name__}")
+        else:
+            if not isinstance(self.orb.enabled, bool):
+                issues.append("orb.enabled 必须是布尔值")
+            if self.orb.standby not in ORB_STANDBY_MODES:
+                issues.append(
+                    "orb.standby 只能是 "
+                    f"{' / '.join(ORB_STANDBY_MODES)},"
+                    f"当前 {self.orb.standby!r}")
+            if self.orb.geometry is not None and not isinstance(
+                    self.orb.geometry, str):
+                issues.append("orb.geometry 必须是字符串")
+            if self.orb.monitor is not None and not isinstance(
+                    self.orb.monitor, str):
+                issues.append("orb.monitor 必须是字符串")
         return issues
 
     # ---------- 序列化 ----------
@@ -178,6 +258,10 @@ class Config:
         """只接受已知字段,忽略未知键(避免旧配置文件导致崩溃)。"""
         known = {f.name for f in fields(cls)}
         clean = {k: v for k, v in data.items() if k in known}
+        # orb 是嵌套对象:配置文件里是一段 dict,这里转成 OrbConfig。
+        # 不是 dict 就原样留着,交给 validate() 报错。
+        if isinstance(clean.get("orb"), dict):
+            clean["orb"] = OrbConfig.from_dict(clean["orb"])
         return cls(**clean)
 
     def save(self, path: Path | None = None) -> None:
@@ -194,6 +278,9 @@ class Config:
         known = {f.name for f in fields(self)}
         for k, v in kwargs.items():
             if k in known:
+                # orb 是嵌套对象:传 dict 就转成 OrbConfig,别让类型漂了。
+                if k == "orb" and isinstance(v, dict):
+                    v = OrbConfig.from_dict(v)
                 setattr(self, k, v)
 
 

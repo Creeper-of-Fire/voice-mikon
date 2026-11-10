@@ -157,6 +157,9 @@ COMPLEXREGION = 3
 gdi32.CreateRectRgn.argtypes = [ctypes.c_int, ctypes.c_int,
                                 ctypes.c_int, ctypes.c_int]
 gdi32.CreateRectRgn.restype = wt.HRGN
+gdi32.CreateEllipticRgn.argtypes = [ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int]
+gdi32.CreateEllipticRgn.restype = wt.HRGN
 gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int]
@@ -345,17 +348,20 @@ def restore_foreground(hwnd: int) -> bool:
     if not hwnd:
         return False
     try:
-        fg = get_foreground_window()
         cur_thread = kernel32.GetCurrentThreadId()
-        pid = wt.DWORD(0)
-        target_thread = user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
-        attached = False
-        if target_thread and target_thread != cur_thread:
-            user32.AttachThreadInput(target_thread, cur_thread, True)
-            attached = True
+        attached: list[int] = []
+        for target in (get_foreground_window(), hwnd):
+            if not target:
+                continue
+            pid = wt.DWORD(0)
+            tid = user32.GetWindowThreadProcessId(
+                wt.HWND(target), ctypes.byref(pid))
+            if tid and tid != cur_thread and tid not in attached:
+                user32.AttachThreadInput(tid, cur_thread, True)
+                attached.append(tid)
         ok = bool(user32.SetForegroundWindow(hwnd))
-        if attached:
-            user32.AttachThreadInput(target_thread, cur_thread, False)
+        for tid in attached:
+            user32.AttachThreadInput(tid, cur_thread, False)
         return ok
     except Exception:
         try:

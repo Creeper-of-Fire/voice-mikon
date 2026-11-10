@@ -12,7 +12,7 @@ portable 约定(数据只进 `data/`)见上级目录 `../AGENTS.md`。
   (踩过的坑:曾用"整段平均 RMS < silence_rms"判静音报「没有检测到声音」,
   静音占比越高越容易被误杀 —— 说得越久反而越容易中招;同一处还有
   "录音太短"那道门。两道门都已删除,别再加回来。)
-- 预览层的 VAD(`asr/streaming.py`)是**断句**用的,不是判定用 ——
+- 预览层的 VAD(`engines/streaming.py`)是**断句**用的,不是判定用 ——
   它只影响实时预览的出字节奏,最终结果永远来自整段识别。它可以留着调。
 - **测试只为"确实要实现的功能"保留**(格式转换、算法、协议编码这类
   有明确对错规范的,现存的 `tests/test_audio|config|engine|engines|hotwords|network_engine.py`),

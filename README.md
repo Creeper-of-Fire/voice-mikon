@@ -362,7 +362,7 @@ src/qwen3_voice/
 │   ├── devices.py       设备枚举与自动选择(带可用性实测)
 │   ├── recorder.py      录音采集(原生采样率采集,重采样交给 qwen_asr)
 │   └── recording_store.py 录音留存:原始音频落成 WAV(调试用)
-├── asr/
+├── engines/
 │   ├── base.py          识别后端抽象:本地/网络共用接口 + 热词(context biasing)
 │   ├── engine.py        本地后端:Qwen3-ASR 封装,支持热切换模型
 │   ├── network.py       网络后端:阿里云百炼 DashScope(OpenAI 兼容 HTTP)
@@ -465,13 +465,13 @@ int16 提升成 float64,此时若再走「浮点音频 × 32768」那条分支,�
 **dtype 判断要在混音之前**
 上面那个坑的通用形态 —— `mean` 会把 int16 提升成 float64,所以
 **先记下原始 dtype,再混音,最后按原始刻度还原**。
-`asr/engine.py:_to_float32` 里如果写成「先 mean 再判断是不是整数」,
+`engines/engine.py:_to_float32` 里如果写成「先 mean 再判断是不是整数」,
 判断就永远不成立,int16 会被当成已归一化的浮点,直接 clip 成 ±1(全幅方波)。
 
 **传给 qwen_asr 的必须是浮点音频**
 `qwen_asr` 内部用 librosa 重采样,而 librosa 只接受浮点 —— 传 int16 会报
 `ParameterError: Audio data must be floating-point`。
-所以 `asr/engine.py:_to_float32` 负责把 int16 转成 [-1,1] 的 float32。
+所以 `engines/engine.py:_to_float32` 负责把 int16 转成 [-1,1] 的 float32。
 
 **热键路径上不能做耗时操作**
 早期版本在按热键时同步做 2 秒设备探测,导致用户按下的前 2 秒说的话全丢。

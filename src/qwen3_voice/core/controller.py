@@ -15,7 +15,7 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
 实时刷新"边说边显示"的文字(事件 kind="preview")。它只是体验,
 最终注入的始终是最终位那次整段识别的结果。
 
-两个插槽,同一套接口(见 ``asr/streaming.py``):
+两个插槽,同一套接口(见 ``engines/streaming.py``):
 
     预览位 —— 要"快":默认分句预览引擎,切句就出字,跟手
     最终位 —— 要"准":固定整段引擎,最终注入的文字只来自它
@@ -38,10 +38,10 @@ from typing import Callable
 
 import numpy as np
 
-from ..asr.base import ASRBackend, ASRError
-from ..asr.engine import LocalASRBackend
-from ..asr.network import DashScopeBackend
-from ..asr.streaming import (
+from ..engines.base import ASRBackend, ASRError
+from ..engines.engine import LocalASRBackend
+from ..engines.network import DashScopeBackend
+from ..engines.streaming import (
     FullPassEngine,
     PreviewEngineKind,
     StreamingEngine,

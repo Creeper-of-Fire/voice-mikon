@@ -3,7 +3,7 @@
 模型常驻显存,按热键时零等待。0.6B / 1.7B 两个尺寸可运行时切换
 (切换会重新加载模型,耗时几秒)。
 
-这是 ``ASRBackend`` 的**本地实现**(见 ``asr/base.py``)——
+这是 ``ASRBackend`` 的**本地实现**(见 ``engines/base.py``)——
 和网络后端 ``DashScopeBackend`` 可互换,控制器只认那个抽象接口。
 热词(context biasing)的逻辑在基类里,两个后端共用。
 """

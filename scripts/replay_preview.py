@@ -43,8 +43,8 @@ _SRC_DIR = _PROJECT_DIR / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from qwen3_voice.asr.engine import ASREngine
-from qwen3_voice.asr.streaming import (
+from qwen3_voice.engines.engine import ASREngine
+from qwen3_voice.engines.streaming import (
     SENTENCE_MAX_SECONDS,
     SENTENCE_MIN_SECONDS,
     SENTENCE_SILENCE_SECONDS,

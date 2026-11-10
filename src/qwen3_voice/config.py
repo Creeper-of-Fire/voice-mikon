@@ -229,7 +229,7 @@ def load_config(path: Path | None = None) -> Config:
     优先级:显式参数 > 环境变量 > data/config.json > config.example.json > 默认值
 
     术语表文件 ``data/hotwords.txt`` 不在这里读 —— 由
-    ``asr/engine.py`` 在每次识别时实时读取(改完立即生效)。
+    ``engines/engine.py`` 在每次识别时实时读取(改完立即生效)。
     """
     ensure_dirs()
 
@@ -253,7 +253,7 @@ def load_config(path: Path | None = None) -> Config:
         cfg = Config()
 
     # 注意:hotwords.txt 文件**不在这里并入** ——
-    # 词表由 asr/engine.py 在每次识别时实时读取(改完立即生效)。
+    # 词表由 engines/engine.py 在每次识别时实时读取(改完立即生效)。
     # 这里只管 config.json 里的静态 hotwords 字段。
 
     # 补全派生字段

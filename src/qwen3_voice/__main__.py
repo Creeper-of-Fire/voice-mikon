@@ -1,37 +1,55 @@
 """应用入口。
 
 线程分工:
-  主线程      调 webview.start() 并等它返回(winforms 后端会把 GUI
-              消息循环放到它自己起的 STA 线程上,主线程只是阻塞等待)
-  hotkey 线程 RegisterHotKey + GetMessage 循环(Win32 消息队列是线程局部的)
-  tray 线程   pystray 自己的消息循环
-  model/mic   后台初始化
-  asr 线程    识别与注入
-  ui-push     面板的推送线程,把控制器事件转成前端调用(面板 + 胶囊)
+  主线程        调 webview.start() 并等它返回(GUI 消息循环在它自己
+                起的 STA 线程上,主线程只是阻塞等待)
+  host-hotkey   Win32 热键线程(消息队列是线程局部的)
+  host-tray     pystray 自己的消息循环
+  model-load    后台加载识别后端
+  mic-warmup    后台探测麦克风
+  asr-run       识别与注入
+  asr-preview   实时预览(喂预览位引擎)
+  core-levels   30fps 电平推送
 
-热键线程触发时不能直接碰 UI,所以统一走控制器的订阅机制,
-由面板的推送线程接力。
+装配链(顺序有讲究,每一步都不能换位置):
 
-两个窗口共用**一次** webview.start() —— pywebview 支持多窗口,
-但主循环只有一个:
-  - 面板(master):配置窗口,常驻与否由配置决定
-  - 胶囊(child):录音反馈的悬浮窗,录音时才亮出来
+  1. DPI 感知      —— 必须在**任何窗口**创建之前,否则高分屏下布局全乱
+  2. 剪贴板 owner —— 必须在主线程建,owner 窗口归创建它的线程
+  3. 配置 + 日志   —— 之后才有地方写日志
+  4. 通知出口      —— notify 的日志出口(拒绝/失败路径都要落到它)
+  5. controller    —— 业务核心
+  6. presenter     —— 把 core 的状态/通知翻译成胶囊的动作
+  7. 胶囊窗口      —— 必须在 webview.start() **之前**建好
+  8. 托盘 / 热键   —— 独立线程
+  9. 引擎启动      —— 后台加载模型,主循环不阻塞
+
+窗口只剩**一个**:胶囊(host/capsule.py)。V1 的设置面板随旧 ui 一起
+退役了 —— 面板没了,GUI 主循环也就只需要一个窗口。
+
+退出收尾顺序:**先停窗口推送,再注销热键**。热键是全局资源,占着
+不放的话,用户"退出后马上重启"会因为注册冲突而失败(热键注销要等
+进程真正退出);而窗口推送停晚了,退出过程中还会往一个已经没人
+看的窗口里推东西。
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
 
-from .config import load_config
-from .core.controller import VoiceController
+from .config import Config, load_config
+from .core.controller import CoreController
+from .core.state import AppState
 from .logging_setup import get_logger, setup
-from .paths import PROJECT_DIR, config_path
-from .win32.dpi import set_dpi_awareness
-from .win32.hotkey import HotkeyError, HotkeyListener
+from .notify import Notification, notify
+from .paths import PROJECT_DIR, config_path, data_dir, ensure_dirs, webview_dir
+
+# 等引擎就绪的秒数上限(无头模式用)
+DEFAULT_READY_TIMEOUT = 300.0
 
 
 class _Entry(NamedTuple):
@@ -45,6 +63,25 @@ class _Entry(NamedTuple):
 
     argv0: str | None
     frozen: bool
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="qwen3-voice",
+        description="全局语音输入 —— 按热键(或点悬浮球)说话,文字注入当前光标位置。",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="无头模式:不启动 GUI,只装配 core,等引擎就绪后干净退出",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_READY_TIMEOUT,
+        help="等待引擎加载完成的秒数上限(默认 %(default)s)",
+    )
+    return parser
 
 
 def _capture_entry() -> _Entry:
@@ -171,7 +208,7 @@ def make_qr_scanner_launcher():
     """构造「拉起二维码扫描附属工具」的回调(球菜单「二维码扫描」用)。
 
     附属工具住在 companions/qr_scanner,**架构上完全独立**:它不
-    import 本包,我们也只负责把它作为**独立进程**拉起 —— 不等它、
+    import 本包,我们只负责把它作为**独立进程**拉起 —— 不等它、
     不看它的输出、不管它的死活;它崩了不影响语音主程序,依赖缺失时
     它自己会弹窗报告。
 
@@ -277,17 +314,56 @@ def _warn_dialog(text: str) -> None:
         pass  # 连弹窗都起不来,日志里那份就是全部了
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
+def _print_state(state: AppState) -> None:
+    health = state.backend_health
+    detail = f" ({health.reason})" if health.reason else ""
+    print(f"[状态] {state.state} | 后端={state.backend} | "
+          f"健康={health.status}{detail} | 模型={state.model or '-'} | "
+          f"预览={'有' if state.preview_supported else '无'}")
+    if state.preview_text:
+        print(f"[预览] {state.preview_text}")
 
-    # 趁 sys.argv 还没被动过,把「当初是怎么被拉起来的」记下来 ——
-    # 托盘「重启」要靠它原样复刻启动方式(见 _restart_plan)。
-    entry = _capture_entry()
 
-    # 必须在创建任何窗口之前声明 DPI 感知,否则高分屏下布局全乱
+def _print_notification(note: Notification) -> None:
+    print(f"[通知] {note.level} | {note.kind} | {note.message}")
+
+
+def _open_config_file() -> None:
+    """用系统默认程序打开配置文件(V1 托盘的同名功能)。"""
+    path = config_path()
+    try:
+        if Path(path).is_file():
+            os.startfile(str(path))
+    except Exception as e:
+        get_logger("main").error("打开配置文件失败: %s", e)
+
+
+def _open_log_file(config: Config) -> None:
+    """用系统默认程序打开日志文件(V1 托盘的同名功能)。"""
+    try:
+        path = Path(config.log_file)
+        if path.is_file():
+            os.startfile(str(path))
+    except Exception as e:
+        get_logger("main").error("打开日志失败: %s", e)
+
+
+def run_gui(config: Config, entry: _Entry) -> int:
+    """GUI 模式:装配整条链,起 webview 主循环。"""
+    log = get_logger("main")
+
+    from .apps.voicebar.presenter import VoiceBarPresenter
+    from .host.capsule import VoiceCapsule
+    from .host.hotkey import HotkeyError, HotkeyManager
+    from .host.tray import Tray, TrayMenuItem
+    from .win32.api import get_foreground_window
+    from .win32.dpi import set_dpi_awareness
+
+    # 1) DPI 感知 —— 必须在创建任何窗口之前
     dpi_mode = set_dpi_awareness()
+    log.info("DPI 感知: %s", dpi_mode)
 
-    # 剪贴板 owner 窗口:**必须在主线程创建**(owner 窗口归创建它的
+    # 2) 剪贴板 owner 窗口:**必须在主线程创建**(owner 窗口归创建它的
     # 线程,线程退出窗口就没了,而 Windows 在 owner 窗口销毁时会
     # 连带清空剪贴板 —— 写在录音线程上会把"识别结果留在剪贴板"
     # 这个兜底直接废掉)。这里趁主线程还空闲时建好,活到进程结束。
@@ -295,113 +371,279 @@ def main(argv: list[str] | None = None) -> int:
 
     clipboard.ensure_owner_window()
 
-    config = load_config()
-    log = setup(config.log_file, config.log_level)
-    logger = get_logger("main")
+    # 3) 通知出口 —— 拒绝/失败路径都落到它(data/notify.log)
+    log.info("通知出口: %s", data_dir() / "notify.log")
 
-    logger.info("=" * 60)
-    logger.info("Qwen3 语音输入启动  热键=%s  模型=%s  DPI=%s",
-                config.hotkey, config.model, dpi_mode)
+    # 4) controller + 5) presenter
+    controller = CoreController(config, notifier=notify)
+    presenter = VoiceBarPresenter(core=controller, config=config)
+    presenter.install()
 
-    controller = VoiceController(config)
-    controller.start()
-
-    # ---- 窗口(主线程) ----
     # 记住启动时的前台窗口:pywebview 建 hidden 窗口时会偷偷 Show 一次,
     # 那一下会抢走用户的键盘焦点(正在打字就会丢字),建完还得还回去。
-    from .win32.api import get_foreground_window
-
     startup_focus = get_foreground_window()
 
-    # 顺序有讲究:第一个 create_window 的窗口是 pywebview 的 master,
-    # 它的 GUI 循环跑在 pywebview 自己起的 STA 线程上;后面的窗口由
-    # pywebview 另起一个线程创建。两个窗口都会在 start() 里被创建。
-    from .ui.panel import VoicePanel
-    from .ui.capsule import VoiceCapsule
+    # 6) 胶囊窗口 —— 必须在 webview.start() **之前**建好:
+    # pywebview 才会把它纳入多窗口管理,before_show/shown 回调才注册得上。
+    capsule = VoiceCapsule(presenter, config=config, focus_restore=startup_focus)
+    presenter.attach(capsule)
 
-    panel = VoicePanel(controller, config.panel_geometry, focus_restore=startup_focus)
-    # 胶囊是第二个窗口(录音时才显示),但**必须**在 start() 之前建好,
-    # 否则 pywebview 不会把它纳入多窗口管理
-    capsule = VoiceCapsule(controller, focus_restore=startup_focus)
-    # 推送线程住在面板里(只有一条推送线程,顺序才靠得住),
-    # 胶囊作为第二个推送目标挂上去
-    panel.add_sink(capsule)
+    hotkey = HotkeyManager(notifier=notify)
+    tray = Tray(notifier=notify, title="Qwen3 语音输入")
 
-    if config.panel_visible:
-        panel.show()
-    else:
-        panel.hide()
+    # 退出请求:两条路(托盘菜单 / 球菜单)都汇到这里。
+    flags = {"restart": False}
 
-    # ---- 托盘(独立线程) ----
-    from .ui.tray import TrayIcon
+    def request_quit() -> None:
+        """请求退出:先停窗口推送,webview 主循环随之返回。"""
+        log.info("收到退出请求")
+        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule)
 
-    tray = TrayIcon(controller, panel=panel, config_path=config_path())
+    def request_restart() -> None:
+        """请求重启:置位标记后走**同一条**退出路径。
 
-    # 悬浮球右键菜单的三个出口(通用功能入口,用户拍板的第一批):
-    #   「设置」直接显示面板;「二维码扫描」拉起附属工具(独立进程);
-    #   「退出」复用托盘同一条清理路径(热键注销 → 窗口销毁 → 主循环
-    #   返回),不是简单 kill。
-    capsule.set_panel_opener(panel.show)
-    capsule.set_quit_handler(tray.quit)
+        新实例**不能在这里拉**:此刻热键还没注销、窗口还没销毁 ——
+        拉早了新实例注册热键就撞车("快速重启注册失败"就是这么来的)。
+        main() 在所有清理做完之后检查标记,由它负责拉起新实例。
+        """
+        flags["restart"] = True
+        log.info("托盘请求重启")
+        request_quit()
+
+    def reload_mic() -> None:
+        """重新探测麦克风(V1 托盘的同名功能)。"""
+        from .audio.devices import choose_device
+
+        index, desc = choose_device(
+            config.input_device,
+            config.device_name_hints,
+        )
+        config.input_device = index
+        config.save()
+        log.info("重新探测麦克风: %s", desc)
+
+    # 7) 托盘菜单(V1 的项目基本照搬,只掉了「显示/隐藏面板」——
+    #    面板随旧 ui 退役了,没有面板可开)
+    tray.set_menu([
+        TrayMenuItem("开始 / 停止录音", key="record",
+                     action=lambda: controller.toggle_recording(),
+                     default=True),
+        TrayMenuItem("重新探测麦克风", key="reload_mic", action=reload_mic),
+        TrayMenuItem("打开配置文件", key="open_config",
+                     action=_open_config_file),
+        TrayMenuItem("查看日志", key="open_log",
+                     action=lambda: _open_log_file(config)),
+        TrayMenuItem("重启", key="restart", action=request_restart),
+        TrayMenuItem("退出", key="quit", action=request_quit),
+    ])
+
+    # 球菜单的三个出口:
+    #   「设置」—— 面板已经退役,这里退到「打开配置文件」(设置就写在那儿)
+    #   「二维码扫描」—— 拉起附属工具(独立进程)
+    #   「退出」—— 复用托盘同一条清理路径
+    capsule.set_panel_opener(_open_config_file)
+    capsule.set_quit_handler(request_quit)
     capsule.set_qr_scanner_launcher(make_qr_scanner_launcher())
 
-    def run_tray():
+    def on_core_state(state: AppState) -> None:
+        """托盘图标跟着状态走(V1 的同名逻辑)。"""
+        icon_state = {
+            "recording": "recording",
+            "processing": "warn",
+            "starting": "warn",
+            "idle": "idle",
+        }.get(state.state, "idle")
+        tray.set_icon_state(icon_state)
+
+    controller.subscribe(on_core_state)
+
+    # 8) 热键(独立线程)
+    def on_hotkey() -> None:
+        log.debug("热键触发")
         try:
-            tray.start()
+            controller.toggle_recording()
         except Exception as e:
-            logger.error("托盘启动失败: %s", e)
+            log.exception("热键处理异常")
+            notify.publish("error", "hotkey_callback_failed",
+                           "快捷键触发的动作失败了", reason=str(e))
 
-    tray_thread = threading.Thread(target=run_tray, name="tray", daemon=True)
-    tray_thread.start()
-
-    # ---- 全局热键(独立线程) ----
-    def on_hotkey():
-        logger.debug("热键触发")
-        controller.toggle_recording()
-
-    hotkey = HotkeyListener(config.hotkey, on_hotkey)
-    # 挂到 controller 上:退出时由 shutdown() 第一个停它(全局资源,
-    # 拖到最后会让"退出后马上重启"注册失败)。
-    controller.attach_hotkey(hotkey)
+    hotkey_ok = False
     try:
         hotkey.start()
+        hotkey_ok = hotkey.register(config.hotkey, on_hotkey)
     except HotkeyError as e:
-        logger.error("%s", e)
-        logger.error("请在配置里换一个不冲突的组合键")
-        # 面板瘦身后没有状态行了,启动期的致命错误用系统对话框报 ——
-        # 托盘图标上的提示太容易被忽略
-        from .win32.api import show_error_box
+        log.error("%s", e)
+    if not hotkey_ok:
+        log.warning("热键 %s 没注册上,只能用鼠标点球", config.hotkey)
 
-        show_error_box(f"{e}\n\n请在配置里换一个不冲突的组合键。")
-        panel.show()
+    # 9) 托盘 + 引擎启动
+    if not tray.start():
+        log.error("托盘启动失败(菜单功能将不可用)")
 
-    logger.info("已就绪。按 %s 开始录音,再按一次结束。", config.hotkey)
+    controller.start()
+    log.info("已就绪。按 %s 开始录音,再按一次结束。", config.hotkey)
+
+    import webview
 
     try:
-        panel.mainloop()
+        webview.start(func=presenter.start, private_mode=False,
+                      storage_path=str(webview_dir()))
     except KeyboardInterrupt:
-        pass
+        log.info("收到 Ctrl+C")
     finally:
-        # controller.shutdown() 里第一件事就是停热键 —— 它是全局资源,
-        # 必须在进程真正退出之前就注销掉,否则"退出后马上重启"会
-        # 因为热键还被占着而注册失败。
-        controller.shutdown()
-        hotkey.stop()   # 幂等兜底(shutdown 里已经停过)
-        # 两个窗口都要销毁:pywebview 的主循环要等所有窗口都没了才返回,
-        # 只关一个的话进程会变成"托盘没了但还活着"的僵尸
-        panel.destroy()
+        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule)
+
+    # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、
+    # 窗口已销毁、模型已卸载),现在拉新实例才不会撞车
+    if flags["restart"]:
+        _spawn_restart(log, entry)
+    return 0
+
+
+_finalized = {"done": False}
+
+
+def _shutdown_and_exit(presenter, controller, hotkey, tray, capsule) -> None:
+    """退出收尾(幂等)。两条退出路都走这一条,避免漏步骤。
+
+    顺序:**先停窗口推送,再注销热键**。
+    """
+    if _finalized["done"]:
+        return
+    _finalized["done"] = True
+    log = get_logger("main")
+    t0 = time.monotonic()
+    try:
+        presenter.shutdown()
+    except Exception:
+        log.debug("presenter 收尾异常", exc_info=True)
+    log.info("退出收尾: presenter %.2fs", time.monotonic() - t0)
+    # 窗口推送先停 —— 推给一个没人看的窗口没有意义,还会拖慢退出。
+    t1 = time.monotonic()
+    try:
         capsule.destroy()
+    except Exception:
+        log.debug("窗口收尾异常", exc_info=True)
+    log.info("退出收尾: capsule %.2fs", time.monotonic() - t1)
+    # 再注销热键 —— 它是全局资源,占着不放的话,"退出后马上重启"
+    # 会因为注册冲突而失败。
+    t2 = time.monotonic()
+    try:
+        hotkey.stop()
+    except Exception:
+        log.debug("热键收尾异常", exc_info=True)
+    log.info("退出收尾: hotkey %.2fs", time.monotonic() - t2)
+    t3 = time.monotonic()
+    try:
+        controller.shutdown()
+    except Exception:
+        log.debug("core 收尾异常", exc_info=True)
+    log.info("退出收尾: core %.2fs", time.monotonic() - t3)
+    t4 = time.monotonic()
+    try:
+        tray.stop()
+    except Exception:
+        log.debug("托盘收尾异常", exc_info=True)
+    log.info("退出收尾: tray %.2fs", time.monotonic() - t4)
+    t5 = time.monotonic()
+    try:
+        from .win32 import clipboard
+
         # 剪贴板 owner 窗口随进程退出被销毁时,Windows 会连带清空
         # 剪贴板 —— 注入失败时留在剪贴板里的识别结果就没了。
         # 退出前先把所有权交还系统(owner 置 NULL),内容留住。
         clipboard.release_ownership()
-        logger.info("退出")
+    except Exception:
+        log.debug("剪贴板归还异常", exc_info=True)
+    log.info("退出收尾: clipboard %.2fs", time.monotonic() - t5)
+    log.info("退出收尾合计 %.2fs", time.monotonic() - t0)
+    _flush_logs()
 
-    # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、
-    # 窗口已销毁、模型已卸载),现在拉新实例才不会撞车
-    if getattr(tray, "restart_requested", False):
-        _spawn_restart(logger, entry)
-    return 0
+
+def _flush_logs() -> None:
+    import logging
+
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def run_headless(config: Config, args) -> int:
+    """无头模式:不建任何窗口,只装配 core。
+
+    等引擎就绪(或超时)后**干净退出** —— 这是给自检/冒烟用的,
+    不是常驻服务。
+    """
+    log = get_logger("main")
+
+    from .win32 import clipboard
+
+    clipboard.ensure_owner_window()
+
+    controller = CoreController(config, notifier=notify)
+    controller.subscribe(_print_state)
+    notify.subscribe(_print_notification)
+
+    controller.start()
+    log.info("无头模式已启动(等待引擎就绪,上限 %.0f 秒)", args.timeout)
+
+    try:
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            snapshot = controller.state_snapshot
+            health = snapshot.backend_health
+            if health.ready:
+                print("[无头] 引擎就绪")
+                return 0
+            if health.failed:
+                print(f"[无头] 引擎加载失败: {health.reason}")
+                return 2
+            time.sleep(0.2)
+        print("[无头] 等待引擎就绪超时")
+        return 2
+    finally:
+        controller.shutdown()
+        try:
+            clipboard.release_ownership()
+        except Exception:
+            pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    # 趁 sys.argv 还没被动过,把「当初是怎么被拉起来的」记下来 ——
+    # 托盘「重启」要靠它原样复刻启动方式(见 _restart_plan)。
+    entry = _capture_entry()
+
+    # V1 的命令行**没有参数语义**(main(argv) 只是收下就丢)。所以这里
+    # 用 parse_known_args:未知参数照旧忽略、不报错,保住老习惯;
+    # 新增的 --headless / --timeout 走正常解析。
+    args, unknown = build_parser().parse_known_args(argv)
+    if unknown:
+        get_logger("main").debug("忽略不认识的命令行参数: %s", " ".join(unknown))
+
+    ensure_dirs()
+    config = load_config()
+    setup(config.log_file, config.log_level)
+    log = get_logger("main")
+
+    log.info("=" * 60)
+    log.info("Qwen3 语音输入启动  热键=%s  模型=%s  后端=%s",
+             config.hotkey, config.model, config.asr_backend)
+
+    try:
+        if args.headless:
+            return run_headless(config, args)
+        return run_gui(config, entry)
+    except KeyboardInterrupt:
+        print("qwen3-voice: 收到 Ctrl+C,退出。")
+        return 0
 
 
 if __name__ == "__main__":

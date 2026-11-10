@@ -12,7 +12,7 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
 识别中就作废结果 —— 两种情况都不识别、不注入,回到 IDLE。
 
 录音期间还会跑一个**预览线程**:把录音增量喂给预览位的引擎,
-实时刷新"边说边显示"的文字(事件 kind="preview")。它只是体验,
+实时刷新"边说边显示"的文字(快照里的 ``preview_text``)。它只是体验,
 最终注入的始终是最终位那次整段识别的结果。
 
 两个插槽,同一套接口(见 ``engines/streaming.py``):
@@ -32,7 +32,6 @@ UI(面板/托盘)和热键都只跟这一层打交道,彼此不直接依赖。
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
@@ -52,10 +51,34 @@ from ..audio.recorder import Recorder
 from ..audio.recording_store import save_recording
 from ..config import Config
 from ..logging_setup import get_logger
+from ..notify import notify as default_notifier
 from ..win32.api import get_foreground_window
 from ..win32.inject import paste_text
+from .levels import dbfs_to_unit, level_gate
+from .state import (
+    HEALTH_FAILED,
+    HEALTH_LOADING,
+    HEALTH_READY,
+    STATE_IDLE,
+    STATE_PROCESSING,
+    STATE_RECORDING,
+    STATE_STARTING,
+    AppState,
+    BackendHealth,
+    CommandResult,
+)
 
 log = get_logger("core")
+
+# 命令被拒的原因码(presenter 只看 ok,原因码给日志和将来可能的 UI 用)
+REASON_MODEL_NOT_READY = "model_not_ready"
+REASON_ALREADY_RECORDING = "already_recording"
+REASON_PROCESSING = "processing"
+REASON_NOT_RECORDING = "not_recording"
+REASON_RECORDER_START_FAILED = "recorder_start_failed"
+
+# 电平推送频率:30fps(前端电平条按这个节奏画)
+LEVEL_PUSH_INTERVAL = 1.0 / 30.0
 
 # 识别后端(互斥,同一时刻只留一个)
 BACKEND_LOCAL = "local"            # 本地 Qwen3-ASR(transformers,GPU)
@@ -80,7 +103,7 @@ def normalize_backend(kind: str | None) -> str:
 
 
 class State(str, Enum):
-    """对外暴露的应用状态。"""
+    """控制器内部的应用状态机(V1 的状态枚举,逻辑一行未动)。"""
 
     STARTING = "starting"     # 启动中
     IDLE = "idle"             # 待机
@@ -99,20 +122,20 @@ class State(str, Enum):
         }[self]
 
 
-@dataclass
-class UIEvent:
-    """控制器发给 UI 的事件。"""
-
-    kind: str                       # state / level / result / error / info / cancelled
-    state: State | None = None
-    text: str = ""
-    levels: list[float] = field(default_factory=list)
-    elapsed: float = 0.0
-    model_tag: str = ""
-    # error 事件**附带的原文**:注入失败时带着识别出来的文本一起发。
-    # 光有一句"文本注入失败"是不够的 —— 用户得看得到自己刚说了什么,
-    # 胶囊上的「复制」按钮也靠这份文本才能把内容交到用户手上。
-    payload: str = ""
+# V1 内部状态 → 对外状态常量(core/state.py,presenter 消费的那一套)。
+#
+# ⚠ ERROR **没有**对外状态:``state.py`` 里只有
+# starting / idle / recording / processing 四个(见 REFACTOR_SPEC §3
+# 「去掉 error 态」)。出错信息不靠状态走 —— 走 ``backend_health``
+# (failed + reason)和通知流(backend_load_failed / asr_failed),
+# 状态本身回到 idle,好让用户能直接再来一轮。
+_APP_STATE_BY_V1: dict[State, str] = {
+    State.STARTING: STATE_STARTING,
+    State.IDLE: STATE_IDLE,
+    State.RECORDING: STATE_RECORDING,
+    State.PROCESSING: STATE_PROCESSING,
+    State.ERROR: STATE_IDLE,
+}
 
 
 def _default_injector(text: str, hwnd: int, restore: bool, trailing_space: bool) -> bool:
@@ -163,11 +186,23 @@ def _make_chunk_puller(recorder):
     return pull
 
 
-class VoiceController:
-    """语音输入的核心逻辑。"""
+class CoreController:
+    """语音输入的核心逻辑。
+
+    对外契约(presenter / 窗口层消费的那一套):
+
+    * ``subscribe(cb)``      —— 推 ``AppState`` 快照;新订阅者**立即**收到
+      当前快照一次,状态/backend/model/预览文字变化时再推。
+    * ``subscribe_levels(cb)`` —— 录音期间 30fps 推**已映射**电平
+      (``dbfs_to_unit`` 的输出,0..1)。
+    * ``state_snapshot``      —— 当前快照(属性)。
+    * ``start_recording()`` / ``cancel_recording()`` —— 返回
+      ``CommandResult``(带 ``ok``),调用方据此决定要不要提示用户。
+    * ``stop_recording()``    —— 无返回值(停止后由状态流推进)。
+    """
 
     def __init__(self, config: Config, injector=None, recorder_factory=None,
-                 backend_factory=None):
+                 backend_factory=None, notifier=None):
         self.config = config
         self.state = State.STARTING
         # 后端工厂可替换 —— 测试用假实现,避免真的加载模型/真的联网
@@ -180,13 +215,29 @@ class VoiceController:
         self._injector = injector or _default_injector
         # 录音器工厂可替换 —— 测试用假实现,避免真的打开音频设备
         self._recorder_factory = recorder_factory or _default_recorder_factory
+        # 通知出口:拒绝/失败路径都要走它(presenter 靠通知显示错误)
+        self._notifier = notifier if notifier is not None else default_notifier
         self.recorder: Recorder | None = None
         self.input_device: int | None = None  # 由后台探测填充
         self.last_text = ""
         self.last_error = ""
 
-        self._listeners: list[Callable[[UIEvent], None]] = []
+        # 状态订阅者(收 AppState 快照)
+        self._listeners: list[Callable[[AppState], None]] = []
+        # 电平订阅者(收已映射电平 0..1)
+        self._level_listeners: list[Callable[[list[float]], None]] = []
+        self._level_stop: threading.Event | None = None
+        self._level_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        # 对外快照:状态机 + 后端健康 + 模型 + 预览文字
+        self._state = AppState(
+            state=STATE_STARTING,
+            backend=self.backend_kind,
+            backend_health=BackendHealth(HEALTH_LOADING),
+            model=self._current_model_tag(),
+            preview_supported=self._backend_supports_preview(),
+            preview_text="",
+        )
         # 后端换装是"整体动作"(建新的 → 加载 → 卸旧的 → 换引用),
         # 拿一把单独的锁串起来:启动加载和切换不会交叉。
         self._backend_lock = threading.RLock()
@@ -245,6 +296,15 @@ class VoiceController:
         """
         return bool(getattr(self.engine, "supports_preview", True))
 
+    def _current_model_tag(self) -> str:
+        """当前生效的模型规格(对外快照用)。
+
+        网络后端不加载本地模型 —— 那就没有"模型规格"可言,给空串。
+        """
+        if self.backend_kind != BACKEND_LOCAL:
+            return ""
+        return getattr(self.engine, "model_tag", "") or self.config.model
+
     @staticmethod
     def _unload_backend(backend) -> None:
         """把一个后端卸掉(本地释放显存 / 网络关会话)。"""
@@ -256,26 +316,77 @@ class VoiceController:
         except Exception as e:
             log.debug("卸载后端失败: %s", e)
 
-    # ---------- 事件订阅 ----------
+    # ---------- 状态订阅 ----------
 
-    def subscribe(self, callback: Callable[[UIEvent], None]) -> None:
+    def subscribe(self, callback: Callable[[AppState], None]) -> None:
+        """订阅状态快照。
+
+        新订阅者**立即**收到当前快照一次 —— 订阅发生在"装配"阶段,
+        那时状态可能已经不是初始值了(引擎甚至已经就绪),漏掉这一次
+        的话,订阅者得一直等到下一次变化才知道自己身处什么状态。
+        """
+        if not callable(callback):
+            raise TypeError("状态订阅回调必须可调用")
         with self._lock:
             self._listeners.append(callback)
+            snapshot = self._state
+            self._call_listener(callback, snapshot)
 
-    def _emit(self, event: UIEvent) -> None:
+    @property
+    def state_snapshot(self) -> AppState:
+        """当前状态快照(只读)。"""
         with self._lock:
+            return self._state
+
+    def _call_listener(self, cb: Callable[[AppState], None],
+                       snapshot: AppState) -> None:
+        try:
+            cb(snapshot)
+        except Exception as e:
+            log.debug("状态订阅者回调异常: %s", e)
+
+    def _update_state(self, **changes) -> AppState:
+        """改快照并推给订阅者(没变化就不推 —— 免得空推刷前端)。"""
+        with self._lock:
+            old = self._state
+            new = old.with_changes(**changes)
+            if new == old:
+                return old
+            self._state = new
             listeners = list(self._listeners)
-        for cb in listeners:
-            try:
-                cb(event)
-            except Exception as e:
-                log.debug("事件回调异常: %s", e)
+            for cb in listeners:
+                self._call_listener(cb, new)
+        return new
 
     def _set_state(self, state: State) -> None:
+        """内部状态机推进,并把对外快照跟上。
+
+        V1 的 ``UIEvent(kind="state")`` 在这里退役 —— 对外只有
+        ``AppState`` 快照这一条路。
+        """
         if self.state == state:
             return
         self.state = state
-        self._emit(UIEvent(kind="state", state=state))
+        self._update_state(state=_APP_STATE_BY_V1[state])
+
+    # ---------- 通知 ----------
+
+    def _notify(self, level: str, kind: str, message: str, **fields) -> None:
+        """发通知(失败不许拖垮调用方)。"""
+        try:
+            self._notifier.publish(level, kind, message, **fields)
+        except Exception as e:
+            log.debug("发通知失败(kind=%s): %s", kind, e)
+
+    def _reject(self, kind: str, reason: str, message: str) -> CommandResult:
+        """命令被拒:记日志 + 发通知 + 返回失败结果。
+
+        拒绝也要让用户看见 —— 只在日志里写一行的话,用户按了热键
+        什么反应都没有,只会以为程序死了。
+        """
+        log.info("命令被拒(%s): %s", reason, message)
+        self._notify("error", kind, message, reason=reason)
+        return CommandResult(ok=False, reason=reason, message=message)
 
     # ---------- 启动 ----------
 
@@ -289,18 +400,32 @@ class VoiceController:
             # 后端换装和启动加载共用一把锁:不会交叉。
             with self._backend_lock:
                 self.engine.load()
-                self._emit(UIEvent(kind="info", text="模型就绪"))
-                self._emit(UIEvent(kind="backend", text=self.backend_kind))
-                tag = getattr(self.engine, "model_tag", "")
-                if tag:
-                    self._emit(UIEvent(kind="model", model_tag=tag))
+                log.info("模型就绪")
+                self._update_state(
+                    backend_health=BackendHealth(HEALTH_READY),
+                    backend=self.backend_kind,
+                    model=self._current_model_tag(),
+                    preview_supported=self._backend_supports_preview(),
+                )
             # 模型好了但麦克风可能还在探测,两边都好了才算真正就绪
             if self.state == State.STARTING:
                 self._set_state(State.IDLE)
         except ASRError as e:
             self.last_error = str(e)
             self._set_state(State.ERROR)
-            self._emit(UIEvent(kind="error", text=str(e)))
+            self._update_state(
+                backend_health=BackendHealth(HEALTH_FAILED, str(e)))
+            self._notify("error", "backend_load_failed",
+                         f"识别引擎加载失败:{e}", backend=self.backend_kind)
+            log.error("模型加载失败: %s", e)
+        except Exception as e:
+            self.last_error = str(e)
+            self._set_state(State.ERROR)
+            self._update_state(
+                backend_health=BackendHealth(HEALTH_FAILED, str(e)))
+            self._notify("error", "backend_load_failed",
+                         f"识别引擎加载失败:{e}", backend=self.backend_kind)
+            log.exception("模型加载异常: %s", e)
 
     def _init_mic(self) -> None:
         """探测可用麦克风。
@@ -315,9 +440,11 @@ class VoiceController:
             )
             self.input_device = index
             log.info("麦克风: %s", desc)
-            self._emit(UIEvent(kind="info", text=f"麦克风 {desc}"))
+            self._notify("info", "microphone_ready", f"麦克风 {desc}")
         except Exception as e:
             log.error("麦克风探测失败: %s", e)
+            self._notify("warning", "microphone_unavailable",
+                         f"麦克风探测失败:{e}")
 
     # ---------- 录音控制 ----------
 
@@ -329,25 +456,38 @@ class VoiceController:
             self.start_recording()
         else:
             log.debug("当前状态 %s,忽略切换请求", self.state)
+            # V1 在这里只是静默忽略;现在补一条通知 —— 用户按了热键
+            # 什么反应都没有,只会以为程序死了。
+            if self.state == State.PROCESSING:
+                self._reject("recording_rejected", REASON_PROCESSING,
+                             "识别中,暂不开始新的录音")
+            else:
+                self._reject("recording_rejected", REASON_MODEL_NOT_READY,
+                             "模型还在加载,暂不能开始录音")
 
-    def start_recording(self) -> bool:
+    def start_recording(self) -> CommandResult:
         if self.state == State.RECORDING:
-            return False
+            return self._reject("recording_rejected", REASON_ALREADY_RECORDING,
+                                 "已经在录音了")
         if self.state == State.PROCESSING:
             log.debug("识别中,暂不开始新的录音")
-            return False
+            return self._reject("recording_rejected", REASON_PROCESSING,
+                                 "识别中,暂不开始新的录音")
         if self.state == State.STARTING:
             # 模型还在加载。这一挡是功能级的:放行的话录音能开,
             # 停止时整段识别会直接抛"模型尚未加载"(日志里真实发生过)。
             # 热键路径 toggle_recording 的 else 分支本来就不放行,
             # 这里挡的是**点悬浮球**那条直通路径。
             log.debug("模型还在加载,暂不能开始录音")
-            return False
+            return self._reject("recording_rejected", REASON_MODEL_NOT_READY,
+                                 "模型还在加载,暂不能开始录音")
 
         recorder = self._recorder_factory(self.config, self.input_device)
         if not recorder.start():
-            self._emit(UIEvent(kind="error", text="录音启动失败,请检查麦克风"))
-            return False
+            self._notify("error", "recording_failed",
+                         "录音启动失败,请检查麦克风")
+            return CommandResult(ok=False, reason=REASON_RECORDER_START_FAILED,
+                                 message="录音启动失败,请检查麦克风")
 
         self.recorder = recorder
         # 新的一轮:会话代号 +1,并清掉上一轮的取消标记。
@@ -356,13 +496,15 @@ class VoiceController:
         self._cancelled = False
         self._set_state(State.RECORDING)
         # 新一轮录音:先把上一轮残留的预览文字清掉
-        self._emit(UIEvent(kind="preview", text=""))
+        self._update_state(preview_text="")
+        # 电平泵跟着录音起(30fps 推**已映射**电平)
+        self._start_level_pump()
         # 最终位的引擎:整段引擎,最终结果只认它。
         # 先造好放在那儿,停止录音时把完整音频喂进去、close 出最终文本。
         native_rate = int(getattr(recorder, "native_rate", 0) or 0) or self.config.sample_rate
         self._final_engine = self._make_final_engine(native_rate)
         self._start_preview(recorder)
-        return True
+        return CommandResult(ok=True, message="开始录音")
 
     def stop_recording(self) -> None:
         if self.state is not State.RECORDING or self.recorder is None:
@@ -376,6 +518,8 @@ class VoiceController:
 
         audio = self.recorder.stop()
         self.recorder = None
+        # 录音器没了,电平也断了 —— 电平泵跟着收。
+        self._stop_level_pump()
         dur = len(audio) / native_rate
         log.info("停止录音,时长 %.1fs", dur)
 
@@ -401,15 +545,16 @@ class VoiceController:
         threading.Thread(target=self._process, args=(audio, native_rate, self._session),
                          name="asr-run", daemon=True).start()
 
-    def cancel_recording(self) -> None:
+    def cancel_recording(self) -> CommandResult:
         """放弃当前这一轮:不识别、不注入。
 
         录音中:停掉录音器和预览线程,音频直接丢掉。
         识别中:推理是阻塞的,停不下来 —— 只能**标记**这一轮作废,
         识别线程醒来后发现自己过期,于是丢掉结果、不注入文字。
 
-        两种情况都回到 IDLE(用户可以立刻开始下一轮),并发出
-        ``cancelled`` 事件,让胶囊显示「已取消」再淡出。
+        两种情况都回到 IDLE(用户可以立刻开始下一轮)。胶囊显示
+        「已取消」靠的是**状态从录音/识别流回 idle** 这件事本身
+        —— 消费端(presenter)自己判断,不靠事件通知。
         """
         if self.state == State.RECORDING:
             # 先把这轮标成作废,再停预览线程:
@@ -421,6 +566,7 @@ class VoiceController:
 
             recorder = self.recorder
             self.recorder = None
+            self._stop_level_pump()
             if recorder is not None:
                 try:
                     recorder.stop()
@@ -428,17 +574,19 @@ class VoiceController:
                     log.debug("取消录音时停止录音器失败: %s", e)
 
             self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="preview", text=""))
-            self._emit(UIEvent(kind="cancelled", text="已取消"))
-            return
+            self._update_state(preview_text="")
+            return CommandResult(ok=True, message="已取消")
 
         if self.state == State.PROCESSING:
             # 识别线程还在跑,停不掉;标记作废 + 立刻回 IDLE,
             # 免得用户被卡在"识别中"按不动热键
             self._cancelled = True
             self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="preview", text=""))
-            self._emit(UIEvent(kind="cancelled", text="已取消"))
+            self._update_state(preview_text="")
+            return CommandResult(ok=True, message="已取消")
+
+        return CommandResult(ok=False, reason=REASON_NOT_RECORDING,
+                             message="当前没有进行中的录音")
 
     # ---------- 实时预览 ----------
 
@@ -480,7 +628,7 @@ class VoiceController:
                 log.debug("这一轮已作废,丢弃预览文字")
                 return
             if text and text.strip():
-                self._emit(UIEvent(kind="preview", text=text))
+                self._update_state(preview_text=text)
 
         return on_partial
 
@@ -603,8 +751,8 @@ class VoiceController:
             if self._is_stale(session):
                 return
             self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="error", text=str(e)))
-            self._emit(UIEvent(kind="preview", text=""))
+            self._notify("error", "asr_failed", str(e))
+            self._update_state(preview_text="")
             return
         except Exception as e:
             # 引擎抛任何异常都不能让工作线程死掉
@@ -612,8 +760,8 @@ class VoiceController:
             if self._is_stale(session):
                 return
             self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="error", text=f"识别失败: {e}"))
-            self._emit(UIEvent(kind="preview", text=""))
+            self._notify("error", "asr_failed", f"识别失败: {e}")
+            self._update_state(preview_text="")
             return
 
         # 作废的一轮:直接丢弃(不注入、不发结果、不动状态 ——
@@ -625,8 +773,8 @@ class VoiceController:
         self.last_text = text
         if not text.strip():
             self._set_state(State.IDLE)
-            self._emit(UIEvent(kind="error", text="没听清,请再说一遍"))
-            self._emit(UIEvent(kind="preview", text=""))
+            self._notify("warning", "asr_failed", "没听清,请再说一遍")
+            self._update_state(preview_text="")
             return
 
         # 粘贴前捕获焦点窗口 —— 转写这 1 秒用户可能切窗口
@@ -643,9 +791,7 @@ class VoiceController:
             trailing_space=self.config.trailing_space,
         )
         self._set_state(State.IDLE)
-        if ok:
-            self._emit(UIEvent(kind="result", text=text))
-        else:
+        if not ok:
             # 失败也要把原文带出去:只报一句"文本注入失败",用户既看不到
             # 自己说了什么,也没法把它捞回来 —— 那段话就等于不存在了。
             # 胶囊会把它显示出来,并给一个「复制」按钮。
@@ -653,36 +799,113 @@ class VoiceController:
             # 就不还,是注入层的规矩),用户按 Ctrl+V 立刻能贴出来 ——
             # 不说清楚的话,报错的同时文字明明一按就出来,用户却不知道
             # (实测:三连败后手动 Ctrl+V 贴出去了,看着错误提示一头雾水)。
-            self._emit(UIEvent(kind="error", text="注入失败，文字已留在剪贴板",
-                               payload=text))
+            self._notify("error", "inject_failed",
+                         "注入失败，文字已留在剪贴板", text=text)
         # 最终结果到了,预览文字就没用了(最终结果始终来自整段识别,不是预览)
-        self._emit(UIEvent(kind="preview", text=""))
+        self._update_state(preview_text="")
+
+    # ---------- 电平 ----------
+
+    def subscribe_levels(self, callback: Callable[[list[float]], None]) -> None:
+        """订阅电平(录音期间 30fps 推一次)。
+
+        推的是**已映射**电平(``dbfs_to_unit`` 的输出,0..1)——
+        消费端只负责画,绝不能按窗口内最大值归一化(归一化之后
+        电平条永远是满的,用户就没法从条的高低看出"我说话声音
+        大不大",那条条就只剩装饰作用)。
+        """
+        if not callable(callback):
+            raise TypeError("电平订阅回调必须可调用")
+        with self._lock:
+            self._level_listeners.append(callback)
+
+    def _start_level_pump(self) -> None:
+        with self._lock:
+            if self._level_thread is not None and self._level_thread.is_alive():
+                return
+            stop = threading.Event()
+            self._level_stop = stop
+            thread = threading.Thread(target=self._level_loop, args=(stop,),
+                                      name="core-levels", daemon=True)
+            self._level_thread = thread
+        thread.start()
+
+    def _stop_level_pump(self) -> None:
+        with self._lock:
+            stop, thread = self._level_stop, self._level_thread
+            self._level_stop = None
+            self._level_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def _level_loop(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                levels = self._mapped_levels()
+                if levels:
+                    self._publish_levels(levels)
+            except Exception as e:
+                log.debug("电平推送异常: %s", e)
+            stop.wait(LEVEL_PUSH_INTERVAL)
+
+    def _mapped_levels(self) -> list[float]:
+        """采一次电平并映射到 0..1。
+
+        门限随底噪走(见 ``core/levels.py`` 里 LEVEL_GATE_FACTOR 的
+        说明);底噪估计还没收敛(None,冷启动头一秒)就退回绝对下限 ——
+        宁可让头几帧底噪照常显示,也不能把轻声开头错杀成 0。
+        """
+        recorder = self.recorder
+        if recorder is None:
+            return []
+        raw = recorder.levels()
+        if not raw:
+            return []
+        floor = None
+        try:
+            floor = recorder.noise_floor()
+        except Exception:
+            pass
+        gate = level_gate(floor)
+        return [dbfs_to_unit(v, gate) for v in raw]
+
+    def _publish_levels(self, levels: list[float]) -> None:
+        with self._lock:
+            listeners = list(self._level_listeners)
+        for cb in listeners:
+            try:
+                cb(list(levels))
+            except Exception as e:
+                log.debug("电平订阅者回调异常: %s", e)
 
     # ---------- 模型切换 ----------
 
     def switch_model(self, model_tag: str) -> None:
         """后台切换模型规格(只对**本地**后端有意义)。"""
         if self.backend_kind != BACKEND_LOCAL:
-            self._emit(UIEvent(kind="notice",
-                               text="网络后端不加载本地模型,切回本地后端才能换模型"))
+            self._notify("warning", "model_switch_failed",
+                         "网络后端不加载本地模型,切回本地后端才能换模型")
             return
         if model_tag == getattr(self.engine, "model_tag", None) and \
                 getattr(self.engine, "loaded", False):
             return
 
         def job():
-            self._emit(UIEvent(kind="info", text=f"正在切换到 {model_tag} ..."))
+            self._notify("info", "model_switching",
+                         f"正在切换到 {model_tag} ...")
             try:
                 self.engine.switch_model(model_tag)
                 self.config.model = model_tag
                 self.config.save()
-                self._emit(UIEvent(kind="model", model_tag=model_tag))
-                self._emit(UIEvent(kind="info", text=f"已切换到 {model_tag}"))
+                self._update_state(model=model_tag)
+                self._notify("info", "model_switched", f"已切换到 {model_tag}")
             except ASRError as e:
-                self._emit(UIEvent(kind="error", text=str(e)))
+                self._notify("error", "model_switch_failed", str(e))
             except Exception as e:
                 log.exception("模型切换异常: %s", e)
-                self._emit(UIEvent(kind="error", text=f"模型切换失败: {e}"))
+                self._notify("error", "model_switch_failed", f"模型切换失败: {e}")
 
         threading.Thread(target=job, name="model-switch", daemon=True).start()
 
@@ -709,8 +932,8 @@ class VoiceController:
         if kind == self.backend_kind:
             return
         if self.state in (State.RECORDING, State.PROCESSING):
-            self._emit(UIEvent(kind="notice",
-                               text="录音中不能切换识别后端,请先结束这一轮"))
+            self._notify("warning", "backend_switch_failed",
+                         "录音中不能切换识别后端,请先结束这一轮")
             return
         threading.Thread(target=self._switch_backend_job, args=(kind,),
                          name="backend-switch", daemon=True).start()
@@ -718,7 +941,7 @@ class VoiceController:
     def _switch_backend_job(self, kind: str) -> None:
         """切换后端的实际动作(跑在后台线程里,不卡 UI)。"""
         label = "网络" if kind == BACKEND_DASHSCOPE else "本地"
-        self._emit(UIEvent(kind="notice", text=f"正在切换到{label}后端 ..."))
+        self._notify("info", "backend_switching", f"正在切换到{label}后端 ...")
 
         with self._backend_lock:
             old = self.engine
@@ -728,11 +951,15 @@ class VoiceController:
                 new.load()
             except ASRError as e:
                 log.warning("切换后端失败: %s", e)
-                self._emit(UIEvent(kind="notice", text=f"切换失败:{e}"))
+                self._update_state(
+                    backend_health=BackendHealth(HEALTH_FAILED, str(e)))
+                self._notify("error", "backend_switch_failed", f"切换失败:{e}")
                 return
             except Exception as e:
                 log.exception("切换后端异常: %s", e)
-                self._emit(UIEvent(kind="notice", text=f"切换失败:{e}"))
+                self._update_state(
+                    backend_health=BackendHealth(HEALTH_FAILED, str(e)))
+                self._notify("error", "backend_switch_failed", f"切换失败:{e}")
                 return
 
             # 新后端就绪了,再把旧的卸掉(本地后端在这里释放显存)
@@ -746,21 +973,19 @@ class VoiceController:
         except Exception as e:
             log.debug("保存后端设置失败: %s", e)
 
-        self._emit(UIEvent(kind="backend", text=kind))
-        tag = getattr(self.engine, "model_tag", "")
-        if tag:
-            self._emit(UIEvent(kind="model", model_tag=tag))
+        self._update_state(
+            backend=kind,
+            backend_health=BackendHealth(HEALTH_READY),
+            model=self._current_model_tag(),
+            preview_supported=self._backend_supports_preview(),
+        )
+        self._notify("info", "backend_switched", f"已切换到{label}后端")
         # 预览开关跟着后端走:网络模式没有实时预览,胶囊的预览文字条
         # 干脆收起来(别留一条空条在那儿)。切回本地时按配置恢复。
-        self._emit(UIEvent(kind="preview_enabled",
-                           text="0" if kind == BACKEND_DASHSCOPE
-                           else ("1" if self.config.show_preview else "0")))
         if kind == BACKEND_DASHSCOPE:
-            self._emit(UIEvent(kind="notice",
-                               text="已切换到网络后端:不支持实时预览,"
-                                    "停止录音后一次性识别"))
-        else:
-            self._emit(UIEvent(kind="notice", text="已切换到本地后端"))
+            self._notify("info", "backend_switched",
+                         "已切换到网络后端:不支持实时预览,"
+                         "停止录音后一次性识别")
         if self.state in (State.STARTING, State.ERROR):
             self._set_state(State.IDLE)
 
@@ -787,6 +1012,7 @@ class VoiceController:
             except Exception:
                 pass
         self._stop_preview()
+        self._stop_level_pump()
         if self.recorder is not None:
             try:
                 self.recorder.stop()

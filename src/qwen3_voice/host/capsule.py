@@ -14,9 +14,9 @@ Python 与前端之间的桥接契约:
                 / resetForRecording / setTheme / setPreviewEnabled
                 / setOrbMode / setOrbPosition / setOrbHint / setHideDelay
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
-                / update_regions / move_orb / begin_drag / end_drag
-                / copy_result / start_recording / open_panel / quit_app
-                / launch_qr_scanner / selecting_text / focus_textbar
+                / update_regions / move_capsule / move_orb / begin_drag
+                / end_drag / copy_result / start_recording / open_panel
+                / quit_app / launch_qr_scanner / selecting_text / focus_textbar
 
 业务动作(开始/停止/取消录音、复制、菜单出口)由 presenter 通过
 回调注入(set_*_handler),窗口层只管窗口,不认识引擎和注入器。
@@ -243,6 +243,18 @@ class _CapsuleApi:
 
         前端每次都从 mousedown 起点算绝对目标,发过来的不是增量 ——
         某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
+        """
+        self._capsule._move_orb_abs(x, y)
+
+    def move_capsule(self, x: float, y: float) -> None:
+        """拖动胶囊:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+
+        和 ``move_orb`` **同一条路径**:球和胶囊是同一个窗口、共用同一份
+        位置记忆(``config.orb.geometry``),拖胶囊就是挪这个窗口 ——
+        摆位规则(DPI 换算、夹回工作区)自然也一致,不存在第二套实现。
+
+        松手时走的 ``_end_drag`` 和拖球完全相同:只存 orb.geometry /
+        orb.monitor 这一份。
         """
         self._capsule._move_orb_abs(x, y)
 

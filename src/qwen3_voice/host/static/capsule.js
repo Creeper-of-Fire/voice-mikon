@@ -21,11 +21,17 @@
  *   Python → JS : window.__capsule.setState / setLevels / setElapsed
  *                 / setPreview / setResult / setError / setCancelled
  *                 / resetForRecording / setTheme
- *                 / setPositionMode / setPreviewEnabled
+ *                 / setPreviewEnabled
  *                 / setOrbMode / setOrbPosition / setHideDelay
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
  *                 / update_regions / move_capsule / begin_drag / end_drag
  *                 / copy_result / start_recording / move_orb
+ *
+ * ⚠ 胶囊的**位置档位**（follow / bottom / custom）已随重构退役：
+ * Python 侧不再推 setPositionMode，前端只留一个空转的兼容入口。球和
+ * 胶囊是同一个窗口、共用同一份位置记忆（config.orb.geometry），
+ * 所以拖胶囊（move_capsule）和拖球（move_orb）在 Python 侧落到
+ * **同一条**移动路径上。
  */
 (function () {
   'use strict';
@@ -81,8 +87,9 @@
   /* 主题档位:auto = 跟随系统,light = 白天,dark = 黑夜 */
   var THEMES = ['auto', 'light', 'dark'];
 
-  /* 胶囊位置档位:follow = 跟随输入光标,bottom = 固定底部,custom = 自定义 */
-  var POSITION_MODES = ['follow', 'bottom', 'custom'];
+  /* 胶囊位置档位(follow / bottom / custom)已随重构退役:
+   * 球和胶囊是同一个窗口、共用同一份位置记忆(config.orb.geometry),
+   * 没有"位置归谁管"的分档,也就没有"不可拖"的档位。 */
 
   /* 胶囊各阶段的中文文案 */
   var PHASE_TEXT = {
@@ -111,7 +118,6 @@
     level: 0,           // 当前（平滑后）的响度 0..1
     elapsed: 0,         // 录音计时（秒）
     theme: 'auto',      // 主题档位
-    positionMode: 'follow', // 胶囊位置档位（只有 custom 模式允许拖动）
     previewEnabled: true,   // 实时预览文字条是否显示
     errorPayload: '',       // 错误态里可复制的原文(注入失败时带着识别文本)
     copying: false,         // 复制进行中(防连点)
@@ -407,13 +413,16 @@
 
   /* ==================== 位置模式 / 预览开关 ==================== */
 
-  /* 位置模式:只有 custom 模式允许拖动胶囊。
-   * 跟随输入模式下拖了也没意义 —— 下一轮录音还是回到光标那里。 */
+  /* 位置档位:已退役(见上面常量区的那段说明)。
+   *
+   * 现在这里只干一件事:恒挂 can-drag —— 让"光标长什么样"和"能不能
+   * 拖"由**同一个状态**驱动。有 grab 手势就必须真能拖:胶囊上出现
+   * 把手却拖不动,样式和行为分叉在物理上不该可能(V1 就是恒可拖)。 */
   function applyPositionMode(mode) {
-    var m = POSITION_MODES.indexOf(mode) >= 0 ? mode : 'follow';
-    ui.positionMode = m;
+    // mode 参数只为兼容桥接契约里 setPositionMode 的调用而留着,
+    // 不再有档位语义。
     if (document.body) {
-      document.body.classList.toggle('can-drag', m === 'custom');
+      document.body.classList.add('can-drag');
     }
   }
 
@@ -1173,21 +1182,23 @@
     if (e.button !== 0) {
       return;
     }
-    // 常驻球模式:只有**球形态**(未展开)才响应按下 ——
-    // 展开后的胶囊不参与拖动:位置归球,想挪位置先收回球再拖。
+    // 常驻球模式:**球形态**(未展开)走球自己那套(按下 = 可能开始
+    // 录音,拖动 = 挪位置);**胶囊形态**(已展开)落到下面这套胶囊拖动。
     //
-    // 展开态还响应按下会有个副作用:按下就调 begin_drag,守卫在按住
-    // 期间**不归还前台** —— 按住不放的话前台就留在胶囊上,
-    // 用户的键盘输入会打到胶囊里(功能级问题)。
-    if (ui.orbMode) {
-      if (!ui.expanded) {
-        onOrbMouseDown(e);
-      }
+    // 球和胶囊是同一个窗口、共用同一份位置记忆(config.orb.geometry),
+    // 所以"拖胶囊"和"拖球"是同一件事:挪这个窗口。V1 就是这样,用户
+    // 拍板也要这样 —— 胶囊上有一块看着像把手的地方却拖不动,样式和
+    // 行为分叉在物理上不该可能。
+    if (ui.orbMode && !ui.expanded) {
+      onOrbMouseDown(e);
       return;
     }
-    if (ui.positionMode !== 'custom') {
-      return;
-    }
+    // 位置档位(follow / bottom / custom)已随重构退役:没有"不可拖"的
+    // 档位了,胶囊本体(非按钮区)恒可拖。
+    //
+    // ⚠ 拖动期间前台会留在胶囊上 —— begin_drag 冻结了守卫的焦点归还
+    // (焦点来回跳会拖垮 WebView2 的鼠标捕获),松手时 end_drag 统一
+    // 还回去。这是"按下即拖"的代价,换来"看到把手就能拖"。
     // 点在 ✕ / ✓ 按钮上时不触发拖动
     if (e.target && e.target.closest && e.target.closest('button')) {
       return;
@@ -1269,7 +1280,7 @@
       });
     }
 
-    // 胶囊本体当拖拽把手(只有「自定义」位置模式才真的拖得动)
+    // 胶囊本体当拖拽把手(恒可拖:位置档位已退役)
     if (el.pill) {
       el.pill.addEventListener('mousedown', onDragStart, false);
       // 球形态右键 → 通用功能菜单(展开成胶囊后右键无效)
@@ -1438,7 +1449,9 @@
       applyTheme(mode);
     },
     setPositionMode: function (mode) {
-      // 胶囊位置档位:面板改的。Python 侧也会在录音开始前补推一次。
+      // 胶囊位置档位:**已退役** —— Python 侧不再推这个档位,这里只
+      // 留一个空转的兼容入口(顺带确保 can-drag 挂着)。胶囊的拖动
+      // 位置和球共用同一份记忆,拖胶囊走 move_capsule。
       applyPositionMode(mode);
     },
     setPreviewEnabled: function (enabled) {
@@ -1507,7 +1520,7 @@
     // 波形条在进入录音阶段时才建(见 setPhase),这里只定阶段
     setPhase('recording');
     applyTheme('auto');   // Python 就绪后会用 setTheme 推真实档位
-    applyPositionMode('follow');   // 同理:setPositionMode 会推真实档位
+    applyPositionMode('follow');   // 位置档位已退役:这里只负责挂上 can-drag
     applyPreviewEnabled(true);      // 同理:setPreviewEnabled 会推真实值
     applyOrbMode(false);             // 同理:setOrbMode 会推真实值
     applyOrbPosition('follow');       // 同理:setOrbPosition 会推真实值

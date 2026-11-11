@@ -53,20 +53,34 @@ class ASREngine(ASRBackend):
 
     @property
     def model_id(self) -> str:
-        """当前模型的标识:优先本地权重目录,否则仓库名。"""
-        local = self.model_root / f"Qwen3-ASR-{self.model_tag}"
-        if local.is_dir():
-            return str(local)
-        return f"Qwen/Qwen3-ASR-{self.model_tag}"
+        """当前模型的标识(面板显示用)。
+
+        永远显示本地权重路径 —— 目录不存在也照实显示,**不再**回退成
+        HuggingFace 仓库名:``load()`` 已不允许从那里拉取,显示仓库名
+        等于谎称"会自动下载"。
+        """
+        return str(self.model_root / f"Qwen3-ASR-{self.model_tag}")
 
     def load(self, model_tag: str | None = None) -> float:
-        """加载模型(可顺便切换规格),返回耗时秒数。"""
+        """加载模型(可顺便切换规格),返回耗时秒数。
+
+        只认本地权重目录,**绝不静默联网下载**:目录不在就把原因和
+        出路说清楚,由用户(或他的 AI 助手)决定下载权重还是走网络后端。
+        """
         import torch
         from qwen_asr import Qwen3ASRModel
 
         tag = model_tag or self.model_tag
         local = self.model_root / f"Qwen3-ASR-{tag}"
-        model_id = str(local) if local.is_dir() else f"Qwen/Qwen3-ASR-{tag}"
+        if not local.is_dir():
+            raise ASRError(
+                f"本地权重缺失:{local} 不存在\n"
+                "本地后端不会联网下载 —— 请二选一:\n"
+                f"  1) 下载权重后,在 data/config.json 的 model_root 里配好"
+                f"权重根目录(其下应有 Qwen3-ASR-{tag}/ 子目录),国内可用 ModelScope:\n"
+                f"     modelscope download --model Qwen/Qwen3-ASR-{tag} --local_dir \"{local}\"\n"
+                "  2) 或把后端切成 minimax 网络接口(不需要本地权重,音频会出本机)")
+        model_id = str(local)
 
         log.info("加载模型 %s ...", model_id)
         t0 = time.time()

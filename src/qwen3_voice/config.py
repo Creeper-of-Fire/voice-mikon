@@ -117,8 +117,8 @@ class Config:
     hotkey: str = "ctrl+alt+space"
     model: str = "0.6B"                       # 可选 0.6B / 1.7B
     # 本地 Qwen3-ASR 权重所在的根目录(其下应有 Qwen3-ASR-0.6B/ 等子目录)。
-    # 默认空 = 不指给任何人本机路径:本地后端必须显式配置;为空时引擎
-    # 找不到本地权重,会回退去 HuggingFace 拉取(离线/弱网必失败)。
+    # 默认空 = 不指给任何人本机路径:本地后端必须显式配置,缺权重时
+    # 明确报错指路(见 engines/engine.py),**绝不静默联网下载**。
     model_root: str = ""
 
     # ---- 识别后端(本地 / 网络,互斥)

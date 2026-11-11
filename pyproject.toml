@@ -16,6 +16,11 @@ dependencies = [
     "transformers==4.57.6",
     "qwen-asr==0.0.6",
     "soundfile>=0.12",
+    # 预览断句的 Silero VAD 判定层跑在 ONNX Runtime 上(CPU 版即可)。
+    #   为什么不用 torch —— 网络 ASR 后端本来可以零 torch,却会被
+    #   TorchScript 版 VAD 把 torch 拖进来(几百 MB 内存)。
+    #   换 ONNX 后判定结果几乎逐帧一致(实测最大概率偏差 1.7e-06)。
+    "onnxruntime>=1.17",
     # 网络 ASR 后端(MiniMax)要用的两个:
     #   scipy —— 重采样(resample_poly,多相滤波,带抗混叠低通)。
     #            之前它只是 librosa 的传递依赖,这里显式声明,

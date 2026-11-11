@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import threading
 import time
+from dataclasses import dataclass
 
 from ..logging_setup import get_logger
 from .api import kernel32, user32
@@ -14,13 +15,49 @@ log = get_logger("win32.clipboard")
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
+# 写入结果的原因码 —— 让调用方能分清"卡在哪一步",而不是只拿到一个
+# 说不清缘由的 False。
+WRITE_REASON_OK = ""                 # 成功
+WRITE_REASON_OPEN_FAILED = "open_failed"      # 剪贴板被别人占着,开不了
+WRITE_REASON_WRITE_FAILED = "write_failed"    # SetClipboardData 没成功
+WRITE_REASON_VERIFY_FAILED = "verify_failed"  # 写完读回来对不上
+
+
+@dataclass(frozen=True)
+class ClipboardResult:
+    """一次剪贴板写入的结果。
+
+    ok     真的写进去了吗(带读回校验,见 :func:`set_text_verified`)
+    reason 失败的原因码(成功时是空串)
+    """
+
+    ok: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+# ---- 打开剪贴板的重试窗口 ----
+#
 # 剪贴板是全局资源,别的进程可能正占着它(OpenClipboard 会失败)。
 # 读不出来时必须重试 —— 而且**读失败要和"里面没有文本"分开**:
 # 把"读失败"当成"没有文本"是个危险的误判:注入逻辑会据此决定
 # "没有原内容需要归还",用户剪贴板里的东西就丢了。
 # 所以下面有 :func:`read_text` 返回 (ok, text) 两段信息。
-_OPEN_RETRIES = 4
-_OPEN_DELAY = 0.02
+#
+# 重试窗口原来只有 4 次 × 20ms ≈ 60ms —— 第三方剪贴板管理器
+# (Ditto 一类)稍微多占用一会儿,写入就直接失败;而失败之后**拿不出
+# 任何证据**说明"到底写没写进去"(见 set_text_verified),用户看到的
+# 只有一句"复制失败",剪贴板里其实什么都没有。
+#
+# 提到 10 次 × 50ms ≈ 450ms:够第三方管理器把板子还回来,又不会把注入
+# 路径卡得太久(最坏 450ms 打开 + 注入自己的 3 次重试,仍在可接受范围)。
+#
+# ⚠ 重试窗口只影响"打不开板"这一件事;**"读失败"与"里面没有文本"的
+# 区分语义一点没动**(见 :func:`read_text`)。
+_OPEN_RETRIES = 10
+_OPEN_DELAY = 0.05
 
 # ---- 剪贴板 owner:一块 message-only 窗口,专给写入挂名 ----
 #
@@ -210,7 +247,17 @@ def release_ownership() -> None:
 
 
 def _relinquish_ownership() -> None:
-    """把剪贴板所有权转给 NULL,但保住内容(见模块头的 Windows 规矩)。"""
+    """把剪贴板所有权转给 NULL,但保住内容(见模块头的 Windows 规矩)。
+
+    转交完再**读回核对一次**:这里承诺的是"内容留着",那就得确认它
+    真的留着 —— 空口无凭的承诺不算数(和 :func:`set_text_verified` 同一
+    道理)。核对失败只记日志:这条路径跑在退出前,那时已经没有补救余地。
+
+    核对走的是 ``OpenClipboard(NULL)``,**不碰 owner 窗口** —— 本函数
+    可能正在 owner 窗口的 WM_DESTROY 里跑,那时去重建 owner 窗口等于
+    在窗口销毁回调里造新窗口,自己给自己挖坑。
+    """
+    text: str | None = None
     try:
         if not user32.OpenClipboard(None):
             return
@@ -234,6 +281,27 @@ def _relinquish_ownership() -> None:
             _write_text_locked(text)
         finally:
             user32.CloseClipboard()
+    except Exception:
+        return
+
+    try:
+        if not user32.OpenClipboard(None):
+            log.warning("剪贴板转交后核对失败:剪贴板打不开")
+            return
+        try:
+            handle = user32.GetClipboardData(CF_UNICODETEXT)
+            current: str | None = None
+            if handle:
+                ptr = kernel32.GlobalLock(handle)
+                if ptr:
+                    try:
+                        current = ctypes.c_wchar_p(ptr).value
+                    finally:
+                        kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+        if current != text:
+            log.warning("剪贴板转交后读回不一致,内容可能没留住")
     except Exception:
         pass
 
@@ -334,14 +402,55 @@ def _write_text_locked(text: str) -> bool:
     return True
 
 
-def set_text(text: str) -> bool:
-    """把文本写入剪贴板,成功返回 True。"""
+def set_text_verified(text: str) -> ClipboardResult:
+    """把文本写入剪贴板,并**读回校验**,返回带原因码的结果。
+
+    为什么必须读回:``SetClipboardData`` 返回非零只说明"系统收下了这块
+    内存",**不代表剪贴板里真的有这份内容** —— 剪贴板被别人占着、
+    写完立刻被覆盖、owner 窗口已经失效(见模块头)都会让"写入成功"
+    变成一句空话。实测症状:程序报"已复制成功",剪贴板里**什么都没有**,
+    用户按 Ctrl+V 贴出的是上一次的旧内容,还以为程序在乱写。
+
+    所以写完关板、重新打开、读回来比对:
+    - 读回来的文本 == 写入的文本 -> 真的写进去了
+    - 读不回来(打不开板 / 锁内存失败)-> **也算失败**。读不回来就没有
+      "写成功了"的证据,不能拿"可能成功了"去糊弄用户。
+
+    读回用的是 ``GetClipboardData``,**不会**递增剪贴板变更序号 ——
+    注入层"这份剪贴板还是我写的那份吗"的序号判定不受影响。
+    """
     try:
         if not _open_clipboard():
-            return False
+            log.warning("剪贴板打不开(可能被别的程序占着),写入失败")
+            return ClipboardResult(False, WRITE_REASON_OPEN_FAILED)
         try:
-            return _write_text_locked(text)
+            written = _write_text_locked(text)
         finally:
             user32.CloseClipboard()
-    except Exception:
-        return False
+        if not written:
+            log.warning("写剪贴板失败(SetClipboardData 没成功)")
+            return ClipboardResult(False, WRITE_REASON_WRITE_FAILED)
+
+        # 读回校验:必须**关板再读** —— 开着板读回来的是自己刚写进内存的
+        # 那一份,验的是内存不是剪贴板。
+        ok, current = read_text()
+        if not ok:
+            log.warning("剪贴板写入后读回失败,当作没写进去")
+            return ClipboardResult(False, WRITE_REASON_VERIFY_FAILED)
+        if current != text:
+            log.warning("剪贴板写入后读回不一致(写入 %d 字,读回 %d 字),当作没写进去",
+                        len(text), len(current or ""))
+            return ClipboardResult(False, WRITE_REASON_VERIFY_FAILED)
+        return ClipboardResult(True, WRITE_REASON_OK)
+    except Exception as e:
+        log.debug("写剪贴板异常: %s", e)
+        return ClipboardResult(False, WRITE_REASON_WRITE_FAILED)
+
+
+def set_text(text: str) -> bool:
+    """把文本写入剪贴板,成功返回 True。
+
+    带读回校验(见 :func:`set_text_verified`):写进去的内容能被读回来
+    才算成功。
+    """
+    return set_text_verified(text).ok

@@ -45,13 +45,14 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 
 from ..logging_setup import get_logger
-from . import clipboard
-from .api import (get_foreground_window, modifiers_held, restore_foreground,
-                  send_ctrl_v, get_window_title)
+from ..win32 import clipboard
+from ..win32.api import (get_foreground_window, modifiers_held, restore_foreground,
+                         send_ctrl_v, get_window_title)
 
-log = get_logger("win32.inject")
+log = get_logger("core.inject")
 
 # 粘贴后等待目标应用消费剪贴板的时间。
 # 太短 -> 目标还没读就被恢复,粘贴出来的是旧内容(实测踩到过);
@@ -67,9 +68,47 @@ RESTORE_SETTLE = 1.0
 INJECT_ATTEMPTS = 3
 INJECT_RETRY_DELAY = 0.2
 
+# 失败原因码:把"到底卡在哪一步"说清楚。
+#
+# 以前所有失败都长成同一个样子(一个 False),上层只好写一句万能文案
+# "注入失败,文字已留在剪贴板" —— 复制其实失败的时候,这句话是**假的**
+# (剪贴板里什么都没有)。有了原因码 + 剪贴板实况,失败通知才能说实话。
+REASON_EMPTY_TEXT = "empty_text"
+REASON_CLIPBOARD_OPEN_FAILED = "clipboard_open_failed"
+REASON_CLIPBOARD_WRITE_FAILED = "clipboard_write_failed"
+REASON_CLIPBOARD_VERIFY_FAILED = "clipboard_verify_failed"
+REASON_MODIFIER_HELD = "modifier_held"
+REASON_KEYS_NOT_SENT = "keys_not_sent"
+
+# 剪贴板层的原因码 → 注入层的原因码(win32 是纯绑定层,不反过来依赖 core)
+_CLIPBOARD_REASON_MAP = {
+    clipboard.WRITE_REASON_OPEN_FAILED: REASON_CLIPBOARD_OPEN_FAILED,
+    clipboard.WRITE_REASON_WRITE_FAILED: REASON_CLIPBOARD_WRITE_FAILED,
+    clipboard.WRITE_REASON_VERIFY_FAILED: REASON_CLIPBOARD_VERIFY_FAILED,
+}
+
+
+@dataclass(frozen=True)
+class InjectResult:
+    """一次注入的结果。
+
+    ok      文字有没有真的送进目标窗口
+    reason  失败原因码(成功时是空串)
+    text_in_clipboard  失败时**剪贴板里实际有没有我们的那份文本** ——
+             读回比对出来的,不是猜的。用户靠它判断"按 Ctrl+V 能不能拿到"。
+    """
+
+    ok: bool
+    reason: str = ""
+    text_in_clipboard: bool = False
+
+    def __bool__(self) -> bool:
+        # 旧调用方拿它当 bool 用(``if not result:``)—— 语义不变。
+        return self.ok
+
 
 def paste_text(text: str, hwnd: int = 0, restore: bool = True,
-               trailing_space: bool = True) -> bool:
+               trailing_space: bool = True) -> InjectResult:
     """把 text 粘贴到 hwnd 窗口的光标处。
 
     hwnd 为 0 表示不恢复焦点(粘贴到当前前台窗口)。
@@ -78,15 +117,20 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
     ``INJECT_ATTEMPTS`` 次;**粘贴已触发就绝不重试** —— 那会造成
     重复文本,比失败更糟。
 
-    返回**是否真的送到了目标窗口**。
+    返回 :class:`InjectResult`:除了"是否真的送到了目标窗口",还带上
+    失败原因码,以及**剪贴板里实际有没有我们的文本**(读回比对出来的)。
 
     送不到就必须如实说送不到 —— 谎报成功比失败更糟:用户以为文字
     已经进输入框了,不会再去别处找,结果那段话其实哪儿都没有。
     送不到时的兜底是**把识别结果留在剪贴板里**(不归还),用户按一下
     Ctrl+V 就能拿到,胶囊上也有「复制」按钮可以点。
+
+    ⚠ "留在剪贴板里"这句话是**有条件的**:剪贴板被占导致根本没写进去
+    时,里面什么都没有 —— 这时 ``text_in_clipboard`` 是 False,上层
+    必须照实说"复制失败",不能说"已留在剪贴板"(原话就是假的)。
     """
     if not text:
-        return False
+        return InjectResult(False, REASON_EMPTY_TEXT)
 
     if trailing_space and not text.endswith((" ", "\n", "。", "!", "?", "，")):
         text += " "
@@ -104,8 +148,9 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
             log.warning("读不到原剪贴板内容(可能被别的程序占着),"
                         "本次不归还,识别结果将留在剪贴板")
 
+    reason = REASON_EMPTY_TEXT
     for attempt in range(1, INJECT_ATTEMPTS + 1):
-        delivered, published_seq = _attempt_inject(text, hwnd, attempt)
+        delivered, published_seq, reason = _attempt_inject(text, hwnd, attempt)
         if delivered:
             # 恢复原剪贴板放到后台线程:_restore 里要等 RESTORE_SETTLE
             # (约 1 秒)才动手,同步等它的话 UI 状态会滞后 —— 用户已经
@@ -121,32 +166,61 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
                     target=_restore, args=(original, text, published_seq),
                     name="clipboard-restore", daemon=True,
                 ).start()
-            return True
+            return InjectResult(True, "", True)
         if attempt < INJECT_ATTEMPTS:
             log.info("注入未送达(第 %d/%d 次尝试),%.0fms 后重试",
                      attempt, INJECT_ATTEMPTS, INJECT_RETRY_DELAY * 1000)
             time.sleep(INJECT_RETRY_DELAY)
 
-    log.warning("注入重试 %d 次仍未送达,识别结果保留在剪贴板里", INJECT_ATTEMPTS)
-    return False
+    # 失败时的实况:剪贴板里到底有没有我们的那份文本 —— **读回比对**,
+    # 不猜。这一句决定了上层能不能说"按 Ctrl+V 就能拿到"。
+    in_clipboard = _text_in_clipboard(text)
+    log.warning("注入重试 %d 次仍未送达(%s),识别结果%s",
+                INJECT_ATTEMPTS, reason,
+                "保留在剪贴板里" if in_clipboard else "没能写进剪贴板")
+    return InjectResult(False, reason, in_clipboard)
 
 
-def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int]:
-    """单次注入尝试,返回 ``(是否送达, 发布时的剪贴板序号)``。
+def _text_in_clipboard(text: str) -> bool:
+    """剪贴板里现在是不是我们的那份文本。
+
+    **读回来比对**,不猜:写入其实失败了、或者压根没走到写入那一步
+    (修饰键被按住),剪贴板里装的是别的东西 —— 只有真读回来对上了
+    才算数。
+    """
+    try:
+        ok, current = clipboard.read_text()
+    except Exception as e:
+        log.debug("核对剪贴板内容失败: %s", e)
+        return False
+    return bool(ok) and current == text
+
+
+def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]:
+    """单次注入尝试,返回 ``(是否送达, 发布时的剪贴板序号, 失败原因)``。
 
     任何一步失败都返回 False —— 由上层决定是否重试。
     粘贴已触发(见下方 sent 判定)必须返回 True:重试会造成重复文本。
+
+    剪贴板写入失败(含**读回校验**不过)都发生在 ``send_ctrl_v`` **之前**,
+    此时粘贴还没触发,重试是安全的 —— 不会贴出重复文字。
     """
     # 用户正按着 Ctrl/Alt/Shift 的话,发出去的其实是 Ctrl+Alt+V,
     # 目标应用收到的是别的东西,粘贴根本不会触发。
     # 多数是松热键的 keyup 竞态 —— 上层睡一下再试通常就过了。
     if modifiers_held():
         log.debug("用户正按住修饰键(第 %d 次尝试),放弃本次", attempt)
-        return False, 0
+        return False, 0, REASON_MODIFIER_HELD
 
-    if not clipboard.set_text(text):
-        log.debug("写入剪贴板失败(第 %d 次尝试)", attempt)
-        return False, 0
+    write = clipboard.set_text_verified(text)
+    if not write.ok:
+        # 写不进去就别往下走:剪贴板里没有文字,Ctrl+V 贴出来的会是
+        # 用户原来那份(或空的)—— 那比不贴更糟。
+        log.debug("写入剪贴板失败(第 %d 次尝试):%s", attempt, write.reason)
+        return False, 0, _CLIPBOARD_REASON_MAP.get(
+            write.reason, REASON_CLIPBOARD_WRITE_FAILED)
+    # 写入自带的读回校验用的是 GetClipboardData,**不递增变更序号** ——
+    # 这里取到的序号仍然是"我们这份"的序号,归属判定不受影响。
     published_seq = clipboard.get_sequence_number()
 
     # 转写这 1 秒里用户可能切了窗口,把焦点还回去再贴
@@ -163,14 +237,14 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int]:
     if sent < 2:
         log.warning("Ctrl+V 一个事件都没送出去(sent=%d,第 %d 次尝试)",
                     sent, attempt)
-        return False, published_seq
+        return False, published_seq, REASON_KEYS_NOT_SENT
     if sent < 4:
         # 抬起事件没全部送达,但 V↓ 已经送出去 = 粘贴**已经触发**了。
         # api.send_ctrl_v 会把抬起事件补发掉(补发在微秒级,远快过
         # 按键重复的最小间隔),所以绝不能重贴 —— 那会造成重复文本。
         log.info("Ctrl+V 只投递了 %d/4 个事件,粘贴已触发", sent)
     time.sleep(PASTE_SETTLE)
-    return True, published_seq
+    return True, published_seq, ""
 
 
 def _restore(original: str | None, written: str,
@@ -209,9 +283,12 @@ def _restore(original: str | None, written: str,
 
 
 def paste_with_feedback(text: str, hwnd: int = 0, restore: bool = True) -> bool:
-    """同上,但会记录焦点窗口标题,便于排障。"""
+    """同上,但会记录焦点窗口标题,便于排障。
+
+    返回值保持 bool(不往外抛 InjectResult):这个函数只是排障用的包装。
+    """
     if hwnd:
         title = get_window_title(hwnd)
         if get_foreground_window() != hwnd:
             print(f"[focus] 焦点已变化,恢复到: {title[:40]}")
-    return paste_text(text, hwnd=hwnd, restore=restore, trailing_space=False)
+    return bool(paste_text(text, hwnd=hwnd, restore=restore, trailing_space=False))

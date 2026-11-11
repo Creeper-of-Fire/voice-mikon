@@ -53,7 +53,7 @@ from ..config import Config
 from ..logging_setup import get_logger
 from ..notify import notify as default_notifier
 from ..win32.api import get_foreground_window
-from ..win32.inject import paste_text
+from .inject import InjectResult, paste_text
 from .levels import dbfs_to_unit, level_gate
 from .state import (
     HEALTH_FAILED,
@@ -76,6 +76,8 @@ REASON_ALREADY_RECORDING = "already_recording"
 REASON_PROCESSING = "processing"
 REASON_NOT_RECORDING = "not_recording"
 REASON_RECORDER_START_FAILED = "recorder_start_failed"
+# 注入器返回了假值(不是 InjectResult)时的兜底原因码
+REASON_INJECT_FAILED = "inject_failed"
 
 # 电平推送频率:30fps(前端电平条按这个节奏画)
 LEVEL_PUSH_INTERVAL = 1.0 / 30.0
@@ -138,9 +140,22 @@ _APP_STATE_BY_V1: dict[State, str] = {
 }
 
 
-def _default_injector(text: str, hwnd: int, restore: bool, trailing_space: bool) -> bool:
+def _default_injector(text: str, hwnd: int, restore: bool,
+                      trailing_space: bool) -> InjectResult:
     """默认的文本注入:剪贴板 + 模拟 Ctrl+V。"""
     return paste_text(text, hwnd=hwnd, restore=restore, trailing_space=trailing_space)
+
+
+def _as_inject_result(value) -> InjectResult:
+    """把注入器的返回值统一成 :class:`InjectResult`。
+
+    注入器是可替换的(假实现),老式的 bool 返回值照样收下 ——
+    bool 的语义("成没成")与 ``InjectResult.ok`` 完全一致。
+    """
+    if isinstance(value, InjectResult):
+        return value
+    ok = bool(value)
+    return InjectResult(ok=ok, reason="" if ok else REASON_INJECT_FAILED)
 
 
 def _default_recorder_factory(config: Config, device: int | None = None) -> Recorder:
@@ -784,23 +799,32 @@ class CoreController:
         if self._is_stale(session):
             log.debug("注入前发现这一轮已被取消,丢弃")
             return
-        ok = self._injector(
+        result = _as_inject_result(self._injector(
             text,
             hwnd=hwnd,
             restore=self.config.restore_clipboard,
             trailing_space=self.config.trailing_space,
-        )
+        ))
         self._set_state(State.IDLE)
-        if not ok:
+        if not result.ok:
             # 失败也要把原文带出去:只报一句"文本注入失败",用户既看不到
             # 自己说了什么,也没法把它捞回来 —— 那段话就等于不存在了。
             # 胶囊会把它显示出来,并给一个「复制」按钮。
-            # 文案要点破**兜底出口**:识别结果此刻就留在剪贴板里(没送达
-            # 就不还,是注入层的规矩),用户按 Ctrl+V 立刻能贴出来 ——
-            # 不说清楚的话,报错的同时文字明明一按就出来,用户却不知道
-            # (实测:三连败后手动 Ctrl+V 贴出去了,看着错误提示一头雾水)。
-            self._notify("error", "inject_failed",
-                         "注入失败，文字已留在剪贴板", text=text)
+            #
+            # 文案按**实况**分两类(硬规则:任何"声称成功"都得有验证):
+            #   剪贴板里确实有我们的文本 -> 只是没送出去,用户按 Ctrl+V 就能拿到
+            #   剪贴板里没有              -> 复制这一步就失败了,得让用户手动重来
+            # 以前这两种都报同一句"文字已留在剪贴板" —— 复制其实失败时
+            # 这句话是**假的**:剪贴板里什么都没有,用户按 Ctrl+V 贴出来的
+            # 是上一次的旧内容,还以为程序在乱写。
+            if result.text_in_clipboard:
+                self._notify("warning", "inject_failed",
+                             "文字已复制到剪贴板,但没能自动粘贴出去,按 Ctrl+V 即可",
+                             text=text, reason=result.reason)
+            else:
+                self._notify("error", "inject_failed",
+                             "复制到剪贴板失败,请在胶囊上点「复制」重试",
+                             text=text, reason=result.reason)
         # 最终结果到了,预览文字就没用了(最终结果始终来自整段识别,不是预览)
         self._update_state(preview_text="")
 

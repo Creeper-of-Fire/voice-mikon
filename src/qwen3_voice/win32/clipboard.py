@@ -380,12 +380,29 @@ def get_sequence_number() -> int:
 
 
 def _write_text_locked(text: str) -> bool:
-    """剪贴板**已打开**的前提下写入文本(set_text 的内部步骤)。"""
-    user32.EmptyClipboard()
+    """剪贴板**已打开**的前提下写入文本(set_text 的内部步骤)。
+
+    顺序是硬要求:**先分配,后清板**。
+
+    为什么不能反:``EmptyClipboard`` 一执行,用户原来那份内容就**没了**
+    (不可撤销)。而分配内存是会失败的 —— 内存紧张时 ``GlobalAlloc``
+    直接返回 0。原来"先清板再分配"的写法在这个失败分支上就是
+    "把用户剪贴板清空了,新内容却没写进去":用户按 Ctrl+V 贴出空,
+    而且**再也找不回来**。所以分配链(GlobalAlloc → GlobalLock →
+    memmove)必须整条走通、确认内容已经在自己手里了,才允许动板。
+
+    ``SetClipboardData`` 本身**不**清掉板上的其它格式(只替换同格式),
+    所以清板这一步不能省;但它必须发生在写入**之前**,否则新内容
+    会被随后的 EmptyClipboard 一起清掉。
+
+    这样丢数据的窗口就从"分配失败(现实可能发生)"压缩到
+    "清板之后 SetClipboardData 罕见失败(极小概率)"。
+    """
     data = text + "\0"
     size = len(data) * ctypes.sizeof(ctypes.c_wchar)
     handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
     if not handle:
+        # 分配失败:**板还没动**,用户原来的内容完好无损
         return False
     ptr = kernel32.GlobalLock(handle)
     if not ptr:
@@ -395,6 +412,9 @@ def _write_text_locked(text: str) -> bool:
         ctypes.memmove(ptr, ctypes.create_unicode_buffer(data), size)
     finally:
         kernel32.GlobalUnlock(handle)
+
+    # 内容已经在自己手里了,这才可以动板
+    user32.EmptyClipboard()
     if not user32.SetClipboardData(CF_UNICODETEXT, handle):
         kernel32.GlobalFree(handle)
         return False

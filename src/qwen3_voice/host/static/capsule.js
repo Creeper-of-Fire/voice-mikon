@@ -1008,7 +1008,10 @@
     }
 
     if (mode === 'processing') {
-      setPhase('processing');
+      // message 非空时覆盖默认文案:注入在等用户松修饰键时,
+      // presenter 会把"识别中…"换成"松开按键后自动粘贴" ——
+      // 等待可见,用户看到就会松,等待时长自然缩短。
+      setPhase('processing', message || null);
       return;
     }
 

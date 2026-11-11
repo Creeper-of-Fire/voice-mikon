@@ -215,22 +215,24 @@ class PanelPresenter:
             return
 
         if state is not None:
-            # 方法名必须是前端 window.__panel 上的驼峰名 —— 推成
-            # snake_case 会被 _call_js 的 try 静默吞掉,面板从出生起就
-            # 收不到任何推送、全部停在 JS 默认值(实测踩过:引擎已是
-            # minimax,面板永远显示"本地/加载中")。
-            self._push(panel, "setState", state.state)
+            # 这里的名字是 **host 层 VoicePanel 的方法名**(snake_case,
+            # getattr(panel, method) 取的是它);host 方法内部再转成前端
+            # window.__panel 的驼峰名(_call_js("setState"))。三层名字链:
+            # presenter "set_state" → host set_state() → 前端 setState。
+            # 别把 presenter 这层改成驼峰 —— getattr 会取不到方法,
+            # 异常被 except 吞掉,推送静默丢失(踩过)。
+            self._push(panel, "set_state", state.state)
             health = state.backend_health
-            self._push(panel, "setHealth", health.status, health.reason)
-            self._push(panel, "setModel", state.model)
-            self._push(panel, "setBackend", state.backend)
+            self._push(panel, "set_health", health.status, health.reason)
+            self._push(panel, "set_model", state.model)
+            self._push(panel, "set_backend", state.backend)
 
         # 配置这几项是**低频**的:只在值真的变了的时候推。
-        self._push(panel, "setTheme", self._theme_mode())
-        self._push(panel, "setPreviewEnabled", self._preview_enabled())
-        self._push(panel, "setOrbEnabled", self._orb_enabled())
-        self._push(panel, "setStandby", self._standby_mode())
-        self._push(panel, "setHotkey", self._hotkey())
+        self._push(panel, "set_theme", self._theme_mode())
+        self._push(panel, "set_preview_enabled", self._preview_enabled())
+        self._push(panel, "set_orb_enabled", self._orb_enabled())
+        self._push(panel, "set_standby", self._standby_mode())
+        self._push(panel, "set_hotkey", self._hotkey())
 
     def _push(self, panel: Any, method: str, *args: Any) -> None:
         """推给前端(同名同值不重复推 —— 空推会白刷前端)。"""
@@ -270,12 +272,13 @@ class PanelPresenter:
         if panel is None:
             return
         panel.on_frontend_ready()
-        # 就绪前的所有推送都被 _frontend_ready 门控丢弃过 —— 装配期的
-        # push_full_state、以及模型加载就绪那波 _update_state 都可能
-        # 赶在前端加载完之前发生(MiniMax 后端 load 只要 0.2s,而 WebView
-        # 加载页面要几秒)。不重推的话,面板会一直显示前端自己的默认值
-        # (典型症状:引擎已是 minimax,面板却显示"本地")。就绪即重推全量,
-        # 这正是"快照订阅:新订阅者立刻收到当前快照"的应有语义。
+        # 就绪前的所有推送都被 _frontend_ready 门控丢弃过 —— 但 _push 的
+        # 去重账本在调用时就记了账(它不知道对端丢弃了),不清账的话,
+        # 就绪后的全量重推会被去重逻辑当成"已推过"全部跳过,面板永远
+        # 停在前端默认值(引擎已就绪却显示"加载中/本地/0.6B")。
+        # 所以:就绪 = 账本清零 + 重推全量,被丢弃的推送不算数。
+        with self._lock:
+            self._pushed.clear()
         self.push_full_state()
 
     def switch_model(self, tag: str) -> None:

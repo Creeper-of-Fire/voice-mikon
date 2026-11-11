@@ -56,8 +56,19 @@ class ClipboardResult:
 #
 # ⚠ 重试窗口只影响"打不开板"这一件事;**"读失败"与"里面没有文本"的
 # 区分语义一点没动**(见 :func:`read_text`)。
-_OPEN_RETRIES = 10
-_OPEN_DELAY = 0.05
+#
+# 节奏是"前密后疏"两段式(实测口径,用户拍板):
+#   - 前段(20~60ms 间隔,~150ms 内 5 次):占用方很快就放板的常见情形,
+#     手动点「复制」按钮时几乎无感;
+#   - 后段(100~200ms 间隔,拖到 ~2s):第三方剪贴板管理器(Ditto 一类)
+#     正在做整轮扫描/写入,持有剪贴板可到秒级 —— 等它做完再抢,
+#     比 500ms 就放弃诚实得多(用户实测:间隔太短时"占着板的功能
+#     还没彻底关闭",重试全落空)。
+_OPEN_RETRY_DELAYS = (
+    0.02, 0.02, 0.04, 0.04, 0.06,          # 前段:快速抢
+    0.10, 0.10, 0.15, 0.15,                 # 过渡
+    0.20, 0.20, 0.20, 0.20, 0.20, 0.20,     # 后段:耐心等,总窗口 ~1.9s
+)
 
 # ---- 剪贴板 owner:一块 message-only 窗口,专给写入挂名 ----
 #
@@ -307,14 +318,15 @@ def _relinquish_ownership() -> None:
 
 
 def _open_clipboard() -> bool:
-    """打开剪贴板,被占用时短暂重试。带 owner(见模块头)。"""
+    """打开剪贴板,被占用时按节奏表重试(见 _OPEN_RETRY_DELAYS)。带 owner。"""
     owner = _ensure_owner_window()
-    for i in range(_OPEN_RETRIES):
+    for delay in _OPEN_RETRY_DELAYS:
         if user32.OpenClipboard(owner or None):
             return True
-        if i < _OPEN_RETRIES - 1:
-            time.sleep(_OPEN_DELAY)
-    return False
+        time.sleep(delay)
+    # 节奏表走完还打不开才是真失败(最后一次 sleep 后再试一下,
+    # 保证"尝试次数 = 间隔数 + 1")
+    return bool(user32.OpenClipboard(owner or None))
 
 
 def read_text() -> tuple[bool, str | None]:

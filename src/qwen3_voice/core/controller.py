@@ -816,13 +816,18 @@ class CoreController:
             # 自己说了什么,也没法把它捞回来 —— 那段话就等于不存在了。
             # 胶囊会把它显示出来,并给一个「复制」按钮。
             #
-            # 文案按**实况**分两类(硬规则:任何"声称成功"都得有验证):
-            #   剪贴板里确实有我们的文本 -> 只是没送出去,用户按 Ctrl+V 就能拿到
-            #   剪贴板里没有              -> 复制这一步就失败了,得让用户手动重来
-            # 以前这两种都报同一句"文字已留在剪贴板" —— 复制其实失败时
-            # 这句话是**假的**:剪贴板里什么都没有,用户按 Ctrl+V 贴出来的
-            # 是上一次的旧内容,还以为程序在乱写。
-            if result.text_in_clipboard:
+            # 文案按**实况**分类(硬规则:诊断信息必须与失败原因一致 ——
+            # 以前 modifier 类失败(根本没碰剪贴板)也报"复制到剪贴板
+            # 失败",把用户的排查方向带偏了):
+            #   modifier_timeout  → 结束热键一直没松开(与剪贴板无关)
+            #   剪贴板里确实有我们的文本 → 只是没送出去,Ctrl+V 就能拿到
+            #   剪贴板里没有 → 复制这一步就失败了,得手动重来
+            if result.reason == "modifier_timeout":
+                self._notify("warning", "inject_failed",
+                             "结束热键还没松开,没能自动粘贴;"
+                             "松开后可直接 Ctrl+V,或点「复制」",
+                             text=text, reason=result.reason)
+            elif result.text_in_clipboard:
                 self._notify("warning", "inject_failed",
                              "文字已复制到剪贴板,但没能自动粘贴出去,按 Ctrl+V 即可",
                              text=text, reason=result.reason)

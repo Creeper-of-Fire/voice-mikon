@@ -423,14 +423,46 @@ def move_window_to(hwnd: int, x: int, y: int) -> bool:
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
 
 
-def modifiers_held() -> bool:
-    """用户此刻是否正按着 Ctrl / Alt / Shift / Win。
+def held_modifiers() -> set[str]:
+    """此刻正按着的修饰键集合("ctrl" / "alt" / "shift" / "win")。
 
-    按着的时候发 Ctrl+V,目标应用收到的是 Ctrl+Alt+V 之类,
-    粘贴根本不会触发 —— 这种时候宁可放弃注入,也不要往目标窗口
-    塞一个莫名其妙的东西。
+    注入的"等松键"策略需要知道**具体是谁**按着:
+    只剩 Ctrl 时可以顺势只补一个 V(用户的 Ctrl + 我们的 V = 粘贴),
+    Alt/Shift 按着时发什么都不是普通粘贴,只能等。
     """
-    return any(key_is_down(vk) for vk in (VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN))
+    mods: set[str] = set()
+    if key_is_down(VK_CONTROL):
+        mods.add("ctrl")
+    if key_is_down(VK_MENU):
+        mods.add("alt")
+    if key_is_down(VK_SHIFT):
+        mods.add("shift")
+    if key_is_down(VK_LWIN) or key_is_down(VK_RWIN):
+        mods.add("win")
+    return mods
+
+
+def send_v() -> int:
+    """只发 V↓/V↑(不带 Ctrl),返回实际投递数(2 = 全部成功)。
+
+    用在"用户自己按住 Ctrl、我们顺势补 V"的路径 —— Ctrl 是用户
+    手指按着的,状态真实存在;我们**绝不能替他发 Ctrl↓/Ctrl↑**:
+    合成的 Ctrl↓ 会跟物理按键状态打架,合成的 Ctrl↑ 会打断他
+    继续按住的本意。只补 V,抬手的事交给用户自己的手指。
+
+    投递不全时只补发 V 的抬起(V↓ 已投 = 粘贴已触发,绝不重发)。
+    """
+    keys = []
+    for vk, up in ((VK_V, False), (VK_V, True)):
+        ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0)
+        keys.append(INPUT(INPUT_KEYBOARD, _INPUTunion(ki=ki)))
+    sent = user32.SendInput(len(keys), (INPUT * len(keys))(*keys), ctypes.sizeof(INPUT))
+    if 0 < sent < len(keys):
+        # V↓ 投出去了但 V↑ 没有:补抬,别留一个"按住的 V"
+        ups = [INPUT(INPUT_KEYBOARD,
+                     _INPUTunion(ki=KEYBDINPUT(VK_V, 0, KEYEVENTF_KEYUP, 0, 0)))]
+        user32.SendInput(len(ups), (INPUT * len(ups))(*ups), ctypes.sizeof(INPUT))
+    return int(sent)
 
 
 def set_tool_window_style(hwnd: int) -> bool:

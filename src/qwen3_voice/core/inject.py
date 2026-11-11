@@ -49,8 +49,8 @@ from dataclasses import dataclass
 
 from ..logging_setup import get_logger
 from ..win32 import clipboard
-from ..win32.api import (get_foreground_window, modifiers_held, restore_foreground,
-                         send_ctrl_v, get_window_title)
+from ..win32.api import (get_foreground_window, held_modifiers, restore_foreground,
+                         send_ctrl_v, send_v, get_window_title)
 
 log = get_logger("core.inject")
 
@@ -68,6 +68,12 @@ RESTORE_SETTLE = 1.0
 INJECT_ATTEMPTS = 3
 INJECT_RETRY_DELAY = 0.2
 
+# 等修饰键松开的耐心上限与采样步长(见 _wait_modifiers)。
+# 用户按完热键松手是必然的,等比报失败便宜;2.5s 是"真按住不放"
+# (有意长按)与"还没松完"的分界。
+MOD_WAIT_TIMEOUT = 2.5
+MOD_WAIT_STEP = 0.03
+
 # 失败原因码:把"到底卡在哪一步"说清楚。
 #
 # 以前所有失败都长成同一个样子(一个 False),上层只好写一句万能文案
@@ -77,7 +83,7 @@ REASON_EMPTY_TEXT = "empty_text"
 REASON_CLIPBOARD_OPEN_FAILED = "clipboard_open_failed"
 REASON_CLIPBOARD_WRITE_FAILED = "clipboard_write_failed"
 REASON_CLIPBOARD_VERIFY_FAILED = "clipboard_verify_failed"
-REASON_MODIFIER_HELD = "modifier_held"
+REASON_MODIFIER_TIMEOUT = "modifier_timeout"
 REASON_KEYS_NOT_SENT = "keys_not_sent"
 
 # 剪贴板层的原因码 → 注入层的原因码(win32 是纯绑定层,不反过来依赖 core)
@@ -196,6 +202,39 @@ def _text_in_clipboard(text: str) -> bool:
     return bool(ok) and current == text
 
 
+def _wait_modifiers(attempt: int) -> str:
+    """等修饰键松开,返回 "clear" / "ctrl" / "timeout"。
+
+    - "clear":全松开,正常合成 Ctrl+V;
+    - "ctrl":**稳定**只剩 Ctrl 按住(连续两个采样周期都是)—— 判定为
+      用户有意按住,可顺势补 V。"稳定"这个条件是在滤掉松键途中
+      的一瞬(全松的路径会经过 {ctrl,alt}→{ctrl}→{},那一瞬的
+      ctrl-only 说明用户其实在松手,等他松完走正常路径);
+    - "timeout":等满上限还按着(Alt/Shift/Win 没松,或 Ctrl 抖动
+      一直不稳)—— 由调用方如实报 modifier_timeout。
+
+    网络后端(MiniMax)识别只要零点几秒,注入开始时用户手指还留在
+    热键上是常态 —— 等 2.5 秒的成本远低于"报失败 + 用户手动重试"。
+    """
+    deadline = time.monotonic() + MOD_WAIT_TIMEOUT
+    ctrl_stable = 0
+    while True:
+        mods = held_modifiers()
+        if not mods:
+            return "clear"
+        if mods == {"ctrl"}:
+            ctrl_stable += 1
+            if ctrl_stable >= 2:
+                return "ctrl"
+        else:
+            ctrl_stable = 0
+        if time.monotonic() >= deadline:
+            log.debug("等修饰键松开超时(第 %d 次尝试,仍按着:%s)",
+                      attempt, sorted(mods))
+            return "timeout"
+        time.sleep(MOD_WAIT_STEP)
+
+
 def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]:
     """单次注入尝试,返回 ``(是否送达, 发布时的剪贴板序号, 失败原因)``。
 
@@ -205,12 +244,20 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
     剪贴板写入失败(含**读回校验**不过)都发生在 ``send_ctrl_v`` **之前**,
     此时粘贴还没触发,重试是安全的 —— 不会贴出重复文字。
     """
-    # 用户正按着 Ctrl/Alt/Shift 的话,发出去的其实是 Ctrl+Alt+V,
-    # 目标应用收到的是别的东西,粘贴根本不会触发。
-    # 多数是松热键的 keyup 竞态 —— 上层睡一下再试通常就过了。
-    if modifiers_held():
-        log.debug("用户正按住修饰键(第 %d 次尝试),放弃本次", attempt)
-        return False, 0, REASON_MODIFIER_HELD
+    # ---- 等修饰键松开(不再"发现按着就立刻失败") ----
+    # 用户结束录音的方式就是再按一次热键(Ctrl+Alt+Space),识别完成时
+    # 手指常还留在键上 —— 这不是故障,是必然的时间差。以前把它当
+    # "失败"烧掉三次重试(共 ~0.5s),再报一句"复制到剪贴板失败"
+    # (其实根本没碰剪贴板,纯误导)。现在改成就地等:
+    #   - 全松 → 正常合成 Ctrl+V
+    #   - 稳定只剩 Ctrl(用户有意按住) → **顺势只补一个 V**
+    #     (用户的物理 Ctrl + 我们的 V = 粘贴,连 Ctrl 都不用合成)
+    #   - Alt/Shift/Win 按着 → 发什么都不再是普通粘贴,继续等
+    #   - 等满 MOD_WAIT_TIMEOUT 还按着 → 如实报 modifier_timeout
+    mod = _wait_modifiers(attempt)
+    if mod == "timeout":
+        return False, 0, REASON_MODIFIER_TIMEOUT
+    ctrl_held_by_user = (mod == "ctrl")
 
     write = clipboard.set_text_verified(text)
     if not write.ok:
@@ -228,21 +275,24 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
         restore_foreground(hwnd)
         time.sleep(0.25)
 
-    sent = send_ctrl_v()
-    # SendInput 只插入数组前缀,顺序是 [Ctrl↓, V↓, V↑, Ctrl↑]。
-    # **V↓ 送出去 = 目标应用已经收到"粘贴"这个动作了**:
-    #   sent >= 2  粘贴已经触发(Ctrl↑ 没送出去只是键没抬起,
-    #               api.send_ctrl_v 会补抬,不影响已经发生的粘贴)
-    #   sent <= 1  V 根本没送出去,**什么都没发生**(重试安全)
-    if sent < 2:
-        log.warning("Ctrl+V 一个事件都没送出去(sent=%d,第 %d 次尝试)",
-                    sent, attempt)
+    if ctrl_held_by_user:
+        # 顺势补 V:Ctrl 是用户手指物理按着的(真实按下状态),我们只投
+        # V↓/V↑。绝不合成 Ctrl↓/Ctrl↑ —— 那会跟他真实的手指状态打架。
+        sent = send_v()
+        v_down_at, total = 1, 2   # [V↓,V↑]:投出 1 个 = V↓ 已送达
+    else:
+        sent = send_ctrl_v()
+        v_down_at, total = 2, 4   # [Ctrl↓,V↓,V↑,Ctrl↑]:前 2 个 = V↓ 已送达
+    # **V↓ 送出去 = 目标应用已经收到"粘贴"这个动作了**;
+    # 没送出去才是"什么都没发生"(重试安全)。
+    if sent < v_down_at:
+        log.warning("粘贴按键没送出去(sent=%d/%d,第 %d 次尝试)",
+                    sent, total, attempt)
         return False, published_seq, REASON_KEYS_NOT_SENT
-    if sent < 4:
-        # 抬起事件没全部送达,但 V↓ 已经送出去 = 粘贴**已经触发**了。
-        # api.send_ctrl_v 会把抬起事件补发掉(补发在微秒级,远快过
-        # 按键重复的最小间隔),所以绝不能重贴 —— 那会造成重复文本。
-        log.info("Ctrl+V 只投递了 %d/4 个事件,粘贴已触发", sent)
+    if sent < total:
+        # 抬起事件没全送达,但 V↓ 已送 = 粘贴**已经触发**(api 侧会补抬,
+        # 微秒级,远快过按键重复间隔)—— 绝不能重贴,那会重复文本。
+        log.info("粘贴只投递了 %d/%d 个事件,V↓ 已送达", sent, total)
     time.sleep(PASTE_SETTLE)
     return True, published_seq, ""
 

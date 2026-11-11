@@ -215,18 +215,22 @@ class PanelPresenter:
             return
 
         if state is not None:
-            self._push(panel, "set_state", state.state)
+            # 方法名必须是前端 window.__panel 上的驼峰名 —— 推成
+            # snake_case 会被 _call_js 的 try 静默吞掉,面板从出生起就
+            # 收不到任何推送、全部停在 JS 默认值(实测踩过:引擎已是
+            # minimax,面板永远显示"本地/加载中")。
+            self._push(panel, "setState", state.state)
             health = state.backend_health
-            self._push(panel, "set_health", health.status, health.reason)
-            self._push(panel, "set_model", state.model)
-            self._push(panel, "set_backend", state.backend)
+            self._push(panel, "setHealth", health.status, health.reason)
+            self._push(panel, "setModel", state.model)
+            self._push(panel, "setBackend", state.backend)
 
         # 配置这几项是**低频**的:只在值真的变了的时候推。
-        self._push(panel, "set_theme", self._theme_mode())
-        self._push(panel, "set_preview_enabled", self._preview_enabled())
-        self._push(panel, "set_orb_enabled", self._orb_enabled())
-        self._push(panel, "set_standby", self._standby_mode())
-        self._push(panel, "set_hotkey", self._hotkey())
+        self._push(panel, "setTheme", self._theme_mode())
+        self._push(panel, "setPreviewEnabled", self._preview_enabled())
+        self._push(panel, "setOrbEnabled", self._orb_enabled())
+        self._push(panel, "setStandby", self._standby_mode())
+        self._push(panel, "setHotkey", self._hotkey())
 
     def _push(self, panel: Any, method: str, *args: Any) -> None:
         """推给前端(同名同值不重复推 —— 空推会白刷前端)。"""

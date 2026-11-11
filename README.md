@@ -176,9 +176,9 @@ python -m qwen3_voice
 | `hotkey` | `ctrl+alt+space` | 全局热键 |
 | `model` | `0.6B` | `0.6B` 更快,`1.7B` 更准 |
 | `model_root` | `D:\Dev\Environments\models` | 模型权重目录 |
-| `asr_backend` | `"local"` | 识别后端:`local` 本地模型 / `dashscope` 阿里云百炼网络接口(互斥) |
-| `dashscope_model` | `"qwen3-asr-flash"` | 网络后端用的模型名 |
-| `dashscope_base_url` | `"https://dashscope.aliyuncs.com/compatible-mode/v1"` | 网络后端端点前缀(新加坡地域改这个) |
+| `asr_backend` | `"local"` | 识别后端:`local` 本地模型 / `minimax` MiniMax 网络接口(互斥) |
+| `minimax_model` | `"asr-1.0"` | 网络后端用的模型名 |
+| `minimax_base_url` | `"https://api.minimax.cn"` | 网络后端端点前缀(海外站改成 `https://api.minimax.io`) |
 | `input_device` | `null` | 固定麦克风编号;`null` = 自动挑选 |
 | `device_name_hints` | USB 优先 | 优先匹配这些名称的麦克风 |
 | `language` | `null` | `null` = 自动检测语种 |
@@ -208,7 +208,7 @@ python -m qwen3_voice
 - `QWEN3_VOICE_HOME` —— 换掉整个数据目录(便携使用)
 - `QWEN3_VOICE_CONFIG` —— 指定配置文件路径
 - `QWEN3_VOICE_LOG` —— 指定日志路径
-- `DASHSCOPE_API_KEY` —— 阿里云百炼的 API Key(**只有网络后端用得上**)。
+- `MINIMAX_API_KEY` —— MiniMax 平台的 API Key(**只有网络后端用得上**)。
   **它不进 `config.json`** —— 配置文件会被手工编辑、截图、分享。
   见下文「两种识别后端」
 
@@ -290,17 +290,18 @@ build 默认取分数前 120(`--top` 可调),强制收录不受限。
 
 ## 两种识别后端(本地 / 网络)
 
-面板上多一行「后端」:本地模型 ↔ 阿里云百炼 DashScope 网络接口。
+面板上多一行「后端」:本地模型 ↔ MiniMax 网络接口。
 **两者互斥** —— 同一时刻只留一个,切走后旧的会被卸载。
 
-| | 本地(默认) | 网络(DashScope) |
+| | 本地(默认) | 网络(MiniMax) |
 |---|---|---|
-| 音频去哪 | 不出本机 | 发给阿里云百炼 |
+| 音频去哪 | 不出本机 | 发给 MiniMax 平台 |
 | 断网 | 照常用 | 用不了(但能随时切回本地) |
 | 热键延迟 | 零等待(模型常驻显存) | 多一次网络往返(几百毫秒 ~ 数秒) |
-| 实时预览 | 有(边说边出字) | **没有**(见下) |
+| 实时预览 | 有(边说边出字) | 有(分句伪流式,与本地平级) |
+| 热词 | 支持 | **暂不支持**(见下) |
 | 显存 | 常驻几 GB | 切过去后本地模型被卸载,不占显存 |
-| API Key | 不需要 | 需要环境变量 `DASHSCOPE_API_KEY` |
+| API Key | 不需要 | 需要环境变量 `MINIMAX_API_KEY` |
 
 ### API Key 怎么配
 
@@ -308,34 +309,39 @@ build 默认取分数前 120(`--top` 可调),强制收录不受限。
 
 ```powershell
 # 只对当前这个 PowerShell 窗口有效
-$env:DASHSCOPE_API_KEY = "sk-..."
+$env:MINIMAX_API_KEY = "sk-..."
 
 # 永久(写进用户环境变量,新开的终端都生效)
-[Environment]::SetEnvironmentVariable("DASHSCOPE_API_KEY", "sk-...", "User")
+[Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "sk-...", "User")
 ```
 
-没配 key 时切到网络会**明确报错**(「未配置 DASHSCOPE_API_KEY 环境变量」),
+没配 key 时切到网络会**明确报错**(「未配置 MINIMAX_API_KEY 环境变量」),
 **不会静默回落到本地** —— 静默回落会让人以为自己在用网络。
 
-### 网络模式没有实时预览
+### 实时预览由用户开关决定,跟后端无关
 
-预览的价值是「边说边出字」,而兼容端点是**整段请求**:录完一次性发出去。
-硬做逐句预览只能反复重发全量音频 —— 烧配额,而且延迟越滚越大。所以网络模式下:
+面板上的「预览」开关是**唯一的决定者**:
 
-- 预览文字条**整个不出现**(胶囊只剩波形 + 计时 + 按钮)
-- 面板上「模型」「预览」两行置灰,并有一行说明文字 ——
-  **行为差异写出来,不当黑盒**
-- 切回本地后预览照旧(用户的预览开关偏好不会被改掉)
+- 关着:**不建预览线程、不建预览引擎、零调用**(本地和网络都一样)
+- 开着:任何后端都建 —— 网络后端走**分句伪流式**(切一句发一次请求),
+  与本地流式平级
+- 切换**下一轮录音生效**(每轮录音都重新读一次配置),不做广播
 
-### 热词在网络模式怎么传
+后端**不声明**"自己支不支持流式"—— 那种能力位模型最后会长出
+"网络引擎不支持实时预览"这种分支,把「用哪种引擎」和「要不要预览」
+搅成一件事。
 
-和本地一样是 **Context Biasing**,格式一模一样:
-`Vocabulary: 杀鲸乾坤道, 终极真身.`
+### 热词在网络模式暂不支持
+
+MiniMax 没有 Context Biasing 入口 —— 本地的 `Vocabulary: …` 那套
+喂不进去。**这一路不注入热词**,而且**切换成功的通知里会明说**
+(不静默装支持:用户配了词表却发现不生效,那才叫坑)。
 
 - 本地后端:交给 `qwen_asr` 的 `context` 参数
-- 网络后端:放进 **system prompt**
+- 网络后端(MiniMax):不注入,词表在这一路不生效
 
-两边效果可比,词表不用改(还是 config.json 的 `hotwords` + `data/hotwords.txt`)。
+词表本身不用改(还是 config.json 的 `hotwords` + `data/hotwords.txt`)——
+切回本地就照旧生效。
 
 ### 互斥切换对显存的影响
 
@@ -365,7 +371,8 @@ src/qwen3_voice/
 ├── engines/
 │   ├── base.py          识别后端抽象:本地/网络共用接口 + 热词(context biasing)
 │   ├── engine.py        本地后端:Qwen3-ASR 封装,支持热切换模型
-│   ├── network.py       网络后端:阿里云百炼 DashScope(OpenAI 兼容 HTTP)
+│   ├── minimax.py       网络后端:MiniMax asr-1.0(multipart 上传,串行锁 + 429 退避)
+│   ├── _http.py         可注入的 HTTP 传输层(测试不联网)
 │   └── streaming.py     流式引擎:统一接口(feed/close)+ 分句预览 / 整段两种实现
 ├── win32/
 │   ├── api.py           Win32 API 绑定(ctypes 签名集中声明)
@@ -451,7 +458,7 @@ EDIFIER W800BT Plus 这类蓝牙耳机,在 WASAPI 共享模式下会被 Steam / 
 (`test_linear_interpolation_would_fold_the_same_signal`)把这个坑钉住了。
 
 **API Key 不能进配置文件**
-网络后端的 key 只从环境变量 `DASHSCOPE_API_KEY` 读。
+网络后端的 key 只从环境变量 `MINIMAX_API_KEY` 读。
 `config.json` 会被用户手工编辑、截图、分享 —— key 写进去就等于送出去。
 缺 key 时**明确报错**,不静默回落到本地(那会让人以为在用网络)。
 

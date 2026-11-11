@@ -306,6 +306,11 @@ class VoiceBarPresenter:
             self._enter_error(note, str(note.fields.get("text") or ""))
         elif kind == "backend_load_failed":
             self._enter_backend_failed(note)
+        elif kind == "backend_switch_failed":
+            # 切换后端失败(比如切 MiniMax 没配 key)—— 这条必须让
+            # 悬浮窗看见:面板可能正缩在托盘里,用户点了切换什么反应
+            # 都没有,只会以为程序死了。错误态无原文,普通 4.5s 收回。
+            self._enter_backend_failed(note)
 
     def _enter_error(self, note: Notification, text: str) -> None:
         with self._lock:

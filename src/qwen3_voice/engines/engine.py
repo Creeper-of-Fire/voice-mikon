@@ -4,7 +4,7 @@
 (切换会重新加载模型,耗时几秒)。
 
 这是 ``ASRBackend`` 的**本地实现**(见 ``engines/base.py``)——
-和网络后端 ``DashScopeBackend`` 可互换,控制器只认那个抽象接口。
+和网络后端 ``MiniMaxBackend`` 可互换,控制器只认那个抽象接口。
 热词(context biasing)的逻辑在基类里,两个后端共用。
 """
 
@@ -171,6 +171,6 @@ class ASREngine(ASRBackend):
         return text
 
 
-# 本地后端的"说明性"别名:和 ``DashScopeBackend`` 并列时读起来更清楚。
+# 本地后端的"说明性"别名:和 ``MiniMaxBackend`` 并列时读起来更清楚。
 # 类本身还是 ``ASREngine``(名字沿用旧代码,少改一圈引用)。
 LocalASRBackend = ASREngine

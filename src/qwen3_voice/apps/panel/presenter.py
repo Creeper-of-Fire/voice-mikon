@@ -81,7 +81,7 @@ class _PanelApi:
         self._presenter.switch_model(tag)
 
     def switch_backend(self, kind: str) -> None:
-        """切换识别后端(local / dashscope)。
+        """切换识别后端(local / minimax)。
 
         录音/识别中会被拒绝 —— 这一轮的最终位引擎持有旧后端的引用,
         中途换掉会出错或丢结果。拒绝时面板显示那句提示。

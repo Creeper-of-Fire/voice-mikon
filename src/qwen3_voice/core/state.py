@@ -39,7 +39,6 @@ class AppState:
     backend: str = "local"
     backend_health: BackendHealth = BackendHealth()
     model: str = ""
-    preview_supported: bool = True
     preview_text: str = ""
 
     def with_changes(self, **changes) -> "AppState":

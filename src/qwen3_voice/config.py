@@ -59,10 +59,17 @@ ORB_POSITION_MODES = ("follow", "pinned", "custom")
 ORB_STANDBY_MODES = ("resident", "on_demand")
 
 # 识别后端(互斥,同一时刻只留一个):
-#   local      本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
-#   dashscope  阿里云百炼 DashScope 网络接口(OpenAI 兼容 HTTP)
-# API Key **不进配置文件** —— 只从环境变量 DASHSCOPE_API_KEY 读。
-ASR_BACKENDS = ("local", "dashscope")
+#   local    本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
+#   minimax  MiniMax 平台网络接口(asr-1.0,multipart 上传音频)
+# API Key **不进配置文件** —— 只从环境变量 MINIMAX_API_KEY 读。
+ASR_BACKENDS = ("local", "minimax")
+
+# 退役的后端名 → 回退到哪个。
+#
+# 为什么留这张表而不是"直接崩掉":老配置不该把程序搞死 —— 用户只是
+# 升级了程序,配置还是老的。但也**不能静默**:回退时发一条 warning,
+# 让用户知道配的后端没了(不然他会以为"切了没反应")。
+LEGACY_BACKEND_ALIASES = {"dashscope": "local"}
 
 # 预览断句用哪种"人声判定层"(只影响**预览**的切句,不影响最终识别):
 #   silero  Silero VAD 神经网络判定(默认)—— 模型随包安装,离线可用
@@ -116,13 +123,14 @@ class Config:
     model_root: str = r"D:\Dev\Environments\models"
 
     # ---- 识别后端(本地 / 网络,互斥)
-    # local      = 本地 Qwen3-ASR 模型常驻显存,离线、零等待
-    # dashscope  = 阿里云百炼网络接口,音频出本机,有网络延迟
+    # local    = 本地 Qwen3-ASR 模型常驻显存,离线、零等待
+    # minimax  = MiniMax 平台网络接口,音频出本机,有网络延迟
     asr_backend: str = "local"
-    # 网络后端的模型名与端点前缀(新加坡地域改 base_url 即可)。
-    # **API Key 不在这里** —— 只从环境变量 DASHSCOPE_API_KEY 读。
-    dashscope_model: str = "qwen3-asr-flash"
-    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # 网络后端的模型名与端点前缀。
+    # 国内站是 api.minimax.cn;海外站改成 https://api.minimax.io。
+    # **API Key 不在这里** —— 只从环境变量 MINIMAX_API_KEY 读。
+    minimax_model: str = "asr-1.0"
+    minimax_base_url: str = "https://api.minimax.cn"
 
     # ---- 音频
     input_device: int | None = None           # None = 自动挑选
@@ -199,7 +207,7 @@ class Config:
     #   语义相同(只是 v2 改了名),并存期间**不要**两边都当真值用。
     #   orb 与旧的 floating_orb / orb_position / orb_geometry / orb_monitor
     #   同理:v2 把球的几何/显示器/待机策略收进了 orb 这一段。
-    backend: str = "local"                     # local / dashscope(v2 改名)
+    backend: str = "local"                     # local / minimax(v2 改名)
     device_hints: list[str] = field(default_factory=lambda: ["USB"])
     orb: OrbConfig = field(default_factory=OrbConfig)
 
@@ -364,6 +372,26 @@ def load_config(path: Path | None = None) -> Config:
     # 补全派生字段
     if not cfg.log_file:
         cfg.log_file = str(log_path())
+
+    # 退役的后端值:回退 + **一条** warning。
+    #
+    # 不崩(老配置不该把程序搞死),也不静默(静默的话用户只会觉得
+    # "切了没反应")。asr_backend 是引擎真正读的那个;backend 是 v2
+    # 的同名影子字段,一并回退，免得它在校验时又报一次问题。
+    retired_names: list[str] = []
+    for attr in ("asr_backend", "backend"):
+        raw = str(getattr(cfg, attr, "") or "").strip().lower()
+        fallback = LEGACY_BACKEND_ALIASES.get(raw)
+        if fallback:
+            setattr(cfg, attr, fallback)
+            retired_names.append(raw)
+    if retired_names:
+        # **把退役的值写进日志** —— 用户得看见自己配的是哪个,
+        # 才知道该改哪里。
+        log.warning("配置里的后端值已退役(%s):已回退为 local —— "
+                    "请把 asr_backend 改成 \"local\" 或 \"minimax\"",
+                    " / ".join(sorted(set(retired_names))))
+
     return cfg
 
 

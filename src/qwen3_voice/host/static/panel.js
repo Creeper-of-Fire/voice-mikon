@@ -32,19 +32,14 @@
   // 主题档位：auto = 跟随系统,light = 白天,dark = 黑夜
   var THEMES = ['auto', 'light', 'dark'];
 
-  // 识别后端：local = 本地模型,dashscope = 网络 API（互斥）
-  var BACKENDS = ['local', 'dashscope'];
+  // 识别后端：local = 本地模型,minimax = MiniMax 网络接口（互斥）
+  var BACKENDS = ['local', 'minimax'];
 
   // 悬浮球待机策略：resident = 窗口常驻,on_demand = 待机时销毁窗口
   var STANDBY = ['resident', 'on_demand'];
 
   // 后端健康三态：loading = 加载中,ready = 就绪,failed = 失败
   var HEALTHS = ['loading', 'ready', 'failed'];
-
-  // 网络模式下的行为差异说明 —— 必须写出来，不能静默失效
-  var NETWORK_HINT =
-    '网络后端不支持实时预览：停止录音后一次性识别，' +
-    '延迟取决于网络；本地模型此时已卸载，不占显存。';
 
   // 提示语自动消失的时间（毫秒）
   var NOTICE_MS = 8000;
@@ -185,14 +180,15 @@
   function applyModel(tag) {
     ensureDom();
     ui.model = tag;
-    if (!el.modelSeg) {
-      return;
+    if (el.modelSeg) {
+      var items = el.modelSeg.querySelectorAll('.seg-item');
+      for (var i = 0; i < items.length; i++) {
+        var isActive = items[i].getAttribute('data-model') === tag;
+        items[i].classList.toggle('is-active', isActive);
+      }
     }
-    var items = el.modelSeg.querySelectorAll('.seg-item');
-    for (var i = 0; i < items.length; i++) {
-      var isActive = items[i].getAttribute('data-model') === tag;
-      items[i].classList.toggle('is-active', isActive);
-    }
+    // 网络后端下这一行显示的是远端模型名,不是档位 —— 跟着刷新。
+    renderNetModel();
   }
 
   function applyHotkey(text) {
@@ -272,13 +268,12 @@
     }
   }
 
-  /* 识别后端:local(本地模型)/ dashscope(网络 API)。
+  /* 识别后端:local(本地模型)/ minimax(MiniMax 网络接口)。
    *
    * 两者**互斥**:切到网络会卸载本地模型(释放显存),切回来再重新加载。
-   * 网络模式下:
-   *   - "模型"那一档置灰 —— 本地模型根本没加载,调它没有意义
-   *   - "预览"开关置灰 —— 网络端点是整段请求,做不了逐句实时预览
-   * 两处都必须**明确告诉用户**,不能静默失效。 */
+   *
+   * **预览开关不在这里被置灰** —— 有没有预览只由用户开关决定,
+   * 引擎不参与:网络后端同样跑分句伪流式,与本地流式平级。 */
   function applyBackend(kind) {
     ensureDom();
     var k = BACKENDS.indexOf(kind) >= 0 ? kind : 'local';
@@ -292,29 +287,26 @@
       }
     }
 
-    var isNet = (k === 'dashscope');
-
-    if (el.modelRow) {
-      el.modelRow.classList.toggle('is-disabled', isNet);
-    }
+    // 模型行:本地后端下是 0.6B/1.7B 的切换档,网络后端下是
+    // **远端模型名**(只读)。同一行显示不同的东西 —— 后端决定它是什么。
+    var isNet = (k === 'minimax');
     if (el.modelSeg) {
-      var mItems = el.modelSeg.querySelectorAll('.seg-item');
-      for (var j = 0; j < mItems.length; j++) {
-        mItems[j].disabled = isNet;
-      }
+      el.modelSeg.hidden = isNet;
     }
-    if (el.previewRow) {
-      el.previewRow.classList.toggle('is-disabled', isNet);
+    renderNetModel();
+  }
+
+  /* 网络后端下的模型名(远端模型,如 asr-1.0)。
+   *
+   * 值来自 Python 推来的 setModel —— 后端是网络时它推的是远端模型名,
+   * 不是本地模型规格,所以不用再单独开一条推送通道。 */
+  function renderNetModel() {
+    if (!el.netModelText) {
+      return;
     }
-    if (el.previewToggle) {
-      el.previewToggle.disabled = isNet;
-    }
-    if (el.hint) {
-      el.hint.textContent = isNet ? NETWORK_HINT : '';
-      if ('hidden' in el.hint) {
-        el.hint.hidden = !isNet;
-      }
-    }
+    var isNet = (ui.backend === 'minimax');
+    el.netModelText.textContent = isNet ? (ui.model || '') : '';
+    el.netModelText.hidden = !isNet;
   }
 
   /* 提示语(切换后端的进展/拒绝/失败)。过一会儿自己淡掉,
@@ -583,15 +575,13 @@
     el.closeBtn = $('closeBtn');
     el.quitBtn = $('quitBtn');
     el.backendSeg = $('backendSeg');
-    el.modelRow = $('modelRow');
     el.modelSeg = $('modelSeg');
+    el.netModelText = $('netModelText');
     el.themeSeg = $('themeSeg');
-    el.previewRow = $('previewRow');
     el.previewToggle = $('previewToggle');
     el.orbToggle = $('orbToggle');
     el.standbySeg = $('standbySeg');
     el.hotkey = $('hotkeyLabel');
-    el.hint = $('backendHint');
     el.notice = $('notice');
   }
 

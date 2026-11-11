@@ -4,8 +4,8 @@
   "model_root": "D:\\Dev\\Environments\\models",
   "asr_backend": "local",
   "backend": "local",
-  "dashscope_model": "qwen3-asr-flash",
-  "dashscope_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "minimax_model": "asr-1.0",
+  "minimax_base_url": "https://api.minimax.cn",
   "input_device": null,
   "device_name_hints": [
     "USB PnP Audio",

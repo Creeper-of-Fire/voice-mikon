@@ -39,7 +39,7 @@ import numpy as np
 
 from ..engines.base import ASRBackend, ASRError
 from ..engines.engine import LocalASRBackend
-from ..engines.network import DashScopeBackend
+from ..engines.minimax import MiniMaxBackend
 from ..engines.streaming import (
     FullPassEngine,
     PreviewEngineKind,
@@ -83,9 +83,16 @@ REASON_INJECT_FAILED = "inject_failed"
 LEVEL_PUSH_INTERVAL = 1.0 / 30.0
 
 # 识别后端(互斥,同一时刻只留一个)
-BACKEND_LOCAL = "local"            # 本地 Qwen3-ASR(transformers,GPU)
-BACKEND_DASHSCOPE = "dashscope"    # 阿里云百炼 DashScope(OpenAI 兼容 HTTP)
-BACKEND_KINDS = (BACKEND_LOCAL, BACKEND_DASHSCOPE)
+BACKEND_LOCAL = "local"        # 本地 Qwen3-ASR(transformers,GPU)
+BACKEND_MINIMAX = "minimax"    # MiniMax 平台网络接口(asr-1.0)
+BACKEND_KINDS = (BACKEND_LOCAL, BACKEND_MINIMAX)
+
+# 后端的显示名:按后端**查表**,不写死在各个分支里 ——
+# 加一个后端时,这里加一行就够了,不用满代码库找 "网络" 这两个字。
+BACKEND_LABELS = {
+    BACKEND_LOCAL: "本地",
+    BACKEND_MINIMAX: "MiniMax",
+}
 
 # 预览位插哪颗引擎 —— **模块级常量**,代码内可切换,不做成用户配置项。
 #
@@ -99,9 +106,17 @@ PREVIEW_ENGINE_KIND = PreviewEngineKind.SENTENCE
 
 
 def normalize_backend(kind: str | None) -> str:
-    """把后端名字规整成合法值(认不出来就当本地)。"""
+    """把后端名字规整成合法值(认不出来就当本地)。
+
+    认不出来时**留一条日志**:静默回退的话,用户点了切后端却什么
+    都没发生,只会以为程序坏了。
+    """
     name = str(kind or "").strip().lower()
-    return name if name in BACKEND_KINDS else BACKEND_LOCAL
+    if name in BACKEND_KINDS:
+        return name
+    if name:
+        log.warning("不认识的后端 %r,按 %s 处理", name, BACKEND_LOCAL)
+    return BACKEND_LOCAL
 
 
 class State(str, Enum):
@@ -250,7 +265,6 @@ class CoreController:
             backend=self.backend_kind,
             backend_health=BackendHealth(HEALTH_LOADING),
             model=self._current_model_tag(),
-            preview_supported=self._backend_supports_preview(),
             preview_text="",
         )
         # 后端换装是"整体动作"(建新的 → 加载 → 卸旧的 → 换引用),
@@ -286,10 +300,10 @@ class CoreController:
 
         两种后端实现同一个 ``ASRBackend`` 抽象,控制器只认那个接口。
         """
-        if kind == BACKEND_DASHSCOPE:
-            return DashScopeBackend(
-                model=getattr(config, "dashscope_model", "") or None,
-                base_url=getattr(config, "dashscope_base_url", "") or None,
+        if kind == BACKEND_MINIMAX:
+            return MiniMaxBackend(
+                model=getattr(config, "minimax_model", "") or None,
+                base_url=getattr(config, "minimax_base_url", "") or None,
                 hotwords=config.hotwords,
             )
         return LocalASRBackend(
@@ -303,21 +317,15 @@ class CoreController:
         """造一颗后端(走可注入的工厂)。"""
         return self._backend_factory(kind, self.config)
 
-    def _backend_supports_preview(self) -> bool:
-        """当前后端支不支持实时预览。
-
-        网络后端**不支持**(整段请求,做不了逐句流式)。
-        用 getattr 兜底 —— 测试里的假引擎没有这个属性时按"支持"处理。
-        """
-        return bool(getattr(self.engine, "supports_preview", True))
-
     def _current_model_tag(self) -> str:
         """当前生效的模型规格(对外快照用)。
 
-        网络后端不加载本地模型 —— 那就没有"模型规格"可言,给空串。
+        本地后端给本地模型规格(0.6B / 1.7B);
+        网络后端给**远端模型名**(asr-1.0)—— 面板上要看得见
+        到底是哪颗远端模型在跑。
         """
-        if self.backend_kind != BACKEND_LOCAL:
-            return ""
+        if self.backend_kind == BACKEND_MINIMAX:
+            return getattr(self.engine, "model", "") or ""
         return getattr(self.engine, "model_tag", "") or self.config.model
 
     @staticmethod
@@ -420,7 +428,6 @@ class CoreController:
                     backend_health=BackendHealth(HEALTH_READY),
                     backend=self.backend_kind,
                     model=self._current_model_tag(),
-                    preview_supported=self._backend_supports_preview(),
                 )
             # 模型好了但麦克风可能还在探测,两边都好了才算真正就绪
             if self.state == State.STARTING:
@@ -650,20 +657,18 @@ class CoreController:
     def _start_preview(self, recorder: Recorder) -> None:
         """启动实时预览线程。
 
-        预览位插一颗"快"的引擎(默认分句引擎),它吐出来的文字只影响
-        界面上的预览条 —— 最终注入的文字永远来自最终位的整段识别。
+        **预览有没有,只由 ``config.show_preview`` 决定** —— 引擎不参与
+        这个决定:本地/网络都是"能建就建"(网络走分句伪流式,与本地
+        流式平级),开关关着就一个预览线程都不建、一个请求都不发。
 
-        线程只做一件事:不停地取录音增量喂给引擎。
-        引擎自己决定什么时候出字(分句引擎切句就出,整段引擎定时重识别),
-        控制器对"预览位上是哪颗引擎"一无所知。
-
-        **网络后端不跑预览**:兼容端点是整段请求,做不了"边说边出字"。
-        硬做(每隔几秒重发全量音频)只会烧配额、延迟越滚越大 —— 不做。
-        网络模式下的行为差异在面板上有明确说明,不是静默失效。
+        开关是**下一轮生效**:每轮录音都重走这里,上一轮的开关状态
+        不影响这一轮 —— 不做广播机制(开关变化没有事件要广播,
+        下一轮重读配置就够)。
         """
         self._stop_preview()
-        if not self._backend_supports_preview():
-            log.info("当前后端(%s)不支持实时预览,跳过预览线程", self.backend_kind)
+        if not self.config.show_preview:
+            # 关着:不建预览线程、不建预览引擎、零调用。
+            log.info("预览开关关闭,跳过预览线程")
             return
         pull = _make_chunk_puller(recorder)
         if pull is None:
@@ -964,7 +969,7 @@ class CoreController:
 
     def _switch_backend_job(self, kind: str) -> None:
         """切换后端的实际动作(跑在后台线程里,不卡 UI)。"""
-        label = "网络" if kind == BACKEND_DASHSCOPE else "本地"
+        label = BACKEND_LABELS.get(kind, BACKEND_LOCAL)
         self._notify("info", "backend_switching", f"正在切换到{label}后端 ...")
 
         with self._backend_lock:
@@ -1001,15 +1006,13 @@ class CoreController:
             backend=kind,
             backend_health=BackendHealth(HEALTH_READY),
             model=self._current_model_tag(),
-            preview_supported=self._backend_supports_preview(),
         )
-        self._notify("info", "backend_switched", f"已切换到{label}后端")
-        # 预览开关跟着后端走:网络模式没有实时预览,胶囊的预览文字条
-        # 干脆收起来(别留一条空条在那儿)。切回本地时按配置恢复。
-        if kind == BACKEND_DASHSCOPE:
-            self._notify("info", "backend_switched",
-                         "已切换到网络后端:不支持实时预览,"
-                         "停止录音后一次性识别")
+        # MiniMax 没有 context biasing 通道 —— **明说**,
+        # 不静默装支持(用户配了词表却发现不生效,那才叫坑)。
+        msg = f"已切换到{label}后端"
+        if kind == BACKEND_MINIMAX:
+            msg += ":MiniMax 暂不支持热词(本地后端的词表在这一路不生效)"
+        self._notify("info", "backend_switched", msg)
         if self.state in (State.STARTING, State.ERROR):
             self._set_state(State.IDLE)
 

@@ -320,8 +320,7 @@ def _print_state(state: AppState) -> None:
     health = state.backend_health
     detail = f" ({health.reason})" if health.reason else ""
     print(f"[状态] {state.state} | 后端={state.backend} | "
-          f"健康={health.status}{detail} | 模型={state.model or '-'} | "
-          f"预览={'有' if state.preview_supported else '无'}")
+          f"健康={health.status}{detail} | 模型={state.model or '-'}")
     if state.preview_text:
         print(f"[预览] {state.preview_text}")
 

@@ -234,7 +234,7 @@ class VoicePanel:
         self._call_js("setModel", str(tag or ""))
 
     def set_backend(self, kind: str) -> None:
-        """当前识别后端(local / dashscope)。"""
+        """当前识别后端(local / minimax)。"""
         self._call_js("setBackend", str(kind or "local"))
 
     def set_theme(self, mode: str) -> None:

@@ -1,8 +1,9 @@
 """语音识别引擎。"""
 
+from ._http import HttpxTransport
 from .base import ASRBackend, ASRError
 from .engine import ASREngine, LocalASRBackend
-from .network import DashScopeBackend
+from .minimax import MiniMaxBackend
 from .streaming import (
     FullPassEngine,
     PreviewEngineKind,
@@ -21,7 +22,8 @@ __all__ = [
     "ASRError",
     "ASREngine",
     "LocalASRBackend",
-    "DashScopeBackend",
+    "MiniMaxBackend",
+    "HttpxTransport",
     "EnergyVadDetector",
     "FullPassEngine",
     "PreviewEngineKind",

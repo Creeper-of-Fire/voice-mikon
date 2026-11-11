@@ -16,11 +16,11 @@ dependencies = [
     "transformers==4.57.6",
     "qwen-asr==0.0.6",
     "soundfile>=0.12",
-    # 网络 ASR 后端(阿里云百炼)要用的两个:
+    # 网络 ASR 后端(MiniMax)要用的两个:
     #   scipy —— 重采样(resample_poly,多相滤波,带抗混叠低通)。
     #            之前它只是 librosa 的传递依赖,这里显式声明,
     #            免得网络后端绑死在隐式传递依赖上。
-    #   httpx —— 发 HTTP 请求(OpenAI 兼容端点)。
+    #   httpx —— 发 HTTP 请求(multipart 上传音频)。
     "scipy>=1.11",
     "httpx>=0.27",
 ]

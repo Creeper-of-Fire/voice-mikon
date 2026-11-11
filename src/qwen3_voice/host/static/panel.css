@@ -348,6 +348,27 @@ body {
   font-family: var(--font);
 }
 
+/* 网络后端下的远端模型名(如 asr-1.0):只读的一行字,
+   顶替本地模型档位的位置 —— 用等宽字体,和上面的模型档一致。 */
+.model-text {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text2);
+}
+
+/* 显隐用 hidden 属性,但作者样式的 display 会盖掉 UA 的
+   [hidden]{display:none} —— 必须显式压回去(见 AGENTS.md)。 */
+.model-text[hidden] {
+  display: none;
+}
+
+/* 分段控件在网络后端下要整条藏起来:同样得压回 display:none。 */
+.seg[hidden] {
+  display: none;
+}
+
 /* ---------------- 状态区 ---------------- */
 
 /* 状态区:当前状态文字 + 后端健康徽章。
@@ -404,17 +425,6 @@ body {
 
 /* ---------------- 说明与提示 ---------------- */
 
-/* 后端说明(网络模式下才出现)。
-   行为差异必须写出来 —— 静默失效比没有这个功能更糟:
-   用户会以为"预览坏了"或者"网络没生效"。 */
-.hint {
-  flex: 0 0 auto;
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--warn);
-}
-
 /* 操作提示(切换后端的进展 / 拒绝 / 失败)。
    空的时候不占位置 —— 平时面板该多紧凑还是多紧凑。 */
 .notice {
@@ -427,13 +437,6 @@ body {
 
 .notice:empty {
   display: none;
-}
-
-/* 置灰的一行(网络模式下的"模型""预览")。
-   用降透明度 + 去掉指针事件 —— 看得见它在,但点不动。 */
-.option-row.is-disabled {
-  opacity: 0.45;
-  pointer-events: none;
 }
 
 /* ---------------- 开关(预览显隐) ---------------- */

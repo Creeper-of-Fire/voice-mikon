@@ -33,25 +33,24 @@
       </div>
       <p class="health-reason" id="healthReason" hidden></p>
 
-      <!-- 识别后端：本地模型 / 网络 API（互斥，同一时刻只留一个） -->
+      <!-- 识别后端：本地模型 / MiniMax 网络接口（互斥，同一时刻只留一个） -->
       <div class="option-row">
         <span class="row-label">后端</span>
         <div class="seg is-text" id="backendSeg" role="group" aria-label="识别后端">
           <button class="seg-item is-active" type="button" data-backend="local" title="本地 Qwen3-ASR 模型：离线、零等待，模型常驻显存">本地</button>
-          <button class="seg-item" type="button" data-backend="dashscope" title="阿里云百炼网络接口：音频出本机，有网络延迟，不支持实时预览">网络</button>
+          <button class="seg-item" type="button" data-backend="minimax" title="MiniMax 网络接口：音频出本机，有网络延迟；暂不支持热词">MiniMax</button>
         </div>
       </div>
 
-      <!-- 后端相关的说明（网络模式下才显示）——行为差异必须写出来，不能静默失效 -->
-      <p class="hint" id="backendHint" hidden></p>
-
-      <!-- 模型切换 -->
+      <!-- 模型：本地后端下切 0.6B / 1.7B；MiniMax 下显示远端模型名（只读）。
+           同一行显示不同的东西 —— 后端决定了这一行是什么。 -->
       <div class="option-row" id="modelRow">
         <span class="row-label">模型</span>
         <div class="seg" id="modelSeg" role="group" aria-label="模型切换">
           <button class="seg-item is-active" type="button" data-model="0.6B">0.6B</button>
           <button class="seg-item" type="button" data-model="1.7B">1.7B</button>
         </div>
+        <span class="model-text" id="netModelText" hidden></span>
       </div>
 
       <!-- 主题:跟随系统 / 白天 / 黑夜(面板和胶囊一起换) -->
@@ -84,7 +83,9 @@
         </div>
       </div>
 
-      <!-- 预览文字条:关掉之后胶囊只剩波形+计时+按钮,不挡屏幕 -->
+      <!-- 预览文字条:关掉之后胶囊只剩波形+计时+按钮,不挡屏幕。
+           **这是预览的唯一决定者** —— 跟后端无关:本地/网络都能预览,
+           引擎不声明自己支不支持流式。切换下一轮录音生效。 -->
       <div class="option-row" id="previewRow">
         <span class="row-label">预览</span>
         <label class="switch" id="previewSwitch" title="录音时显示实时预览文字">

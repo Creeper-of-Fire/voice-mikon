@@ -1,0 +1,568 @@
+/* qwen3-voice 语音输入面板样式
+ *
+ * 视觉实现**移植自 OpenType** 的 ``src/renderer/app.css``
+ * (AGPL-3.0,https://github.com/ct-jyjntc/opentype-public)。
+ * 本项目整体按 AGPL-3.0-or-later 发布(见仓库根目录 LICENSE)。
+ * (录音胶囊那边是同一套设计语言的另一处移植,见 capsule.css。)
+ *
+ * 移植了什么:
+ *   - 设计 token 整段搬过来:颜色、圆角、阴影、字体栈。
+ *     浅色用它的 ``:root`` 那套,深色用它的 ``:root[data-theme='dark']`` 那套。
+ *   - 按钮语言:底色 card、描边 line、圆角 10px(通用 button)/
+ *     9px(icon-button、tabs 项)、hover 走 hover 色、
+ *     focus 走 accent 描边(它的 ``button`` / ``button.primary`` 规则)。
+ *   - 分段控件沿用它的 ``.tabs`` 写法:轨道是 nav 底色,
+ *     选中项是 card 底色 + 一层 shadow(见 app.css 的 .tabs)。
+ *   - 热键沿用它的 ``kbd`` 写法:描边 + 底部一条同色投影 + 圆角 7px。
+ *   - 状态点沿用它 answer-card 标题栏的写法:实心点 + 一圈 soft 色光晕。
+ *
+ * 两处本地适配(不是原样照抄):
+ *   1. 主题走 **data-theme 属性 + 媒体查询兜底** —— OpenType 用
+ *      ``:root[data-theme='dark']``(theme.ts 里由 JS 切 attribute),
+ *      本项目多了一档"跟随系统",所以:
+ *        - JS 在 ``<html>`` 上设 ``data-theme="light|dark"``
+ *        - **auto 时不设属性**,让 ``prefers-color-scheme`` 媒体查询
+ *          自然接管 —— 这样"跟随系统"不需要 JS 监听系统主题变化
+ *        - CSS 侧三段:``:root`` 是浅色,深色由
+ *          ``@media(prefers-color-scheme:dark){:root:not([data-theme=light])}``
+ *          和 ``:root[data-theme=dark]`` 两处给出
+ *          (深色那块**两处必须同步改**,见下面注释)
+ *      (panel.py 的 ``theme_background_color()`` 只管建窗瞬间的底色。)
+ *   2. 字号整体压小一档(正文 13px / 辅助 12px):面板只有 320px 宽,
+ *      OpenType 的 14px/16px 在这里太挤。
+ *
+ * 布局保持"标题栏 + 状态区 + 配置行 + 页脚"的紧凑结构,不加装饰性元素。
+ *
+ * 面板窗口**不是透明窗口**(background_color 是实色),所以可以用阴影 ——
+ * 胶囊那边不行:透明窗口上 box-shadow 会渲染成一条灰带(见 capsule.css)。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- OpenType app.css :root(浅色)----
+     只搬了面板用得到的那些(--panel / --dot / --inverse / --soft /
+     --k-dict* 那些是它首页/弹窗才用的,面板用不上,没搬)。 */
+  --bg: #fff;
+  --card: #fff;
+  --nav: #f4f4f5;
+  --hover: #ececee;
+  --text: #111113;
+  --text2: #3f3f46;
+  --muted: #8b8b93;
+  --line: #ececee;
+  --accent: #111113;
+  --danger: #e5484d;
+  --danger-soft: #fdeeee;
+  --warn: #b7791f;
+  --warn-soft: #fdf5e6;
+  --k-ask: #e8f7ee;
+  --k-ask-b: #1d7a45;
+  --k-trans: #eaf0ff;
+  --k-trans-b: #2b4fbf;
+  --shadow: 0 1px 2px rgba(17, 17, 19, 0.04), 0 6px 24px rgba(17, 17, 19, 0.06);
+  /* 它还有一套 --shadow-lift(0 14px 34px),这里没搬:那是它给"可 hover
+     的大卡片"用的,面板卡片离窗口边只有 6px,34px 的模糊会被窗口边框切掉,
+     反而糊成一条脏边。面板用 --shadow 就够。 */
+
+  /* 状态点的光晕底色:直接引用上面的 soft 系 token,
+     深色主题换了 token,这里自动跟着换。 */
+  --halo-ok: var(--k-ask);
+  --halo-warn: var(--warn-soft);
+  --halo-rec: var(--danger-soft);
+  --halo-processing: var(--k-trans);
+
+  /* 字体栈:OpenType 的那套,补上 Windows 上真能命中的中文字体。
+     胶囊那边用的是 system-ui 开头,在 Windows 上同样落到 Segoe UI,
+     两个窗口放在一起字形一致。 */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
+               "Liberation Mono", monospace;
+}
+
+/* ---------------- 日夜模式 ---------------- */
+
+/* 深色主题有两处来源,token 值**必须一样**(改一处就要改另一处):
+     a) 用户强制黑夜 → ``:root[data-theme="dark"]``
+     b) 跟随系统且系统是深色 → 媒体查询里的 ``:root:not([data-theme="light"])``
+
+   为什么 b 要排除 ``[data-theme="light"]``:强制白天时,系统的深色
+   媒体查询照样会命中,不加这个 :not 就会被系统深色压回去 ——
+   ":not" 的特异度(0,2,0)高于 :root(0,1,0),所以排除掉就一定赢。
+
+   深色值就是 OpenType 的 ``:root[data-theme='dark']`` 那段,原样搬过来。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0f0f11;
+    --card: #1a1a1d;
+    --nav: #18181b;
+    --hover: #27272b;
+    --text: #f4f4f5;
+    --text2: #d4d4d8;
+    --muted: #8b8b93;
+    --line: #2a2a2f;
+    --accent: #f4f4f5;
+    --danger: #ff7b7f;
+    --danger-soft: #3a1c1e;
+    --warn: #e3b25e;
+    --warn-soft: #33281a;
+    --k-ask: #15291e;
+    --k-ask-b: #5fd08f;
+    --k-trans: #1b2440;
+    --k-trans-b: #8aa6ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* 强制黑夜(与上面媒体查询里的深色 token 完全一致) */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f0f11;
+  --card: #1a1a1d;
+  --nav: #18181b;
+  --hover: #27272b;
+  --text: #f4f4f5;
+  --text2: #d4d4d8;
+  --muted: #8b8b93;
+  --line: #2a2a2f;
+  --accent: #f4f4f5;
+  --danger: #ff7b7f;
+  --danger-soft: #3a1c1e;
+  --warn: #e3b25e;
+  --warn-soft: #33281a;
+  --k-ask: #15291e;
+  --k-ask-b: #5fd08f;
+  --k-trans: #1b2440;
+  --k-trans-b: #8aa6ff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.3);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 面板本体 = 一张卡片。
+   窗口是矩形(WebView2 做不到真透明圆角),所以外圈留白是窗口底色
+   (--bg,和 panel.py 建窗时给的 background_color 一致),
+   卡片自己带圆角 + 描边 + 阴影 —— 这样窗口边角不会显得"切掉了一块"。
+   高度用 min-height 而不是 height:内容真的装不下时卡片会长高,
+   panel.py 的 _fit_window 量到 scrollHeight 会把窗口跟着放大。 */
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100% - 12px);
+  margin: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* ---------------- 标题栏 ---------------- */
+
+.titlebar {
+  flex: 0 0 auto;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 状态点:OpenType answer-card 标题栏那套 —— 实心点 + 一圈 soft 色光晕 */
+.dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--k-ask-b);
+  box-shadow: 0 0 0 3px var(--halo-ok);
+}
+
+.dot[data-state="starting"] {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--halo-warn);
+  animation: dot-pulse 1.1s ease-in-out infinite;
+}
+
+.dot[data-state="recording"] {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--halo-rec);
+  animation: dot-pulse 1s ease-in-out infinite;
+}
+
+.dot[data-state="processing"] {
+  background: var(--k-trans-b);
+  box-shadow: 0 0 0 3px var(--halo-processing);
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+
+.dot[data-state="error"] {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--halo-rec);
+}
+
+@keyframes dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.72;
+  }
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+/* 关闭按钮 = OpenType 的 .icon-button:无描边、圆形背景、hover 才出底色 */
+.icon-btn {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* ---------------- 内容区 ---------------- */
+
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 10px;
+}
+
+/* 配置行:模型、主题两行共用同一种布局 */
+
+.option-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 显隐联动用 HTML 的 hidden 属性。
+   .option-row 自己的 display:flex 会盖掉 hidden 的默认样式,
+   必须显式压回 display:none。 */
+.option-row[hidden] {
+  display: none;
+}
+
+.row-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 分段控件 = OpenType 的 .tabs:
+   轨道 nav 底色,选中项 card 底色 + shadow。 */
+.seg {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--nav);
+  border-radius: 11px;
+}
+
+.seg-item {
+  min-height: 26px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.seg-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.seg-item.is-active {
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+/* 中文文案的那一段(主题、待机)不用等宽字体:
+   模型段的 "0.6B / 1.7B" 是西文数字,等宽才对齐;
+   中文在等宽栈里会掉到兜底字体,字宽还不一样,观感更乱。 */
+.seg.is-text .seg-item {
+  font-family: var(--font);
+}
+
+/* ---------------- 状态区 ---------------- */
+
+/* 状态区:当前状态文字 + 后端健康徽章。
+   和配置行同一套排版,只是标签换成"状态"。 */
+.status-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-text {
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* 健康徽章:三态各有各的底色 ——
+   加载中偏中性、就绪走绿、失败走红。
+   失败那一档最要紧:用户得一眼看出"后端没起来"。 */
+.health-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text2);
+  background: var(--nav);
+}
+
+.health-badge[data-health="ready"] {
+  color: var(--k-ask-b);
+  background: var(--k-ask);
+}
+
+.health-badge[data-health="failed"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* 失败原因:常驻显示(不自动消失)。
+   加载失败只摆一个"失败"等于让用户自己猜 —— 原因才是有用的那半截。 */
+.health-reason {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.health-reason[hidden] {
+  display: none;
+}
+
+/* ---------------- 说明与提示 ---------------- */
+
+/* 后端说明(网络模式下才出现)。
+   行为差异必须写出来 —— 静默失效比没有这个功能更糟:
+   用户会以为"预览坏了"或者"网络没生效"。 */
+.hint {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--warn);
+}
+
+/* 操作提示(切换后端的进展 / 拒绝 / 失败)。
+   空的时候不占位置 —— 平时面板该多紧凑还是多紧凑。 */
+.notice {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text2);
+}
+
+.notice:empty {
+  display: none;
+}
+
+/* 置灰的一行(网络模式下的"模型""预览")。
+   用降透明度 + 去掉指针事件 —— 看得见它在,但点不动。 */
+.option-row.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ---------------- 开关(预览显隐) ---------------- */
+/* 轨道 + 圆钮。跟分段控件是同一套设计语言:
+   轨道用 nav 底色 + line 描边,圆钮用 card 底色 + shadow。 */
+.switch {
+  position: relative;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+/* 真正的 checkbox 藏起来(不能 display:none —— 那样键盘就够不着了),
+   留一个 0 尺寸的输入框保住可聚焦性和读屏语义。 */
+.switch input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  margin: 0;
+  opacity: 0;
+}
+
+.switch-track {
+  position: relative;
+  display: block;
+  width: 38px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--nav);
+  transition: background 0.18s, border-color 0.18s;
+}
+
+.switch-thumb {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  transition: transform 0.18s;
+}
+
+/* 选中:轨道填成 accent 色,圆钮滑到右边 */
+.switch input:checked + .switch-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* 底部：热键提示 + 退出 */
+
+.footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hotkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 热键本体 = OpenType 的 kbd:描边 + 底部同色投影 */
+.hotkey kbd {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 2px 0 var(--line);
+  background: var(--card);
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 退出 = OpenType 的 .text-button:无框、无底色,hover 才变深 */
+.link-btn {
+  flex: 0 0 auto;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.link-btn:hover {
+  color: var(--text);
+}
+
+/* ---------------- 焦点态 ---------------- */
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* ---------------- 动效降级 ---------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

@@ -20,11 +20,13 @@
   5. controller    —— 业务核心
   6. presenter     —— 把 core 的状态/通知翻译成胶囊的动作
   7. 胶囊窗口      —— 必须在 webview.start() **之前**建好
-  8. 托盘 / 热键   —— 独立线程
-  9. 引擎启动      —— 后台加载模型,主循环不阻塞
+  8. 面板窗口      —— 同上(pywebview 的多窗口约束:start 之后不能再建窗)
+  9. 托盘 / 热键   —— 独立线程
+ 10. 引擎启动      —— 后台加载模型,主循环不阻塞
 
-窗口只剩**一个**:胶囊(host/capsule.py)。V1 的设置面板随旧 ui 一起
-退役了 —— 面板没了,GUI 主循环也就只需要一个窗口。
+窗口有两个:**胶囊**(host/capsule.py,录音时的浮层)和**设置面板**
+(host/panel.py,配置窗口)。面板默认**不常驻** —— 托盘菜单或球菜单
+才打开,关掉只是隐藏,不退出程序。
 
 退出收尾顺序:**先停窗口推送,再注销热键**。热键是全局资源,占着
 不放的话,用户"退出后马上重启"会因为注册冲突而失败(热键注销要等
@@ -352,9 +354,11 @@ def run_gui(config: Config, entry: _Entry) -> int:
     """GUI 模式:装配整条链,起 webview 主循环。"""
     log = get_logger("main")
 
+    from .apps.panel.presenter import PanelPresenter
     from .apps.voicebar.presenter import VoiceBarPresenter
     from .host.capsule import VoiceCapsule
     from .host.hotkey import HotkeyError, HotkeyManager
+    from .host.panel import VoicePanel
     from .host.tray import Tray, TrayMenuItem
     from .win32.api import get_foreground_window
     from .win32.dpi import set_dpi_awareness
@@ -391,13 +395,13 @@ def run_gui(config: Config, entry: _Entry) -> int:
     hotkey = HotkeyManager(notifier=notify)
     tray = Tray(notifier=notify, title="Qwen3 语音输入")
 
-    # 退出请求:两条路(托盘菜单 / 球菜单)都汇到这里。
+    # 退出请求:三条路(托盘菜单 / 球菜单 / 面板的「退出」按钮)都汇到这里。
     flags = {"restart": False}
 
     def request_quit() -> None:
         """请求退出:先停窗口推送,webview 主循环随之返回。"""
         log.info("收到退出请求")
-        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule)
+        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule, panel, panel_presenter)
 
     def request_restart() -> None:
         """请求重启:置位标记后走**同一条**退出路径。
@@ -422,12 +426,50 @@ def run_gui(config: Config, entry: _Entry) -> int:
         config.save()
         log.info("重新探测麦克风: %s", desc)
 
-    # 7) 托盘菜单(V1 的项目基本照搬,只掉了「显示/隐藏面板」——
-    #    面板随旧 ui 退役了,没有面板可开)
+    # 7) 面板窗口 —— 和胶囊一样,必须在 webview.start() **之前**建好:
+    # pywebview 的多窗口约束:start 之后不能再 create_window(官方动态
+    # 建窗路径会在返回前触发 before_show/shown,拿不到 window 对象)。
+    #
+    # 面板 presenter 负责翻译 core 的快照/通知;主题那一条由装配层
+    # 注入(capsule.set_theme)—— 面板改了主题,胶囊要跟着换。
+    # 退出的收尾路径也在这里注入:面板的「退出」按钮走**同一条**
+    # request_quit,和托盘菜单、球菜单一模一样。
+    panel_presenter = PanelPresenter(
+        core=controller,
+        config=config,
+        notifier=notify,
+        theme_broadcaster=capsule.set_theme,
+        quit_handler=request_quit,
+    )
+    panel_presenter.install()
+    panel = VoicePanel(
+        presenter=panel_presenter,
+        config=config,
+        js_api=panel_presenter.api,
+        geometry=config.panel_geometry,
+        focus_restore=startup_focus,
+    )
+    panel_presenter.attach(panel)
+    # 默认不常驻:面板由托盘菜单/球菜单打开。配置里显式要求常驻
+    # 时才启动就显示。
+    if config.panel_visible:
+        panel.show()
+
+    # 8) 托盘菜单(V1 的项目基本照搬,「显示/隐藏面板」回来了:
+    #    面板退役期间这一项去掉了,现在补回来)
+    def toggle_panel() -> None:
+        """托盘菜单的「设置面板」:显示/隐藏切换。"""
+        panel.toggle()
+
+    def open_panel() -> None:
+        """球菜单的「设置」:打开设置面板。"""
+        panel.show()
+
     tray.set_menu([
         TrayMenuItem("开始 / 停止录音", key="record",
                      action=lambda: controller.toggle_recording(),
                      default=True),
+        TrayMenuItem("设置面板", key="panel", action=toggle_panel),
         TrayMenuItem("重新探测麦克风", key="reload_mic", action=reload_mic),
         TrayMenuItem("打开配置文件", key="open_config",
                      action=_open_config_file),
@@ -438,10 +480,10 @@ def run_gui(config: Config, entry: _Entry) -> int:
     ])
 
     # 球菜单的三个出口:
-    #   「设置」—— 面板已经退役,这里退到「打开配置文件」(设置就写在那儿)
+    #   「设置」—— 打开设置面板(面板退役那阵子这里退到「打开配置文件」)
     #   「二维码扫描」—— 拉起附属工具(独立进程)
     #   「退出」—— 复用托盘同一条清理路径
-    capsule.set_panel_opener(_open_config_file)
+    capsule.set_panel_opener(open_panel)
     capsule.set_quit_handler(request_quit)
     capsule.set_qr_scanner_launcher(make_qr_scanner_launcher())
 
@@ -491,7 +533,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
     except KeyboardInterrupt:
         log.info("收到 Ctrl+C")
     finally:
-        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule)
+        _shutdown_and_exit(presenter, controller, hotkey, tray, capsule, panel, panel_presenter)
 
     # 托盘的「重启」:走到这里说明所有清理都完成了(热键已注销、
     # 窗口已销毁、模型已卸载),现在拉新实例才不会撞车
@@ -503,8 +545,8 @@ def run_gui(config: Config, entry: _Entry) -> int:
 _finalized = {"done": False}
 
 
-def _shutdown_and_exit(presenter, controller, hotkey, tray, capsule) -> None:
-    """退出收尾(幂等)。两条退出路都走这一条,避免漏步骤。
+def _shutdown_and_exit(presenter, controller, hotkey, tray, capsule, panel, panel_presenter) -> None:
+    """退出收尾(幂等)。所有退出路都走这一条,避免漏步骤。
 
     顺序:**先停窗口推送,再注销热键**。
     """
@@ -518,13 +560,23 @@ def _shutdown_and_exit(presenter, controller, hotkey, tray, capsule) -> None:
     except Exception:
         log.debug("presenter 收尾异常", exc_info=True)
     log.info("退出收尾: presenter %.2fs", time.monotonic() - t0)
+    try:
+        panel_presenter.shutdown()
+    except Exception:
+        log.debug("面板 presenter 收尾异常", exc_info=True)
     # 窗口推送先停 —— 推给一个没人看的窗口没有意义,还会拖慢退出。
     t1 = time.monotonic()
+    try:
+        panel.destroy()
+    except Exception:
+        log.debug("面板收尾异常", exc_info=True)
+    log.info("退出收尾: panel %.2fs", time.monotonic() - t1)
+    t1b = time.monotonic()
     try:
         capsule.destroy()
     except Exception:
         log.debug("窗口收尾异常", exc_info=True)
-    log.info("退出收尾: capsule %.2fs", time.monotonic() - t1)
+    log.info("退出收尾: capsule %.2fs", time.monotonic() - t1b)
     # 再注销热键 —— 它是全局资源,占着不放的话,"退出后马上重启"
     # 会因为注册冲突而失败。
     t2 = time.monotonic()

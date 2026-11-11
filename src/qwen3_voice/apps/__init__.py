@@ -1,4 +1,4 @@
 
 from __future__ import annotations
 
-__all__ = ["voicebar"]
+__all__ = ["panel", "voicebar"]

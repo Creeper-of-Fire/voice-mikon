@@ -232,7 +232,7 @@ def _wait_modifiers(attempt: int) -> str:
         if not mods:
             return "clear"
         # 真的在等才提示(全松的大多数轮次零通知零打扰):
-        # 胶囊的"识别中…"实时换成"松开按键后粘贴",用户看到就会松,
+        # 胶囊的"识别中…"实时换成"松开修饰键后粘贴",用户看到就会松,
         # 等待实际时长随之缩短。走通知流 —— core 不认识 GUI,胶囊
         # 是订阅者之一,日志也顺带留痕。
         if not notified:
@@ -242,7 +242,7 @@ def _wait_modifiers(attempt: int) -> str:
             # 修饰键都要松(Alt/Shift 按着发什么都不再是普通粘贴),
             # 唯独 Ctrl 可以保持按住,会顺势只补一个 V。
             notify.publish("warning", "modifier_wait",
-                           "松开按键后自动粘贴；按住 Ctrl 也可以直接粘贴")
+                           "松开修饰键后自动粘贴；按住 Ctrl 也可以直接粘贴")
         if mods == {"ctrl"}:
             ctrl_stable += 1
             if ctrl_stable >= 2:
@@ -266,7 +266,7 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
     此时粘贴还没触发,重试是安全的 —— 不会贴出重复文字。
     """
     # ---- 先把文字写进剪贴板(保住文字优先于贴出去) ----
-    # 无论按键状态如何,识别出的话必须先存在于剪贴板 —— "没送达就不
+    # 无论修饰键状态如何,识别出的话必须先存在于剪贴板 —— "没送达就不
     # 还"的铁律:哪怕后面等键超时,文字已经在板上,用户松手后 Ctrl+V
     # 就能拿到。反过来(先等键再写板)超时路径文字哪儿都不在,文案
     # 却说"可直接 Ctrl+V" —— 又是谎报。
@@ -286,7 +286,7 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
 
     # ---- 等修饰键松开(决定"怎么贴",不影响"文字已在板上") ----
     # 用户结束录音的方式就是再按一次热键(Ctrl+Alt+Space),识别完成时
-    # 手指常还留在键上 —— 这不是故障,是必然的时间差:
+    # 手指常还留在修饰键上 —— 这不是故障,是必然的时间差:
     #   - 全松 → 正常合成 Ctrl+V
     #   - 稳定只剩 Ctrl(用户有意按住) → **顺势只补一个 V**
     #     (用户的物理 Ctrl + 我们的 V = 粘贴,连 Ctrl 都不用合成)

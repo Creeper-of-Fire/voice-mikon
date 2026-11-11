@@ -305,7 +305,7 @@ class VoiceBarPresenter:
         elif kind == "inject_failed":
             self._enter_error(note, str(note.fields.get("text") or ""))
         elif kind == "modifier_wait":
-            # 注入在等用户松开修饰键(识别太快、手指还在热键上)。
+            # 注入在等用户松开修饰键(识别太快、手指还在修饰键上)。
             # 显示切**警告两层形态**(与注入失败的警告同一家族):
             # 胶囊中段短词 + 文字条完整说明。状态位仍是 PROCESSING
             # (松开后自然流转 result),这里是**瞬态显示覆盖** —— 不改

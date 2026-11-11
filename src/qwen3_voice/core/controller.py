@@ -819,12 +819,12 @@ class CoreController:
             # 文案按**实况**分类(硬规则:诊断信息必须与失败原因一致 ——
             # 以前 modifier 类失败(根本没碰剪贴板)也报"复制到剪贴板
             # 失败",把用户的排查方向带偏了):
-            #   modifier_timeout  → 结束热键一直没松开(与剪贴板无关)
+            #   modifier_timeout  → 修饰键一直没松开(与剪贴板无关)
             #   剪贴板里确实有我们的文本 → 只是没送出去,Ctrl+V 就能拿到
             #   剪贴板里没有 → 复制这一步就失败了,得手动重来
             if result.reason == "modifier_timeout":
                 self._notify("warning", "inject_failed",
-                             "结束热键还没松开,没能自动粘贴;"
+                             "修饰键还没松开,没能自动粘贴;"
                              "松开后可直接 Ctrl+V,或点「复制」",
                              text=text, reason=result.reason)
             elif result.text_in_clipboard:

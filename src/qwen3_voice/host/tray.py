@@ -153,21 +153,31 @@ class Tray:
                 continue
             entries.append(pystray.MenuItem(
                 item.label,
-                lambda it=item: self._on_menu(it),
+                # pystray 调 action 时会把 **icon 对象**当位置参数塞进来
+                # (1 参 action 的约定是 action(icon)),必须吞掉所有位置参数,
+                # 只认闭包里捕获的 TrayMenuItem —— 否则 _on_menu 拿到 Icon
+                # 会在 item.action 上炸,异常处理里 item.label 再炸一次,
+                # 二次异常穿透进 pystray 的窗口分发器,托盘从此整个死掉
+                # (v2 遗产 bug,真机点一次菜单即触发)。
+                lambda *_, it=item: self._on_menu(it),
                 default=item.default,
                 enabled=item.enabled,
             ))
         return pystray.Menu(*entries)
 
     def _on_menu(self, item: TrayMenuItem) -> None:
+        # 异常处理自身必须先立于不败之地:item 若不是 TrayMenuItem
+        # (历史上 pystray 曾把 Icon 传进来),取 label 也会炸,二次异常
+        # 会穿透到 pystray 的消息分发器 —— 那是托盘整个死掉的路径。
+        label = getattr(item, "label", "?")
         try:
-            if item.action is not None:
+            if getattr(item, "action", None) is not None:
                 item.action()
         except Exception as e:
-            log.exception("托盘菜单动作异常: %s", item.label)
+            log.exception("托盘菜单动作异常: %s", label)
             self._notifier.publish(
                 "error", "tray_action_failed",
-                f"托盘菜单「{item.label}」执行失败", reason=str(e))
+                f"托盘菜单「{label}」执行失败", reason=str(e))
         with self._lock:
             listeners = list(self._listeners)
         for cb in listeners:

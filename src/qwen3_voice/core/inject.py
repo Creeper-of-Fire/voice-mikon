@@ -237,8 +237,11 @@ def _wait_modifiers(attempt: int) -> str:
         # 是订阅者之一,日志也顺带留痕。
         if not notified:
             notified = True
-            notify.publish("info", "modifier_wait",
-                           "松开按键后自动粘贴")
+            # warning 级:需要用户行动(松手)。文案把规则说清:其他修饰键
+            # 都要松(Alt/Shift 按着发什么都不再是普通粘贴),唯独 Ctrl
+            # 可以保持按住 —— 稳定只剩 Ctrl 时会顺势只补一个 V。
+            notify.publish("warning", "modifier_wait",
+                           "松开按键即可粘贴（Ctrl 可按住）")
         if mods == {"ctrl"}:
             ctrl_stable += 1
             if ctrl_stable >= 2:

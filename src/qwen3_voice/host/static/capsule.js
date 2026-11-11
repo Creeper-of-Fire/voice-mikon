@@ -1008,10 +1008,17 @@
     }
 
     if (mode === 'processing') {
-      // message 非空时覆盖默认文案:注入在等用户松修饰键时,
-      // presenter 会把"识别中…"换成"松开按键后自动粘贴" ——
-      // 等待可见,用户看到就会松,等待时长自然缩短。
-      setPhase('processing', message || null);
+      if (data.warn) {
+        // 等修饰键的**瞬态警告覆盖**(状态位仍是 processing,松开后
+        // 自然流转 result):走警告两层形态 —— 中段短词(text),
+        // 文字条放完整说明(message,把"哪些键要松/Ctrl 例外"讲清)。
+        if (ui.previewEnabled) {
+          writeText(message, 'warning');
+        }
+        setPhase('warning', text || '等你松键');
+      } else {
+        setPhase('processing', message || null);
+      }
       return;
     }
 

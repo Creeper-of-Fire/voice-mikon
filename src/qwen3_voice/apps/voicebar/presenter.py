@@ -305,14 +305,21 @@ class VoiceBarPresenter:
         elif kind == "inject_failed":
             self._enter_error(note, str(note.fields.get("text") or ""))
         elif kind == "modifier_wait":
-            # 注入在等用户松开修饰键(识别太快、手指还在热键上):
-            # 把"识别中…"实时换成提示 —— 用户看到就会松,等待自然缩短。
-            # 只在 PROCESSING 态生效:别的状态下这条提示没有落点。
+            # 注入在等用户松开修饰键(识别太快、手指还在热键上)。
+            # 显示切**警告两层形态**(与注入失败的警告同一家族):
+            # 胶囊中段短词 + 文字条完整说明。状态位仍是 PROCESSING
+            # (松开后自然流转 result),这里是**瞬态显示覆盖** —— 不改
+            # _message 等常驻字段,免得 result 流转时还要清理。
             with self._lock:
                 if self._closed or self._mode != protocol.MODE_PROCESSING:
                     return
-                self._message = note.message
-            self._push_mode()
+            capsule = self._capsule
+            if capsule is not None:
+                capsule.set_mode(protocol.MODE_PROCESSING, {
+                    "warn": True,
+                    "text": "等你松键",
+                    "message": note.message,
+                })
         elif kind == "backend_load_failed":
             self._enter_backend_failed(note)
         elif kind == "backend_switch_failed":

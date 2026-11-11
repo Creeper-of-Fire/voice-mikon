@@ -10,7 +10,8 @@
 
 几个刻意的选择:
 
-- **API Key 只从环境变量 ``MINIMAX_API_KEY`` 读**,绝不进 config.json
+- **API Key 从环境变量 ``MINIMAX_API_KEY`` 或 ``data/.env`` 文件读**(前者
+  临时覆盖,后者持久存储),绝不进 config.json
   —— 配置文件会被用户手工编辑、截图、分享。缺 key 就明确报错,
   **不静默回落到本地**(那会让用户以为在用网络)。
 - **key 绝不进日志**:需要提及时只报长度(够判断"配没配上"),
@@ -38,13 +39,44 @@ from pathlib import Path
 import numpy as np
 
 from ..logging_setup import get_logger
+from ..paths import data_dir
 from ._http import DEFAULT_TIMEOUT, HttpResponse, HttpTransport, HttpxTransport
 from .base import ASRBackend, ASRError, encode_wav, resample_to
 
 log = get_logger("asr.net")
 
-# API Key 的环境变量名(唯一的来源,不进配置文件)
+# API Key 的环境变量名(临时覆盖/测试用;日常持久存储在 data/.env)
 API_KEY_ENV = "MINIMAX_API_KEY"
+
+# key 的持久存储文件(相对项目 data/ 目录;已被 .gitignore 的 *.env 规则忽略)。
+# 文件格式:每行 KEY=VALUE,# 开头是注释。放文件而不是注册表环境变量:
+# 暴露面小(不会被任意进程的用户环境块读到),且跟着项目目录走(portable)。
+ENV_FILE_NAME = ".env"
+
+
+def _load_api_key() -> str:
+    """取 MiniMax 的 API Key:进程环境变量优先,data/.env 文件兜底。
+
+    优先级是有意的:环境变量是**临时通道**(测试换 key、CI 注入),
+    data/.env 才是**持久真相** —— 用户不用往系统里写任何东西。
+    手写的极简解析(键=值、# 注释、容忍引号),不引 python-dotenv。
+    """
+    key = os.environ.get(API_KEY_ENV, "").strip()
+    if key:
+        return key
+    try:
+        env_file = data_dir() / ENV_FILE_NAME
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith(f"{API_KEY_ENV}="):
+                    value = line[len(API_KEY_ENV) + 1:].strip()
+                    return value.strip('"').strip("'")
+    except OSError as e:
+        log.debug("读取 %s 失败: %s", ENV_FILE_NAME, e)
+    return ""
 
 # 端点前缀:国内站是 api.minimax.cn,海外站改成 https://api.minimax.io
 DEFAULT_BASE_URL = "https://api.minimax.cn"
@@ -101,12 +133,13 @@ class MiniMaxBackend(ASRBackend):
 
         **这一步就会失败**:没配 key 就直接报错,不让用户以为网络后端能用。
         """
-        key = self._api_key or os.environ.get(API_KEY_ENV, "")
+        key = self._api_key or _load_api_key()
         key = (key or "").strip()
         if not key:
             raise ASRError(
-                f"未配置 {API_KEY_ENV} 环境变量 —— MiniMax 后端不可用。"
-                f"设置该环境变量后重试(本地后端不受影响)")
+                f"未配置 {API_KEY_ENV} —— MiniMax 后端不可用。"
+                f"把 key 写进 data/{ENV_FILE_NAME}(MINIMAX_API_KEY=...)"
+                f"或设置同名环境变量后重试(本地后端不受影响)")
         self._api_key = key
 
         t0 = time.time()

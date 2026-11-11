@@ -48,6 +48,7 @@ import time
 from dataclasses import dataclass
 
 from ..logging_setup import get_logger
+from ..notify import notify
 from ..win32 import clipboard
 from ..win32.api import (get_foreground_window, held_modifiers, restore_foreground,
                          send_ctrl_v, send_v, get_window_title)
@@ -225,10 +226,19 @@ def _wait_modifiers(attempt: int) -> str:
     """
     deadline = time.monotonic() + MOD_WAIT_TIMEOUT
     ctrl_stable = 0
+    notified = False
     while True:
         mods = held_modifiers()
         if not mods:
             return "clear"
+        # 真的在等才提示(全松的大多数轮次零通知零打扰):
+        # 胶囊的"识别中…"实时换成"松开按键后粘贴",用户看到就会松,
+        # 等待实际时长随之缩短。走通知流 —— core 不认识 GUI,胶囊
+        # 是订阅者之一,日志也顺带留痕。
+        if not notified:
+            notified = True
+            notify.publish("info", "modifier_wait",
+                           "松开按键后自动粘贴")
         if mods == {"ctrl"}:
             ctrl_stable += 1
             if ctrl_stable >= 2:

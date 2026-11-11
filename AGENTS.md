@@ -1,7 +1,9 @@
-# qwen3-voice
+# voice-mikon
 
 Windows 全局语音输入:本地 Qwen3-ASR,按热键说话 → 文字注入光标处。
-架构与用法见 `README.md`;前后端面板协议见 `src/qwen3_voice/ui/BRIDGE.md`。
+架构与用法见 `README.md`;前后端桥接契约见
+`src/voice_mikon/apps/panel/presenter.py`(`_PanelApi`)与前端
+`host/static/panel.js` 头部注释(方法名两边逐字一致)。
 portable 约定(数据只进 `data/`)见上级目录 `../AGENTS.md`。
 
 ## 约定

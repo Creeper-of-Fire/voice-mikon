@@ -840,7 +840,7 @@ def upload_transparent_surface(hwnd: int, alpha: int = 1) -> bool:
         user32.ReleaseDC(None, hdc_screen)
 
 
-def show_error_box(text: str, caption: str = "Qwen3 语音输入") -> bool:
+def show_error_box(text: str, caption: str = "Voice Mikon") -> bool:
     """弹一个系统级错误对话框。
 
     面板瘦身后没有状态行了,启动期的致命错误(比如热键注册失败)

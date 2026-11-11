@@ -12,7 +12,7 @@
 
     show    只看产出的最终词表。
 
-主程序(qwen3-voice)**每次识别时**实时读 data/hotwords.txt,
+主程序(voice-mikon)**每次识别时**实时读 data/hotwords.txt,
 所以你改完词表立刻生效,不用重启。
 
 ## 打分怎么算(全部公开在 candidates 文件里)
@@ -47,13 +47,13 @@ from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# 路径(portable:跟项目走,尊重 QWEN3_VOICE_HOME,不写死绝对路径)
+# 路径(portable:跟项目走,尊重 VOICE_MIKON_HOME,不写死绝对路径)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent          # <项目>/scripts
 _PROJECT_DIR = _SCRIPT_DIR.parent                       # <项目>
 
 def _data_dir() -> Path:
-    override = os.environ.get("QWEN3_VOICE_HOME")
+    override = os.environ.get("VOICE_MIKON_HOME")
     return Path(override).expanduser() if override else _PROJECT_DIR / "data"
 
 DATA_DIR = _data_dir()

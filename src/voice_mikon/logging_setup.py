@@ -16,9 +16,9 @@ def setup(log_file: str | Path, level: str = "INFO") -> logging.Logger:
     """初始化根 logger,重复调用只会生效一次。"""
     global _configured
     if _configured:
-        return logging.getLogger("qwen3_voice")
+        return logging.getLogger("voice_mikon")
 
-    root = logging.getLogger("qwen3_voice")
+    root = logging.getLogger("voice_mikon")
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     root.propagate = False
 
@@ -45,4 +45,4 @@ def setup(log_file: str | Path, level: str = "INFO") -> logging.Logger:
 
 
 def get_logger(name: str = "") -> logging.Logger:
-    return logging.getLogger(f"qwen3_voice.{name}" if name else "qwen3_voice")
+    return logging.getLogger(f"voice_mikon.{name}" if name else "voice_mikon")

@@ -19,7 +19,7 @@ from typing import Any
 
 from .paths import config_path, ensure_dirs, hotwords_path, log_path
 
-log = logging.getLogger("qwen3_voice.config")
+log = logging.getLogger("voice_mikon.config")
 
 # 主题档位:
 #   auto  跟随系统(Windows 的"应用模式",WebView2 直接跟着走)

@@ -4,7 +4,7 @@
 
 ## 架构边界（为什么独立）
 
-- 与语音主程序 `qwen3_voice` **零 import**：双向都不知道对方存在。
+- 与语音主程序 `voice_mikon` **零 import**：双向都不知道对方存在。
 - 主程序侧只有一根线：菜单点击 → `subprocess` 拉起本工具（`python -m qr_scanner`，独立进程）。工具崩溃 / 被强杀不影响语音主程序。
 - UI 走 tkinter（选区 + 结果窗），**不碰 pywebview**——不与主程序的透明 / 裁形那套纠缠。
 - 坐标全程物理像素：进程先声明 per-monitor DPI aware，mss / tkinter / 选区一套坐标。

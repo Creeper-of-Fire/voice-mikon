@@ -12,7 +12,7 @@
     basename(完整路径)              -> 来源标注
 
 关键点:它取的是**真正在跑 Python 的那个进程**的映像文件名,不是版本资源里的
-FileDescription。所以只有把「跑 Python 的进程」换成 Qwen3Voice.exe,标注才会变。
+FileDescription。所以只有把「跑 Python 的进程」换成 VoiceMikon.exe,标注才会变。
 
 用法
 ----
@@ -175,7 +175,7 @@ def clipboard_text() -> str:
         return ""
 
 
-def owner_windows(class_filter: str = "Qwen3VoiceClipboardOwner") -> list[tuple[int, int, int, str, str]]:
+def owner_windows(class_filter: str = "VoiceMikonClipboardOwner") -> list[tuple[int, int, int, str, str]]:
     """扫描所有 message-only 窗口,挑出 owner 窗口。
 
     message-only 窗口(parent = HWND_MESSAGE)不参与 EnumWindows,
@@ -251,7 +251,7 @@ def main() -> int:
         if args.owner_windows:
             wins = owner_windows()
             if not wins:
-                print("  (没找到 Qwen3VoiceClipboardOwner 窗口)", flush=True)
+                print("  (没找到 VoiceMikonClipboardOwner 窗口)", flush=True)
             for hwnd, tid, pid, cls, path in wins:
                 print(
                     f"  owner 窗口: hwnd=0x{hwnd:08X} tid={tid} PID={pid} "

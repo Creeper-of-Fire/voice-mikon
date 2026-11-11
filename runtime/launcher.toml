@@ -1,8 +1,8 @@
-# 真实 venv 的 site-packages —— 壳用它挂载 qwen3_voice
+# 真实 venv 的 site-packages —— 壳用它挂载 voice_mikon
 #
-# 为什么要显式挂:editable 安装(qwen3_voice 指向 <项目>\src)靠 site-packages 里的
+# 为什么要显式挂:editable 安装(voice_mikon 指向 <项目>\src)靠 site-packages 里的
 # __editable__*.pth 生效,而 .pth 只在 site 初始化时被处理 —— 单纯把目录塞进
 # sys.path 或 PYTHONPATH 都不会跑 .pth,结果是 ModuleNotFoundError。
 #
-# 临时切换环境可以用环境变量 QWEN3_VOICE_VENV_SITE 覆盖这一项。
+# 临时切换环境可以用环境变量 VOICE_MIKON_VENV_SITE 覆盖这一项。
 venv_site_packages = "D:\\Dev\\Environments\\qwen3-asr\\Lib\\site-packages"

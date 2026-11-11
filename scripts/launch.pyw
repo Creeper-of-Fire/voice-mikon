@@ -12,7 +12,7 @@
 
 用法(快捷方式里):
     目标:   base 目录下的 pythonw.exe + 本脚本的完整路径
-    起始于: qwen3-voice 项目根目录
+    起始于: voice-mikon 项目根目录
 """
 
 import site
@@ -35,12 +35,12 @@ def main() -> int:
         return 1
 
     # 用 addsitedir 而不是 sys.path.insert:editable 安装
-    # (qwen3_voice 自己)靠 site-packages 里的 .pth 文件生效,
+    # (voice_mikon 自己)靠 site-packages 里的 .pth 文件生效,
     # 而 .pth 只在 site 初始化时被处理 —— 手动 insert 路径
-    # 不会跑 .pth,qwen3_voice 会 ModuleNotFoundError(实测)。
+    # 不会跑 .pth,voice_mikon 会 ModuleNotFoundError(实测)。
     site.addsitedir(str(VENV_SITE))
 
-    from qwen3_voice.__main__ import main as app_main
+    from voice_mikon.__main__ import main as app_main
 
     return app_main()
 

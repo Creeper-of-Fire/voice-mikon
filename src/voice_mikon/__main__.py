@@ -60,7 +60,7 @@ class _Entry(NamedTuple):
 
     argv0  入口的 argv[0](已展开成绝对路径):
             - 脚本入口(桌面快捷方式走的就是这条)→ 那个 .pyw 的路径
-            - ``-m qwen3_voice``                   → 包里的 __main__.py
+            - ``-m voice_mikon``                   → 包里的 __main__.py
     frozen 是否是 PyInstaller 打包出来的 exe
     """
 
@@ -70,7 +70,7 @@ class _Entry(NamedTuple):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="qwen3-voice",
+        prog="voice-mikon",
         description="全局语音输入 —— 按热键(或点悬浮球)说话,文字注入当前光标位置。",
     )
     parser.add_argument(
@@ -122,12 +122,12 @@ def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
 
     原则:**忠实复刻当初的启动方式**。四种入口分别对应:
       - 脚本(launch.pyw):[同一个解释器, 同一个脚本的绝对路径]
-      - ``-m qwen3_voice``:argv0 是包里的 __main__.py → 保持 ``-m``
+      - ``-m voice_mikon``:argv0 是包里的 __main__.py → 保持 ``-m``
       - 冻结 exe(PyInstaller):[exe 自己]
-      - 薄壳 exe(runtime\\bin\\Qwen3Voice.exe):[exe 自己,不带任何参数]
+      - 薄壳 exe(runtime\\bin\\VoiceMikon.exe):[exe 自己,不带任何参数]
 
     为什么不能一律 ``-m``:解释器可能压根看不见这个包 ——
-    桌面快捷方式用的是 base 目录的 pythonw.exe,而 qwen3_voice 只装在
+    桌面快捷方式用的是 base 目录的 pythonw.exe,而 voice_mikon 只装在
     venv 里(base 下 find_spec 返回 None,实测),拿 base 去 ``-m`` 只会
     ModuleNotFoundError;再叠上 pythonw 没有控制台 → 静默闪退。
     """
@@ -140,15 +140,15 @@ def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
     if argv0:
         script = Path(argv0)
         if script.name == "__main__.py":
-            # ``python -m qwen3_voice``:解释器本来就看得见包,保持 -m
-            return ([sys.executable, "-m", "qwen3_voice"],
+            # ``python -m voice_mikon``:解释器本来就看得见包,保持 -m
+            return ([sys.executable, "-m", "voice_mikon"],
                     str(_project_root_of(script)), None)
 
         if script.suffix.lower() == ".exe":
-            # 薄壳入口(runtime\bin\Qwen3Voice.exe):这个 exe **自己**就是
+            # 薄壳入口(runtime\bin\VoiceMikon.exe):这个 exe **自己**就是
             # 跑 Python 的进程(CPython 被装进了它),所以重启只要再起一个
             # 自己,而且**不能带参数** ——
-            #   Qwen3Voice.exe -m qwen3_voice 是错的:壳根本不转发参数给
+            #   VoiceMikon.exe -m voice_mikon 是错的:壳根本不转发参数给
             #   Python,那样起来的新实例会当成有参数而行为异常。
             # exe 的父目录(runtime\)里放着 pyvenv.cfg 和 launcher.toml,
             # 新实例照样找得到 venv,工作目录取它的上一级即可。
@@ -164,14 +164,14 @@ def _restart_plan(entry: _Entry) -> tuple[list[str], str, str | None]:
                 # + 同一个脚本 —— 脚本自己会挂 venv,等于完整复刻
                 return ([sys.executable, str(script)],
                         str(_project_root_of(script)), None)
-            return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
-                    f"入口脚本 {script} 不存在,退回 -m qwen3_voice")
+            return ([sys.executable, "-m", "voice_mikon"], str(PROJECT_DIR),
+                    f"入口脚本 {script} 不存在,退回 -m voice_mikon")
 
-        return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
-                f"入口 {script} 不是 .py/.pyw 脚本,退回 -m qwen3_voice")
+        return ([sys.executable, "-m", "voice_mikon"], str(PROJECT_DIR),
+                f"入口 {script} 不是 .py/.pyw 脚本,退回 -m voice_mikon")
 
-    return ([sys.executable, "-m", "qwen3_voice"], str(PROJECT_DIR),
-            "认不出当初的启动方式,退回 -m qwen3_voice")
+    return ([sys.executable, "-m", "voice_mikon"], str(PROJECT_DIR),
+            "认不出当初的启动方式,退回 -m voice_mikon")
 
 
 def _spawn_restart(logger, entry: _Entry | None = None) -> None:
@@ -217,7 +217,7 @@ def make_qr_scanner_launcher():
 
     拉起用的是**本环境真正的 python.exe**(_python_exe_for_children):
     拉起附属工具就是拉起一个真正的运行时进程,跟壳无关 —— 壳的职责
-    只是"以 Qwen3Voice.exe 的映像名跑主程序",永远不会参与这件事
+    只是"以 VoiceMikon.exe 的映像名跑主程序",永远不会参与这件事
     (工具以后换成 Node/Bash 也一样,壳不可能也不应该兼容所有运行时)。
     """
     import subprocess
@@ -267,7 +267,7 @@ def make_qr_scanner_launcher():
 def _python_exe_for_children(exe: str | None = None) -> Path | None:
     """返回本环境**真正的解释器**,拉起附属子进程时用;认不出返回 None。
 
-    为什么不能直接拿 sys.executable:薄壳场景(runtime\\bin\\Qwen3Voice.exe)
+    为什么不能直接拿 sys.executable:薄壳场景(runtime\\bin\\VoiceMikon.exe)
     它指向**壳自己** —— 嵌入式初始化按进程映像推导,壳不转发参数,
     拉起它只会得到第二个主程序(实测:点「二维码扫描」弹出的是新悬浮球)。
 
@@ -286,7 +286,7 @@ def _python_exe_for_children(exe: str | None = None) -> Path | None:
         return exe_path
 
     site_pkgs = (
-        os.environ.get("QWEN3_VOICE_VENV_SITE", "").strip()
+        os.environ.get("VOICE_MIKON_VENV_SITE", "").strip()
         or _launcher_toml_site_packages(exe_path.parent.parent / "launcher.toml")
     )
     if not site_pkgs:
@@ -393,7 +393,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
     presenter.attach(capsule)
 
     hotkey = HotkeyManager(notifier=notify)
-    tray = Tray(notifier=notify, title="Qwen3 语音输入")
+    tray = Tray(notifier=notify, title="Voice Mikon")
 
     # 退出请求:三条路(托盘菜单 / 球菜单 / 面板的「退出」按钮)都汇到这里。
     flags = {"restart": False}
@@ -696,7 +696,7 @@ def run_headless_service(config: Config) -> int:
 
     controller = CoreController(config, notifier=notify)
     hotkey = HotkeyManager(notifier=notify)
-    tray = Tray(notifier=notify, title="Qwen3 语音输入(无界面)")
+    tray = Tray(notifier=notify, title="Voice Mikon(无界面)")
 
     def on_core_state(state: AppState) -> None:
         """托盘图标跟着状态走 —— headless 下唯一的状态反馈。"""
@@ -790,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
     log = get_logger("main")
 
     log.info("=" * 60)
-    log.info("Qwen3 语音输入启动  热键=%s  模型=%s  后端=%s",
+    log.info("Voice Mikon启动  热键=%s  模型=%s  后端=%s",
              config.hotkey, config.model, config.backend)
 
     try:
@@ -801,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_headless(config, args)
         return run_gui(config, entry)
     except KeyboardInterrupt:
-        print("qwen3-voice: 收到 Ctrl+C,退出。")
+        print("voice-mikon: 收到 Ctrl+C,退出。")
         return 0
 
 

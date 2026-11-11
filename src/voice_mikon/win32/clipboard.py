@@ -93,7 +93,7 @@ _OPEN_RETRY_DELAYS = (0.05,) * 10
 #
 # 进程退出时窗口照样会被销毁 → 退出前必须 relinquish():把所有权
 # 转给 NULL 并把文本写回(见 _relinquish_ownership),内容才能留住。
-_OWNER_CLASS = "Qwen3VoiceClipboardOwner"
+_OWNER_CLASS = "VoiceMikonClipboardOwner"
 WM_DESTROY = 0x0002
 HWND_MESSAGE = -3
 

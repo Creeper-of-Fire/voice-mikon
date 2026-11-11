@@ -200,7 +200,7 @@ class VoicePanel:
         html = STATIC_DIR / "panel.html"
         saved_x, saved_y = self._parse_geometry(geometry)
         self._window = webview.create_window(
-            "Qwen3 语音输入",
+            "Voice Mikon",
             url=html.as_uri(),
             js_api=js_api,
             width=BASE_W,

@@ -7,7 +7,7 @@
 旧版本留下的文件会污染新版本,而且它不在项目里,git status 看不到,
 删掉项目目录它还在 —— 换机器还复现不了。状态跟着代码走才能复现和回滚。
 
-可以用环境变量 QWEN3_VOICE_HOME 覆盖数据目录(便携使用 / 测试)。
+可以用环境变量 VOICE_MIKON_HOME 覆盖数据目录(便携使用 / 测试)。
 """
 
 from __future__ import annotations
@@ -15,21 +15,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# src/qwen3_voice/paths.py -> src/qwen3_voice -> src -> 项目根
+# src/voice_mikon/paths.py -> src/voice_mikon -> src -> 项目根
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent.parent
 
 
 def data_dir() -> Path:
     """运行时数据目录(配置、日志都在这)。"""
-    override = os.environ.get("QWEN3_VOICE_HOME")
+    override = os.environ.get("VOICE_MIKON_HOME")
     base = Path(override).expanduser() if override else PROJECT_DIR / "data"
     return base
 
 
 def config_path() -> Path:
     """用户配置文件。"""
-    override = os.environ.get("QWEN3_VOICE_CONFIG")
+    override = os.environ.get("VOICE_MIKON_CONFIG")
     if override:
         return Path(override).expanduser()
     return data_dir() / "config.json"
@@ -37,7 +37,7 @@ def config_path() -> Path:
 
 def log_path() -> Path:
     """日志文件。"""
-    override = os.environ.get("QWEN3_VOICE_LOG")
+    override = os.environ.get("VOICE_MIKON_LOG")
     if override:
         return Path(override).expanduser()
     return data_dir() / "voice_input.log"

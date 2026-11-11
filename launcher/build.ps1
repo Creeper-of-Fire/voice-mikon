@@ -1,4 +1,4 @@
-# 构建 Qwen3Voice.exe
+# 构建 VoiceMikon.exe
 #
 # 为什么不用 vcvarsall.bat:cargo 不认 vcvars —— cargo 找不到 link.exe 就直接
 # 报 "linker `link.exe` not found"。所以这个脚本自己把 MSVC / Windows SDK 的
@@ -89,13 +89,13 @@ try {
         throw "cargo build 失败(exit $LASTEXITCODE)"
     }
 
-    $built = Join-Path $launcherDir 'target\release\Qwen3Voice.exe'
+    $built = Join-Path $launcherDir 'target\release\VoiceMikon.exe'
     if (-not (Test-Path $built)) {
         throw "构建产物不存在: $built"
     }
 
     New-Item -ItemType Directory -Force -Path $runtimeBin | Out-Null
-    $target = Join-Path $runtimeBin 'Qwen3Voice.exe'
+    $target = Join-Path $runtimeBin 'VoiceMikon.exe'
     Copy-Item -Force $built $target
     Write-Host ""
     Write-Host "构建完成:"

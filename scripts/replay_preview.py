@@ -43,23 +43,23 @@ _SRC_DIR = _PROJECT_DIR / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from qwen3_voice.engines.engine import ASREngine
-from qwen3_voice.engines.streaming import (
+from voice_mikon.engines.engine import ASREngine
+from voice_mikon.engines.streaming import (
     SENTENCE_MAX_SECONDS,
     SENTENCE_MIN_SECONDS,
     SENTENCE_SILENCE_SECONDS,
     SentencePreviewEngine,
 )
-from qwen3_voice.engines.vad import (
+from voice_mikon.engines.vad import (
     VAD_FRAME_MS,
     VAD_GATE_CLOSE_FACTOR,
     VAD_GATE_MIN,
     VAD_GATE_OPEN_FACTOR,
     make_vad_detector,
 )
-from qwen3_voice.audio.recorder import RECORDER_BLOCK_SIZE
-from qwen3_voice.config import load_config
-from qwen3_voice.logging_setup import get_logger
+from voice_mikon.audio.recorder import RECORDER_BLOCK_SIZE
+from voice_mikon.config import load_config
+from voice_mikon.logging_setup import get_logger
 
 log = get_logger("replay")
 

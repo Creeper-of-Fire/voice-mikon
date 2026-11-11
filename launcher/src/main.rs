@@ -1,4 +1,4 @@
-//! Qwen3Voice 启动壳 —— 一个「真的应用」外壳。
+//! VoiceMikon 启动壳 —— 一个「真的应用」外壳。
 //!
 //! # 为什么要有这个壳
 //!
@@ -168,7 +168,7 @@ fn log_tail(path: &Path, n: usize) -> String {
 /// 弹错误框。**启动失败必须让人看见** —— 没有控制台,静默 = 神秘闪退。
 fn message_box(text: &str) {
     let t = wide(text);
-    let c = wide("Qwen3 语音输入 - 启动失败");
+    let c = wide("Voice Mikon - 启动失败");
     unsafe {
         MessageBoxW(0, t.as_ptr(), c.as_ptr(), MB_OK | MB_ICONERROR);
     }
@@ -271,7 +271,7 @@ fn main() {
         }
     };
     let exe_dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-    // runtime\bin\Qwen3Voice.exe -> runtime\  -> 项目根
+    // runtime\bin\VoiceMikon.exe -> runtime\  -> 项目根
     let runtime_dir = exe_dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let project_dir = runtime_dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let log = project_dir.join("data").join("launcher.log");
@@ -293,7 +293,7 @@ fn main() {
 
     // --- 2. 真实 venv 的 site-packages ---
     let toml_path = runtime_dir.join("launcher.toml");
-    let site_pkgs = std::env::var("QWEN3_VOICE_VENV_SITE")
+    let site_pkgs = std::env::var("VOICE_MIKON_VENV_SITE")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -397,8 +397,8 @@ fn main() {
          _qv_d.write('  sys.base_prefix= ' + repr(sys.base_prefix) + chr(10))\n\
          _qv_d.write('  sys.version    = ' + repr(sys.version) + chr(10))\n\
          _qv_d.write('  sys.path       = ' + repr(sys.path) + chr(10))\n\
-         _qv_spec = importlib.util.find_spec('qwen3_voice')\n\
-         _qv_d.write('  qwen3_voice 来自 = ' + repr(_qv_spec.origin if _qv_spec else None) + chr(10))\n\
+         _qv_spec = importlib.util.find_spec('voice_mikon')\n\
+         _qv_d.write('  voice_mikon 来自 = ' + repr(_qv_spec.origin if _qv_spec else None) + chr(10))\n\
          _qv_d.close()\n",
         log = py_quote(&log.to_string_lossy())
     );
@@ -411,24 +411,24 @@ fn main() {
     // 探针模式:只初始化 Python 就退出,不碰热键/托盘/窗口。
     // 用途是「壳到底把 prefix 设成了什么」的排障 —— 不用跟正在跑的实例抢热键。
     //
-    // QWEN3_VOICE_LAUNCHER_PROBE=clipboard 时再多做一件事:
+    // VOICE_MIKON_LAUNCHER_PROBE=clipboard 时再多做一件事:
     // 在**本进程的主线程**里建剪贴板 owner 窗口并写一次文本。
     // 这正是真实运行时的路径(见 __main__.main 的 ensure_owner_window),
     // 于是可以拿 check_owner.py 验完整条第三方取名链路:
-    //     GetClipboardOwner -> PID -> 映像名 == Qwen3Voice.exe
-    // 停留时长由 QWEN3_VOICE_PROBE_HOLD 控制(秒,默认 30),
+    //     GetClipboardOwner -> PID -> 映像名 == VoiceMikon.exe
+    // 停留时长由 VOICE_MIKON_PROBE_HOLD 控制(秒,默认 30),
     // 给外部脚本留出读取的时间;退出前交还所有权(内容留住,不清空)。
-    let probe = std::env::var("QWEN3_VOICE_LAUNCHER_PROBE").unwrap_or_default();
+    let probe = std::env::var("VOICE_MIKON_LAUNCHER_PROBE").unwrap_or_default();
     if !probe.is_empty() {
         log_append(&log, &format!("探针模式: {probe}"));
         if probe.eq_ignore_ascii_case("clipboard") {
-            let hold: u64 = std::env::var("QWEN3_VOICE_PROBE_HOLD")
+            let hold: u64 = std::env::var("VOICE_MIKON_PROBE_HOLD")
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(30);
             let code = format!(
                 "import time\n\
-                 from qwen3_voice.win32 import clipboard\n\
+                 from voice_mikon.win32 import clipboard\n\
                  _qv_hwnd = clipboard.ensure_owner_window()\n\
                  _qv_ok = clipboard.set_text({text})\n\
                  _qv_f = open({log}, 'a', encoding='utf-8')\n\
@@ -436,7 +436,7 @@ fn main() {
                  _qv_f.close()\n\
                  time.sleep({hold})\n\
                  clipboard.release_ownership()\n",
-                text = py_quote("Qwen3Voice.exe 剪贴板 owner 自检"),
+                text = py_quote("VoiceMikon.exe 剪贴板 owner 自检"),
                 log = py_quote(&log.to_string_lossy()),
                 hold = hold
             );
@@ -450,16 +450,16 @@ fn main() {
             // 在**真实的 exe 入口上下文**里跑一遍托盘「重启」用的那两个函数:
             //     _capture_entry() -> _restart_plan(entry)
             // argv0 就是 exe 完整路径、frozen=False,正是新分支的判定条件。
-            // 设 QWEN3_VOICE_PROBE_RESTART=1 时还会照 _spawn_restart 的方式
+            // 设 VOICE_MIKON_PROBE_RESTART=1 时还会照 _spawn_restart 的方式
             // (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)真的拉起新实例。
-            let spawn = if std::env::var_os("QWEN3_VOICE_PROBE_RESTART").is_some() {
+            let spawn = if std::env::var_os("VOICE_MIKON_PROBE_RESTART").is_some() {
                 "True"
             } else {
                 "False"
             };
             let code = format!(
                 "import os, subprocess\n\
-                 from qwen3_voice.__main__ import _capture_entry, _restart_plan\n\
+                 from voice_mikon.__main__ import _capture_entry, _restart_plan\n\
                  _qv_entry = _capture_entry()\n\
                  _qv_cmd, _qv_cwd, _qv_note = _restart_plan(_qv_entry)\n\
                  _qv_f = open({log}, 'a', encoding='utf-8')\n\
@@ -469,11 +469,11 @@ fn main() {
                  _qv_f.write('  重启计划 note : ' + repr(_qv_note) + chr(10))\n\
                  _qv_f.close()\n\
                  _qv_pid = None\n\
-                 if {spawn} and os.environ.get('QWEN3_VOICE_PROBE_DEPTH') is None:\n\
+                 if {spawn} and os.environ.get('VOICE_MIKON_PROBE_DEPTH') is None:\n\
                  \x20   _qv_env = dict(os.environ)\n\
-                 \x20   for _qv_k in ('QWEN3_VOICE_LAUNCHER_PROBE', 'QWEN3_VOICE_PROBE_RESTART', 'QWEN3_VOICE_PROBE_HOLD'):\n\
+                 \x20   for _qv_k in ('VOICE_MIKON_LAUNCHER_PROBE', 'VOICE_MIKON_PROBE_RESTART', 'VOICE_MIKON_PROBE_HOLD'):\n\
                  \x20       _qv_env.pop(_qv_k, None)\n\
-                 \x20   _qv_env['QWEN3_VOICE_PROBE_DEPTH'] = '1'\n\
+                 \x20   _qv_env['VOICE_MIKON_PROBE_DEPTH'] = '1'\n\
                  \x20   _qv_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP\n\
                  \x20   _qv_pid = subprocess.Popen(_qv_cmd, cwd=_qv_cwd, env=_qv_env, creationflags=_qv_flags, close_fds=True).pid\n\
                  _qv_f = open({log}, 'a', encoding='utf-8')\n\
@@ -500,7 +500,7 @@ fn main() {
         "import sys, traceback\n\
          _qv_log = {log}\n\
          try:\n\
-         \x20   from qwen3_voice.__main__ import main\n\
+         \x20   from voice_mikon.__main__ import main\n\
          \x20   _qv_rc = main()\n\
          except SystemExit as _qv_e:\n\
          \x20   _qv_rc = _qv_e.code if isinstance(_qv_e.code, int) else 0\n\
@@ -515,7 +515,7 @@ fn main() {
         log = py_quote(&log.to_string_lossy())
     );
     let main_bytes = cstr(&main_code);
-    log_append(&log, "开始跑 qwen3_voice.__main__.main()");
+    log_append(&log, "开始跑 voice_mikon.__main__.main()");
     let rc = unsafe { p_run(main_bytes.as_ptr()) };
     if rc != 0 {
         log_append(&log, "PyRun_SimpleString 返回负数 —— Python 侧抛异常了");

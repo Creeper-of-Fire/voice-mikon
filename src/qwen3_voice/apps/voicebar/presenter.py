@@ -18,18 +18,26 @@ if TYPE_CHECKING:
 
 log = get_logger("apps.voicebar")
 
-DWELL_RESULT = 1.5
-DWELL_ERROR = 4.5
-DWELL_CANCELLED = 1.0
-DWELL_REJECTED = 0.6
-# ⚠ 这里**没有**"错误带原文"的 dwell:带原文的错误态改成**常驻**
-# (用户可以无限次点「复制」重试),收回只由 ✕ 或下一轮录音触发。
+# dwell 转移表:**整个项目只有这一份**(protocol.DWELL_SECONDS)。
+#
+# "何时发生"归 presenter:终态停多久、到点回哪个状态,都查这张表;
+# 前端不再有任何收回定时器 —— 那是"如何呈现",归前端自己演。
+#
+# 到点怎么作废:比较当前的 _mode 和排表时的 mode,对不上就作废。
+# 不做"到处显式取消定时器"那套 —— 比一下就够了,也不会漏。
+DWELL_SECONDS = protocol.DWELL_SECONDS
 
 TEXT_RESULT = "已输入"
 TEXT_CANCELLED = "已取消"
 TEXT_PROCESSING = "识别中…"
 
 class VoiceBarPresenter:
+    """把 core 的状态/通知翻译成胶囊的显示状态。
+
+    显示状态的**唯一真相**是 ``self._mode``:每次状态变化都先改
+    _mode,再经 ``_push_mode()`` 推给前端。前端只演,不决策 ——
+    什么时候发生(停多久、到点回哪)全归这里的 dwell 表。
+    """
 
     def __init__(self, core: CoreController,
                  config: Any = None,
@@ -39,6 +47,7 @@ class VoiceBarPresenter:
         self._notifier = notifier if notifier is not None else notify
         self._lock = threading.RLock()
 
+        # 显示状态的唯一真相
         self._mode = protocol.MODE_ORB
         self._message = ""
         self._text = ""
@@ -58,7 +67,10 @@ class VoiceBarPresenter:
         self._round_failed = False
         self._pending_cancel = False
 
+        # dwell 定时器 + 它期待的(状态, 表键):
+        # 到点时 _mode 对不上就作废 —— 期间有新事实,这次转移不算数。
         self._dwell_timer: threading.Timer | None = None
+        self._dwell_expect: tuple[str, str] | None = None
         self._closed = False
 
     def attach(self, capsule: Any) -> None:
@@ -82,8 +94,6 @@ class VoiceBarPresenter:
             else:
                 self._mode = protocol.MODE_ORB
             standby = self._standby
-            mode = self._mode
-            message = self._message
             theme = self._theme
             show_preview = self._show_preview
 
@@ -92,15 +102,12 @@ class VoiceBarPresenter:
             return
         capsule.set_theme(theme)
         capsule.set_preview_enabled(show_preview)
-        if mode == protocol.MODE_ERROR:
-            capsule.set_state("idle")
-            capsule.set_error(message, "")
-        elif mode == protocol.MODE_STARTING:
-            capsule.set_state("starting")
-        else:
-            capsule.set_state("idle")
+        # 启动态也走同一条 set_mode:显示状态只有一个出口。
+        self._push_mode()
         if standby == protocol.STANDBY_ON_DEMAND:
             capsule.hide_orb()
+        # 启动时的后端不可用:错误文案按 dwell 表走(和运行中一样)。
+        self._schedule_dwell(protocol.MODE_ERROR, protocol.MODE_ERROR)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -137,6 +144,25 @@ class VoiceBarPresenter:
             preview = self._preview_text
         capsule.set_preview(preview)
 
+    def _push_mode(self) -> None:
+        """把当前显示状态推给前端 —— 显示状态的**唯一出口**。
+
+        payload 统一带齐四个字段(见 protocol.py 的说明),由前端
+        按 mode 取用:前端不猜"这一态该有什么字段"。
+        """
+        capsule = self._capsule
+        if capsule is None:
+            return
+        with self._lock:
+            mode = self._mode
+            payload = {
+                "message": self._message,
+                "text": self._text,
+                "can_copy": self._can_copy,
+                "reason": self._reason,
+            }
+        capsule.set_mode(mode, payload)
+
     def _enter_expanding(self) -> None:
         with self._lock:
             if self._closed:
@@ -144,7 +170,6 @@ class VoiceBarPresenter:
             if self._mode in (protocol.MODE_EXPANDING,
                               protocol.MODE_RECORDING):
                 return
-            self._cancel_dwell()
             self._round_start = time.monotonic()
             self._round_failed = False
             self._pending_cancel = False
@@ -154,10 +179,9 @@ class VoiceBarPresenter:
             self._reason = ""
             self._preview_text = ""
             self._mode = protocol.MODE_RECORDING
-
-        capsule = self._capsule
-        if capsule is not None:
-            capsule.begin_recording()
+        # 新一轮录音:前端的清场并进 applyMode('recording')(见 capsule.js),
+        # 这里只管"进入录音"这件事本身。
+        self._push_mode()
 
     def _enter_processing(self) -> None:
         with self._lock:
@@ -168,59 +192,47 @@ class VoiceBarPresenter:
                 return
             self._mode = protocol.MODE_PROCESSING
             self._message = TEXT_PROCESSING
-        capsule = self._capsule
-        if capsule is not None:
-            capsule.set_state("processing")
+        self._push_mode()
 
     def _enter_idle(self) -> None:
         with self._lock:
             if self._closed:
                 return
             mode = self._mode
+            dwell_key: str | None = None
             if mode in (protocol.MODE_EXPANDING, protocol.MODE_RECORDING):
+                # 录音中回到 idle = 这一轮被放弃
                 self._mode = protocol.MODE_CANCELLED
                 self._message = TEXT_CANCELLED
                 self._text = ""
                 self._can_copy = False
-                self._schedule_dwell(DWELL_CANCELLED)
-                action = "cancelled"
+                dwell_key = protocol.MODE_CANCELLED
             elif mode == protocol.MODE_PROCESSING:
                 if self._pending_cancel:
                     self._mode = protocol.MODE_CANCELLED
                     self._message = TEXT_CANCELLED
                     self._text = ""
                     self._can_copy = False
-                    self._schedule_dwell(DWELL_CANCELLED)
-                    action = "cancelled"
+                    dwell_key = protocol.MODE_CANCELLED
                 elif self._round_failed:
+                    # 这一轮已经以失败告终(错误态在等着用户):
+                    # 别再用"结果"把它盖掉。
                     return
                 else:
                     self._mode = protocol.MODE_RESULT
                     self._message = TEXT_RESULT
                     self._text = getattr(self._core, "last_text", "") or ""
                     self._can_copy = False
-                    self._schedule_dwell(DWELL_RESULT)
-                    action = "result"
+                    dwell_key = protocol.MODE_RESULT
             elif mode == protocol.MODE_STARTING:
+                # 模型就绪:回球形态
                 self._mode = protocol.MODE_ORB
                 self._message = ""
-                action = "idle"
             else:
-                action = None
-
-        capsule = self._capsule
-        if capsule is None:
-            return
-        # 状态先回 idle 再发结果:前端 setState('idle') 会停掉波形,
-        # 之后的 set_result/set_cancelled 才负责文字条定格与收球
-        if action == "cancelled":
-            capsule.set_state("idle")
-            capsule.set_cancelled()
-        elif action == "result":
-            capsule.set_state("idle")
-            capsule.set_result(self._text)
-        elif action == "idle":
-            capsule.set_state("idle")
+                return
+        self._push_mode()
+        # 终态统一查表:停多久、到点回哪,dwell 表说了算。
+        self._schedule_dwell(self._mode, dwell_key)
 
     def _enter_starting(self) -> None:
         with self._lock:
@@ -236,18 +248,10 @@ class VoiceBarPresenter:
             if health is not None and health.ready:
                 self._mode = protocol.MODE_ORB
                 self._message = ""
-                action = "idle"
             else:
                 self._mode = protocol.MODE_STARTING
                 self._message = ""
-                action = "starting"
-        capsule = self._capsule
-        if capsule is None:
-            return
-        if action == "idle":
-            capsule.set_state("idle")
-        else:
-            capsule.set_state("starting")
+        self._push_mode()
 
     def _on_notification(self, note: Notification) -> None:
         kind = note.kind
@@ -264,17 +268,21 @@ class VoiceBarPresenter:
         with self._lock:
             if self._closed:
                 return
-            self._cancel_dwell()
             self._round_failed = True
             self._mode = protocol.MODE_ERROR
             self._message = note.message
             self._text = text
             self._can_copy = bool(text.strip())
             self._reason = str(note.fields.get("reason") or "")
-            message = self._message
-        capsule = self._capsule
-        if capsule is not None:
-            capsule.set_error(message, text)
+            can_copy = self._can_copy
+        self._push_mode()
+        # 带原文的错误态**无自动转移**(表里的值是 None):用户要反复点
+        # 「复制」重试,自动收回会把重试的口子堵上。
+        if can_copy:
+            self._schedule_dwell(protocol.MODE_ERROR,
+                                 protocol.MODE_ERROR_WITH_TEXT)
+        else:
+            self._schedule_dwell(protocol.MODE_ERROR, protocol.MODE_ERROR)
 
     def on_dismissed(self) -> bool:
         """用户主动关掉了错误提示(带原文的错误常驻态)。
@@ -292,29 +300,26 @@ class VoiceBarPresenter:
                 return False
             if self._mode != protocol.MODE_ERROR or not self._can_copy:
                 return False
-            self._cancel_dwell()
             self._mode = protocol.MODE_ORB
             self._message = ""
             self._text = ""
             self._can_copy = False
             self._reason = ""
+        self._push_mode()
         return True
 
     def _enter_rejected(self, note: Notification) -> None:
         with self._lock:
             if self._closed:
                 return
-            self._cancel_dwell()
             self._mode = protocol.MODE_REJECTED
             self._message = note.message
             self._reason = str(note.fields.get("reason") or "")
             self._text = ""
             self._can_copy = False
-            message = self._message
-        capsule = self._capsule
-        if capsule is None:
-            return
-        capsule.set_rejected(message)
+        self._push_mode()
+        # 被拒的状态本身只停 0.6s(hint 气泡的淡出是纯视觉,留前端)
+        self._schedule_dwell(protocol.MODE_REJECTED, protocol.MODE_REJECTED)
 
     def _enter_backend_failed(self, note: Notification) -> None:
         with self._lock:
@@ -324,15 +329,12 @@ class VoiceBarPresenter:
                               protocol.MODE_RECORDING,
                               protocol.MODE_PROCESSING):
                 return
-            self._cancel_dwell()
             self._mode = protocol.MODE_ERROR
             self._message = note.message
             self._text = ""
             self._can_copy = False
-            message = self._message
-        capsule = self._capsule
-        if capsule is not None:
-            capsule.set_error(message, "")
+        self._push_mode()
+        self._schedule_dwell(protocol.MODE_ERROR, protocol.MODE_ERROR)
 
     def _on_levels(self, levels: list[float]) -> None:
         with self._lock:
@@ -372,16 +374,37 @@ class VoiceBarPresenter:
             with self._lock:
                 self._pending_cancel = False
 
-    def _schedule_dwell(self, seconds: float) -> None:
-        self._cancel_dwell()
-        timer = threading.Timer(seconds, self._on_dwell_expired)
-        timer.daemon = True
-        self._dwell_timer = timer
+    def _schedule_dwell(self, mode: str, key: str | None) -> None:
+        """按 dwell 表排一次自动转移。
+
+        ``mode`` 是**排表时**的状态,``key`` 是表里的键:带原文的错误态
+        和普通错误态是同一个 mode,查表用的键不一样,所以分开传。
+
+        排新表会把旧表撤掉(同一状态只该有一张表在飞)。
+        """
+        if not key:
+            return
+        seconds = DWELL_SECONDS.get(key)
+        if seconds is None:
+            # 无自动转移(带原文的错误态):不排。
+            return
+        with self._lock:
+            if self._closed:
+                return
+            if self._mode != mode:
+                return
+            self._cancel_dwell()
+            self._dwell_expect = (mode, key)
+            timer = threading.Timer(seconds, self._on_dwell_expired)
+            timer.daemon = True
+            self._dwell_timer = timer
         timer.start()
 
     def _cancel_dwell(self) -> None:
+        """撤掉排着的 dwell 转移(只在新排一张表时用)。"""
         timer = self._dwell_timer
         self._dwell_timer = None
+        self._dwell_expect = None
         if timer is not None:
             timer.cancel()
 
@@ -389,7 +412,13 @@ class VoiceBarPresenter:
         with self._lock:
             if self._closed:
                 return
+            expect = self._dwell_expect
             self._dwell_timer = None
+            self._dwell_expect = None
+            # 到点先比状态:期间有新事实(状态已经变了)→ 本次转移作废。
+            # 不做"到处显式取消定时器"那套 —— 比一下就够了。
+            if expect is None or self._mode != expect[0]:
+                return
             self._mode = protocol.MODE_ORB
             self._message = ""
             self._text = ""
@@ -397,6 +426,7 @@ class VoiceBarPresenter:
             self._reason = ""
             self._preview_text = ""
             standby = self._standby
+        self._push_mode()
         if standby == protocol.STANDBY_ON_DEMAND:
             capsule = self._capsule
             if capsule is not None:

@@ -9,14 +9,20 @@
 
 Python 与前端之间的桥接契约:
 
-  Python → JS   window.__capsule.setState / setLevels / setElapsed
-                / setPreview / setResult / setError / setCancelled
-                / resetForRecording / setTheme / setPreviewEnabled
-                / setOrbMode / setOrbPosition / setOrbHint / setHideDelay
+  Python → JS   window.__capsule.setMode / setLevels / setElapsed
+                / setPreview / setTheme / setPreviewEnabled
+                / setOrbMode / setOrbPosition / setOrbHint
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
                 / update_regions / move_capsule / move_orb / begin_drag
                 / end_drag / copy_result / start_recording / open_panel
                 / quit_app / launch_qr_scanner / selecting_text / focus_textbar
+                / dismiss
+
+  **setMode 是显示状态的唯一入口**:Python(presenter)推
+  ``setMode(mode, payload)``,前端只演、不决策 —— 停多久、到点回哪
+  全归 presenter 的 dwell 表(见 apps/voicebar/protocol.py)。
+  setOrbHint 是**纯视觉**的一键提示气泡(球上方冒一句),不是状态机
+  命令。
 
 业务动作(开始/停止/取消录音、复制、菜单出口)由 presenter 通过
 回调注入(set_*_handler),窗口层只管窗口,不认识引擎和注入器。
@@ -101,13 +107,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 WIN_W = 512
 WIN_H = 260
 
-# 各种结局之后,胶囊停留多久再隐藏(秒)
-HIDE_DELAY_OK = 1.5       # 识别成功并已注入
-HIDE_DELAY_ERROR = 4.5    # 出错:错误文案要让人看清
-HIDE_DELAY_CANCEL = 1.0   # 取消
-# ⚠ 这里**没有**"错误带原文"的自动收回时长了 —— 带原文的错误态
-# (注入失败)改成**常驻**:用户可能要反复点「复制」重试,自动收回
-# 会把重试的口子堵上。只有点 ✕ 或开始下一轮录音才收(见 set_error)。
+# 各种结局之后胶囊停留多久,**不在这一层**:那是显示状态机的事,
+# 由 presenter 的 dwell 表统一管(见 apps/voicebar/protocol.py)。
+# 窗口层只管显隐,不管"什么时候收回"。
 
 # 写完剪贴板后等一下再读回校验。剪贴板是异步通知的,立刻读有时会
 # 读到旧内容。
@@ -313,7 +315,10 @@ class VoiceCapsule:
         self._config = config
         self._focus_restore = focus_restore
 
-        self._state = "idle"
+        # 当前显示状态(presenter 推过来的 mode)+ 它的 payload:
+        # 前端就绪后要补推一次(见 _on_frontend_ready)
+        self._state = "orb"
+        self._last_payload: dict[str, Any] = {}
         self._gui_ready = threading.Event()
         self._destroyed = False
         self._last_preview = ""
@@ -332,11 +337,9 @@ class VoiceCapsule:
         self._quit_handler: Callable[[], None] | None = None
         self._qr_launcher: Callable[[], None] | None = None
 
-        # 隐藏定时器:新一轮录音开始时要作废旧的
-        self._hide_timer: threading.Timer | None = None
-        self._hide_lock = threading.Lock()
         # "稍后让球露脸"的定时器
         self._orb_timer: threading.Timer | None = None
+        self._orb_lock = threading.Lock()
         # 前端报过命中区没有(SetWindowRgn 裁好窗口形状了)。
         self._orb_regions_ready = False
         # 已经上传过的透明 surface 的窗口尺寸。
@@ -382,10 +385,28 @@ class VoiceCapsule:
 
     # ---------- 业务动作(presenter 调用) ----------
 
-    def set_state(self, state: str) -> None:
-        """推控制器状态(starting / idle / recording / processing)。"""
-        self._state = state
-        self._call_js("setState", state)
+    def set_mode(self, mode: str, payload: dict | None = None) -> None:
+        """推显示状态 —— Python → JS 的**唯一**显示状态入口。
+
+        ``payload`` 序列化过去(和 ``push_levels`` 的电平数组同一个
+        套路:json.dumps 过去,前端自己 JSON.parse)。
+        """
+        data = payload if isinstance(payload, dict) else {}
+        if mode == "orb":
+            # 回到 orb = 这一轮结束了:窗口不再"因为这一轮"留着。
+            # 非常驻模式整个藏掉;常驻模式留着球(前端把胶囊收回球形态)。
+            self._hide()
+        elif mode == "recording":
+            # 新一轮录音:先记下这一轮的注入落点,再亮窗口(不抢焦点)。
+            self._snapshot_target_hwnd()
+            self._show()
+            # 主题/预览开关再推一遍:改完马上按热键时,推送可能还堵在
+            # 路上。这些调用幂等,多推无害。
+            self._call_js("setTheme", self._theme_mode())
+            self._call_js("setPreviewEnabled", self._preview_enabled())
+        self._state = mode
+        self._last_payload = dict(data)
+        self._call_js("setMode", mode, json.dumps(data, ensure_ascii=False))
 
     def set_theme(self, mode: str) -> None:
         self._call_js("setTheme", mode)
@@ -399,62 +420,6 @@ class VoiceCapsule:
         if not self._preview_enabled():
             return
         self._call_js("setPreview", text)
-
-    def begin_recording(self) -> None:
-        """新一轮录音开始:清场、亮窗口(不抢焦点)。"""
-        self._state = "recording"
-        self._snapshot_target_hwnd()
-        self._cancel_hide_timer()
-        # 显示之前把主题/预览开关再推一遍:改完马上按热键的话,
-        # 推送可能还堵在路上。这些调用幂等,多推无害。
-        self._call_js("setState", "recording")
-        self._call_js("setTheme", self._theme_mode())
-        self._call_js("setPreviewEnabled", self._preview_enabled())
-        self._call_js("resetForRecording")
-        self._show()
-
-    def set_result(self, text: str) -> None:
-        """识别完成且已注入:文字条定格最终结果。"""
-        self._push_hide_delay(HIDE_DELAY_OK)
-        self._call_js("setResult", text)
-        self._schedule_hide(HIDE_DELAY_OK)
-
-    def set_error(self, message: str, payload: str = "") -> None:
-        """错误**可能带着识别原文**(注入失败时):一起发给前端。
-
-        带原文的错误态**常驻**:不排任何自动收回的定时器 ——
-        用户可能要反复点「复制」重试(剪贴板被占、目标窗口不给焦点),
-        自动收回会把重试的口子堵上。只有用户点 ✕(dismiss)或开始
-        下一轮录音才收。
-
-        不带原文的错误(没听清 / 识别失败)照旧 4.5 秒自动收:那种
-        错误没有可重试的动作,杵着只是挡屏幕。
-        """
-        payload = payload or ""
-        if payload:
-            # 常驻错误态:既不推 hide delay(前端定时器)也不排 Python 侧的
-            # 隐藏定时器 —— 两条自动收回的路都断掉。
-            #
-            # ⚠ 但**要把上一轮遗留的隐藏定时器作废**:注入失败是
-            # "先 set_result 再 set_error"(状态先回 idle,失败通知后到),
-            # set_result 排过一个 1.5 秒的隐藏定时器。不作废的话,那个
-            # 定时器会在错误提示刚弹出就把窗口藏了。
-            self._cancel_hide_timer()
-            self._call_js("setError", message, payload)
-            return
-        delay = HIDE_DELAY_ERROR
-        self._push_hide_delay(delay)
-        self._call_js("setError", message, payload)
-        self._schedule_hide(delay)
-
-    def set_cancelled(self) -> None:
-        self._push_hide_delay(HIDE_DELAY_CANCEL)
-        self._call_js("setCancelled")
-        self._schedule_hide(HIDE_DELAY_CANCEL)
-
-    def set_rejected(self, message: str) -> None:
-        """这轮录音被拒(还没就绪之类):球上方冒一句提示。"""
-        self._call_js("setOrbHint", message)
 
     def push_levels(self, levels: list[float], elapsed: float) -> None:
         """30fps 电平 + 计时。
@@ -480,7 +445,6 @@ class VoiceCapsule:
         if self._destroyed:
             return
         self._destroyed = True
-        self._cancel_hide_timer()
         self._cancel_orb_timer()
         self._push_queue.put(None)
         try:
@@ -597,7 +561,9 @@ class VoiceCapsule:
     def _on_frontend_ready(self) -> None:
         """前端就绪:放行推送,补推一次当前状态,并把窗口摆好。"""
         self._gui_ready.set()
-        self._call_js("setState", self._state)
+        # 补推当前显示状态:前端就绪之前推的都被丢掉了(见 _call_js)
+        self._call_js("setMode", self._state,
+                      json.dumps(self._last_payload, ensure_ascii=False))
         self._call_js("setTheme", self._theme_mode())
         self._call_js("setPreviewEnabled", self._preview_enabled())
         # 前端得知道现在是"球形态"还是"胶囊形态"
@@ -809,21 +775,6 @@ class VoiceCapsule:
         except Exception as e:
             log.debug("隐藏窗口失败: %s", e)
 
-    def _schedule_hide(self, delay: float) -> None:
-        """延时隐藏(非常驻模式才真的藏窗口;常驻模式靠前端收球)。"""
-        self._cancel_hide_timer()
-        timer = threading.Timer(delay, self._hide)
-        timer.daemon = True
-        self._hide_timer = timer
-        timer.start()
-
-    def _cancel_hide_timer(self) -> None:
-        """作废隐藏定时器 —— 新一轮录音开始时必须调。"""
-        with self._hide_lock:
-            timer, self._hide_timer = self._hide_timer, None
-        if timer is not None:
-            timer.cancel()
-
     # ---------- 手动复制(注入失败时的兜底出口) ----------
 
     def _copy_result(self, text: str) -> bool:
@@ -853,7 +804,6 @@ class VoiceCapsule:
             return False
 
         log.info("手动复制成功,收胶囊")
-        self._cancel_hide_timer()
         self._hide()
         return True
 
@@ -878,7 +828,6 @@ class VoiceCapsule:
             return False
         if not handled:
             return False
-        self._cancel_hide_timer()
         # 非常驻:_hide() 藏掉窗口;常驻:只清掉"这一轮的胶囊还该
         # 显示"的标记(球还在),胶囊由前端收回成球。
         self._hide()
@@ -1039,7 +988,7 @@ class VoiceCapsule:
         已经排上队就别再排:每次都"取消旧的、排个新的"的话,
         这个 0.3s 的定时器永远等不到。
         """
-        with self._hide_lock:
+        with self._orb_lock:
             if getattr(self, "_orb_timer", None) is not None:
                 return
             timer = threading.Timer(ORB_SHOW_DELAY, self._show_orb)
@@ -1049,7 +998,7 @@ class VoiceCapsule:
 
     def _cancel_orb_timer(self) -> None:
         """作废"稍后露脸"的定时器。"""
-        with self._hide_lock:
+        with self._orb_lock:
             timer, self._orb_timer = getattr(self, "_orb_timer", None), None
         if timer is not None:
             timer.cancel()
@@ -1079,7 +1028,6 @@ class VoiceCapsule:
         if self._want_visible:
             # 正在录音:这一轮的胶囊还得留着
             return
-        self._cancel_hide_timer()
         hwnd = self._native_handle()
         if not hwnd:
             return
@@ -1295,13 +1243,3 @@ class VoiceCapsule:
             return int(native.Handle.ToInt64())
         except Exception:
             return 0
-
-    def _push_hide_delay(self, seconds: float) -> None:
-        """告诉前端"这一轮结束后停多久再收起"(毫秒)。
-
-        常驻球模式下胶囊是**前端自己**收回球的(动效在前端做),
-        Python 不能等隐藏定时器响了再回头调一次前端。
-        """
-        if not self._orb_enabled():
-            return
-        self._call_js("setHideDelay", int(round(seconds * 1000)))

@@ -18,14 +18,18 @@
  *     不用 unicode 字符凑合。
  *
  * 桥接契约（唯一权威来源 ../BRIDGE.md），方法名必须逐字一致，不得增删改名：
- *   Python → JS : window.__capsule.setState / setLevels / setElapsed
- *                 / setPreview / setResult / setError / setCancelled
- *                 / resetForRecording / setTheme
- *                 / setPreviewEnabled
- *                 / setOrbMode / setOrbPosition / setHideDelay
+ *   Python → JS : window.__capsule.setMode / setLevels / setElapsed
+ *                 / setPreview / setTheme / setPreviewEnabled
+ *                 / setOrbMode / setOrbPosition / setOrbHint
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
  *                 / update_regions / move_capsule / begin_drag / end_drag
  *                 / copy_result / start_recording / move_orb / dismiss
+ *
+ * ⚠ 显示状态的**唯一入口**是 setMode(mode, payload):Python(presenter)
+ * 推 mode,前端只演、不决策 —— 展开/收回/淡入的速度与曲线都是前端
+ * 的事,「什么时候发生」(停多久、到点回哪)归 presenter 的 dwell 表
+ * (见 apps/voicebar/protocol.py)。**前端不再有任何收回定时器。**
+ * setOrbHint 是纯视觉的提示气泡(球上方冒一句),不是状态机命令。
  *
  * ⚠ 胶囊的**位置档位**（follow / bottom / custom）已随重构退役：
  * Python 侧不再推 setPositionMode，前端只留一个空转的兼容入口。球和
@@ -113,7 +117,7 @@
   /* ==================== 运行状态 ==================== */
 
   var ui = {
-    state: 'idle',      // 控制器状态机
+    mode: 'orb',            // 显示状态(Python 推的;唯一真相在 presenter)
     phase: 'recording', // 胶囊自己的阶段
     level: 0,           // 当前（平滑后）的响度 0..1
     elapsed: 0,         // 录音计时（秒）
@@ -125,8 +129,7 @@
     orbMode: false,         // 常驻悬浮球模式(球形态 ↔ 胶囊形态)
     expanded: false,        // 球有没有展开成胶囊
     orbPosition: 'follow',  // 球的位置档位(follow / pinned / custom)
-    orbDraggable: false,    // 只有 follow 不能拖(pinned/custom 的位置归用户管)
-    hideDelay: 1500         // 一轮结束后停多久再收回球(毫秒,Python 推的)
+    orbDraggable: false     // 只有 follow 不能拖(pinned/custom 的位置归用户管)
   };
 
   var el = {};              // DOM 缓存
@@ -519,7 +522,7 @@
    * 在 WebView2 的透明窗口上容易糊成一片。所以等形变落定
    * (80% + 余量)再启动条子。
    *
-   * 注意:**条子本身早就生成好了**(resetForRecording 里先生成),
+   * 注意:**条子本身早就生成好了**(applyMode('recording') 里先生成),
    * 占好了宽度 —— 胶囊的宽度一次到位,不会在动画启动前后再跳一截。
    * 这里延后的只是"条子开始动"这件事。 */
   var WAVEFORM_START_DELAY_MS = 620;
@@ -565,40 +568,21 @@
     }
     if (!ui.orbMode) {
       // 关掉常驻模式:回到"按热键才弹胶囊"的老样子
-      cancelCollapse();
       setExpanded(false);
       return;
     }
     // 开着:球在,胶囊收着(正在录音就展开)
-    setExpanded(ui.state === 'recording');
+    setExpanded(ui.mode === 'recording');
     // 命中区立刻重报一次(球的形状和胶囊完全不同,不能等节流)
     reportRegions();
   }
 
-  // 一轮结束后停一会儿再收回球。停多久由 Python 推过来
-  // (setHideDelay):错误带着原文时要停 12 秒,让用户有时间点「复制」。
-  var collapseTimer = 0;
+  /* 收回球**不再由前端定时器管**。
 
-  function cancelCollapse() {
-    if (collapseTimer) {
-      window.clearTimeout(collapseTimer);
-      collapseTimer = 0;
-    }
-  }
-
-  function scheduleCollapse() {
-    if (!ui.orbMode) {
-      return;
-    }
-    cancelCollapse();
-    collapseTimer = window.setTimeout(function () {
-      collapseTimer = 0;
-      // 录音中不许收:新一轮刚开始就被上一轮的定时器收掉,胶囊就没了
-      if (ui.orbMode && ui.state !== 'recording') {
-        setExpanded(false);
-      }
-    }, ui.hideDelay);
-  }
+   * 以前这里是"一轮结束后停一会儿再收回球",停多久由 Python 推过来。
+   * 现在"什么时候收回"归 presenter 的 dwell 表 ——
+   * 到点了 Python 会再推一次 mode 过来,前端照着演。
+   * 前端只留"怎么收"(动画、类名)。 */
 
   function onOrbMouseDown(e) {
     if (!ui.orbMode || e.button !== 0) {
@@ -819,6 +803,165 @@
     reportSelectingText(!!text.trim());
   }
 
+  /* ==================== 显示状态机 ==================== */
+
+  /* 显示状态的**唯一入口**:Python(presenter)推 setMode(mode, payload),
+   * 前端只负责"怎么呈现" —— 动画、类名、文案都是前端的事。
+   *
+   * "什么时候发生"(停多久、到点回哪个状态)归 presenter 的 dwell 表
+   * (见 apps/voicebar/protocol.py):**前端一个收回定时器都不留**。
+   * 要收回,Python 会再推一次 mode 过来。
+   *
+   * payload 字段(说明见 apps/voicebar/protocol.py):
+   *   message  提示文案(错误原因 / 识别中 / 已输入 / 已取消 / 被拒原因)
+   *   text     识别正文(结果态是识别结果;带原文的错误态是可复制的原文)
+   *   can_copy 有没有可复制的原文(带原文的错误态 = 注入失败,可反复重试)
+   *   reason   机器可读的原因码(暂不参与渲染)
+   */
+
+  // payload 走的是 JSON 字符串(和 push_levels 的电平数组一个套路):
+  // Python 侧 json.dumps 过来,前端自己解析。
+  function parsePayload(payload) {
+    var data = payload;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (e) {
+        data = {};
+      }
+    }
+    if (!data || typeof data !== 'object') {
+      data = {};
+    }
+    return data;
+  }
+
+  // 清掉上一轮错误态留下的东西(原文、复制按钮、✕ 的语义)。
+  // 回到待机、或开新一轮时都要清干净。
+  function resetErrorFlags() {
+    ui.errorPayload = '';
+    ui.copying = false;
+    ui.errorDismissable = false;
+    if (el.cancelBtn) {
+      el.cancelBtn.setAttribute('aria-label', '取消录音');
+    }
+    if (el.pill) {
+      el.pill.classList.remove('can-copy');
+    }
+  }
+
+  function applyMode(mode, payload) {
+    var data = parsePayload(payload);
+    var message = data.message == null ? '' : String(data.message);
+    var text = data.text == null ? '' : String(data.text);
+    var canCopy = !!data.can_copy;
+
+    ui.mode = mode;
+    // 模型加载态(球上转圈):只在 starting 挂,离开即摘
+    if (document.body) {
+      document.body.classList.toggle('orb-loading', mode === 'starting');
+    }
+
+    if (mode === 'orb') {
+      // 回到待机:波形停、收回球形态、上一轮的错误残留清干净
+      stopBars();
+      barsRunning = false;
+      resetErrorFlags();
+      setExpanded(false);
+      return;
+    }
+
+    if (mode === 'starting') {
+      // 球在转圈(等模型就绪):胶囊形态不动
+      return;
+    }
+
+    if (mode === 'recording') {
+      // 新一轮录音:清场 —— 上一轮的文案、配色、波形、错误残留全清
+      closeOrbMenu(true);
+      hideOrbHint();
+      writeText('', 'normal');
+      resetLevelBars();
+      barsRunning = true;
+      setElapsed(0);
+      resetErrorFlags();
+      setPhase('recording');
+      if (ui.orbMode) {
+        // 常驻球:球原地展开成胶囊
+        setExpanded(true);
+      }
+      return;
+    }
+
+    if (mode === 'processing') {
+      setPhase('processing');
+      return;
+    }
+
+    if (mode === 'result_terminal') {
+      // 最终结果:文字条定格(预览关着时只剩胶囊里的「已输入」)
+      if (ui.previewEnabled) {
+        writeText(text, 'normal');
+      }
+      setPhase('done');
+      return;
+    }
+
+    if (mode === 'error_terminal') {
+      // 错误**可能带着识别原文**(注入失败时):带原文是**警告**态
+      // (识别是成功的,内容也拿到了,只是没送进目标窗口),没有原文
+      // 才是真的失败(错误色)。
+      ui.errorPayload = canCopy ? text : '';
+      ui.copying = false;
+      // 带原文的错误态**常驻**:用户可能要反复点「复制」重试
+      // (剪贴板被占、目标窗口不给焦点)。收不收由 Python 说了算
+      // (它不排 dwell),前端不排任何定时器。
+      ui.errorDismissable = canCopy;
+      if (el.cancelBtn) {
+        // 这个 ✕ 在带原文的错误态里是"关掉提示",不是"取消录音"
+        // (那一轮早就结束了,没什么可取消的)—— 语义要说清楚。
+        el.cancelBtn.setAttribute('aria-label',
+          canCopy ? '关闭提示' : '取消录音');
+      }
+      if (el.pill) {
+        el.pill.classList.toggle('can-copy', canCopy);
+      }
+      if (canCopy) {
+        if (ui.previewEnabled) {
+          writeText(text, 'warning', message);
+          setPhase('warning');
+        } else {
+          // 预览关着:文字条整块不显示,报告只能进胶囊的 label 位
+          // (一行截断即可)。
+          setPhase('warning', message);
+        }
+      } else {
+        if (ui.previewEnabled) {
+          writeText(message, 'error');
+          setPhase('error');
+        } else {
+          setPhase('error', message);
+        }
+      }
+      return;
+    }
+
+    if (mode === 'cancelled_terminal') {
+      if (ui.previewEnabled) {
+        writeText(message || '已取消', 'cancelled');
+      }
+      setPhase('cancelled');
+      return;
+    }
+
+    if (mode === 'rejected_bounce') {
+      // 这轮被拒:球上方冒一句提示。气泡的淡出是**纯视觉**,留前端
+      // 自己演;状态本身 0.6s 后回 orb 是 Python 的事。
+      showOrbHint(message);
+      return;
+    }
+  }
+
   /* ==================== 胶囊阶段 ==================== */
 
   // 切换胶囊阶段。phase 以 class 的形式挂在胶囊上(和 OpenType 一致),
@@ -929,7 +1072,6 @@
         }
         if (ui.orbMode) {
           // 常驻球:拿到了就立刻收成球,不用等那一轮的超时
-          cancelCollapse();
           setExpanded(false);
         }
       } else {
@@ -966,7 +1108,6 @@
         el.cancelBtn.setAttribute('aria-label', '取消录音');
       }
       // 常驻球:收回球形态(非常驻模式的窗口由 Python 侧藏掉)
-      cancelCollapse();
       setExpanded(false);
     });
   }
@@ -1372,30 +1513,10 @@
 
   // Python → JS：严格按 BRIDGE.md 的签名
   window.__capsule = {
-    setState: function (state) {
-      ui.state = state;
-      // 模型加载态(球上转圈):starting → body.orb-loading,离开即摘
-      if (document.body) {
-        document.body.classList.toggle('orb-loading', state === 'starting');
-      }
-      if (state === 'recording') {
-        // 录音开始:菜单和提示都收掉(上一轮的浮层不该带进新一轮)
-        closeOrbMenu(true);
-        hideOrbHint();
-        setPhase('recording');
-        cancelCollapse();
-        if (ui.orbMode) {
-          // 常驻球:球原地展开成胶囊
-          setExpanded(true);
-        }
-      } else if (state === 'processing') {
-        setPhase('processing');
-      } else {
-        // 待机 / 出错:胶囊这会儿是隐藏的,波形不必再跑
-        // (阶段不变 —— 阶段决定的是"胶囊长什么样",不是"跑不跑")
-        stopBars();
-        barsRunning = false;
-      }
+    setMode: function (mode, payload) {
+      // 显示状态的唯一入口:所有 DOM/类名/动画都收敛到 applyMode 里。
+      // 前端不决定"什么时候到哪个状态" —— 那是 presenter 的事。
+      applyMode(mode, payload);
     },
     setLevels: function (payload) {
       setLevels(payload);
@@ -1408,7 +1529,7 @@
       // 终态(done/error/warning/cancelled)后,控制器还会紧跟一对
       // preview("") 用来清预览 —— 那一下会把刚定格的结果/警告色
       // 文案抹回占位符(后端同批先发 result 再发 preview)。
-      // 终态的清场只认 resetForRecording(新一轮录音)。
+      // 终态的清场只认 applyMode('recording')(新一轮录音)。
       if (ui.phase === 'done' || ui.phase === 'error'
           || ui.phase === 'warning' || ui.phase === 'cancelled') {
         return;
@@ -1418,92 +1539,6 @@
         return;
       }
       writeText(text == null ? '' : String(text), 'normal');
-    },
-    setResult: function (text) {
-      // 最终结果：文字条定格(预览关着时只剩胶囊里的「已输入」)
-      if (ui.previewEnabled) {
-        writeText(text == null ? '' : String(text), 'normal');
-      }
-      setPhase('done');
-      scheduleCollapse();
-    },
-    setError: function (message, payload) {
-      var msg = message == null ? '' : String(message);
-      var raw = payload == null ? '' : String(payload);
-      ui.errorPayload = raw;
-      ui.copying = false;
-      // 带原文 = 注入失败那一类:识别是**成功**的,内容也拿到了
-      // (字在剪贴板里),只是没送进目标窗口。这不是"彻底失败",
-      // 是**警告** —— 文字条用琥珀色,报告排在正文上方,中间有分隔,
-      // 胶囊里只留一句短提示(长文案会把胶囊撑宽,看着奇怪)。
-      // 没有原文的错误(没听清 / 识别失败)才是真的失败 —— 错误色。
-      var canCopy = !!raw.trim();
-      // 带原文的错误态**常驻**:用户可能要反复点「复制」重试(剪贴板
-      // 被占、目标窗口不给焦点)。自动收回会把重试的口子堵上 ——
-      // 只有点 ✕(dismiss)或开始下一轮录音才收(Python 侧同步)。
-      ui.errorDismissable = canCopy;
-      if (el.cancelBtn) {
-        // 这个 ✕ 在带原文的错误态里是"关掉提示",不是"取消录音"
-        // (那一轮早就结束了,没什么可取消的)—— 语义要说清楚。
-        el.cancelBtn.setAttribute('aria-label',
-          canCopy ? '关闭提示' : '取消录音');
-      }
-      if (el.pill) {
-        el.pill.classList.toggle('can-copy', canCopy);
-      }
-      if (canCopy) {
-        if (ui.previewEnabled) {
-          writeText(raw, 'warning', msg);
-          setPhase('warning');
-        } else {
-          // 预览关着:文字条整块不显示,报告只能进胶囊的 label 位
-          // (一行截断即可)。
-          setPhase('warning', msg);
-        }
-        // 常驻:**不排**自动收回的定时器。反倒要把可能还挂着的
-        // 旧定时器撤掉 —— 上一轮的收起定时器不该把这一轮收走。
-        cancelCollapse();
-      } else {
-        if (ui.previewEnabled) {
-          writeText(msg, 'error');
-          setPhase('error');
-        } else {
-          setPhase('error', msg);
-        }
-        scheduleCollapse();
-      }
-    },
-    setCancelled: function () {
-      if (ui.previewEnabled) {
-        writeText('已取消', 'cancelled');
-      }
-      setPhase('cancelled');
-      scheduleCollapse();
-    },
-    resetForRecording: function () {
-      // 新一轮录音:清掉上一轮的文案与配色
-      writeText('', 'normal');
-      // 滚动条也从头再来 —— 上一轮残留的高度不该带过来
-      resetLevelBars();
-      barsRunning = true;
-      setElapsed(0);
-      // 上一轮错误态留下的原文与「复制」按钮也要清干净
-      ui.errorPayload = '';
-      ui.copying = false;
-      // 错误常驻态的标记也要清 —— 下一轮 ✕ 又是"取消录音"
-      ui.errorDismissable = false;
-      if (el.cancelBtn) {
-        el.cancelBtn.setAttribute('aria-label', '取消录音');
-      }
-      if (el.pill) {
-        el.pill.classList.remove('can-copy');
-      }
-      setPhase('recording');
-      cancelCollapse();
-      if (ui.orbMode) {
-        // 常驻球:新一轮开始 → 球展开成胶囊
-        setExpanded(true);
-      }
     },
     setTheme: function (mode) {
       // 主题档位:面板改的。Python 侧会在每次录音开始前再补推一次,
@@ -1531,12 +1566,8 @@
     },
     setOrbHint: function (text) {
       // 球的一句操作反馈(点球时模型还在加载等):球上方冒出、几秒后淡掉。
+      // 纯视觉入口,不是显示状态机命令 —— 状态机走 setMode。
       showOrbHint(text);
-    },
-    setHideDelay: function (ms) {
-      // 一轮结束后停多久再收回球(毫秒)。
-      var v = Number(ms);
-      ui.hideDelay = (isFinite(v) && v >= 0) ? v : 1500;
     }
   };
 

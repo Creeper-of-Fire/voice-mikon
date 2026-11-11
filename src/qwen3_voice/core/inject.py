@@ -173,6 +173,13 @@ def paste_text(text: str, hwnd: int = 0, restore: bool = True,
                     name="clipboard-restore", daemon=True,
                 ).start()
             return InjectResult(True, "", True)
+        if reason == REASON_MODIFIER_TIMEOUT:
+            # 等键超时不重试:修饰键不会因为重试而松开,再等 2.5s×N
+            # 只是拖时间。文字已在剪贴板里(写板在等键之前),直接
+            # 如实上报 —— 用户松手后 Ctrl+V 就能拿到。
+            log.warning("修饰键 %.1fs 未松开,放弃自动粘贴(文本已在剪贴板)",
+                        MOD_WAIT_TIMEOUT)
+            return InjectResult(False, reason, _text_in_clipboard(text))
         if attempt < INJECT_ATTEMPTS:
             log.info("注入未送达(第 %d/%d 次尝试),%.0fms 后重试",
                      attempt, INJECT_ATTEMPTS, INJECT_RETRY_DELAY * 1000)
@@ -244,21 +251,14 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
     剪贴板写入失败(含**读回校验**不过)都发生在 ``send_ctrl_v`` **之前**,
     此时粘贴还没触发,重试是安全的 —— 不会贴出重复文字。
     """
-    # ---- 等修饰键松开(不再"发现按着就立刻失败") ----
-    # 用户结束录音的方式就是再按一次热键(Ctrl+Alt+Space),识别完成时
-    # 手指常还留在键上 —— 这不是故障,是必然的时间差。以前把它当
-    # "失败"烧掉三次重试(共 ~0.5s),再报一句"复制到剪贴板失败"
-    # (其实根本没碰剪贴板,纯误导)。现在改成就地等:
-    #   - 全松 → 正常合成 Ctrl+V
-    #   - 稳定只剩 Ctrl(用户有意按住) → **顺势只补一个 V**
-    #     (用户的物理 Ctrl + 我们的 V = 粘贴,连 Ctrl 都不用合成)
-    #   - Alt/Shift/Win 按着 → 发什么都不再是普通粘贴,继续等
-    #   - 等满 MOD_WAIT_TIMEOUT 还按着 → 如实报 modifier_timeout
-    mod = _wait_modifiers(attempt)
-    if mod == "timeout":
-        return False, 0, REASON_MODIFIER_TIMEOUT
-    ctrl_held_by_user = (mod == "ctrl")
-
+    # ---- 先把文字写进剪贴板(保住文字优先于贴出去) ----
+    # 无论按键状态如何,识别出的话必须先存在于剪贴板 —— "没送达就不
+    # 还"的铁律:哪怕后面等键超时,文字已经在板上,用户松手后 Ctrl+V
+    # 就能拿到。反过来(先等键再写板)超时路径文字哪儿都不在,文案
+    # 却说"可直接 Ctrl+V" —— 又是谎报。
+    # 代价是占板窗口变长(写入到粘贴之间隔着等键,最多 MOD_WAIT_TIMEOUT):
+    # 用户在这期间复制新内容 → 序号变了 → _restore 的归属守卫会让位,
+    # 不会覆盖他的新内容,保护逻辑完备。
     write = clipboard.set_text_verified(text)
     if not write.ok:
         # 写不进去就别往下走:剪贴板里没有文字,Ctrl+V 贴出来的会是
@@ -269,6 +269,21 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
     # 写入自带的读回校验用的是 GetClipboardData,**不递增变更序号** ——
     # 这里取到的序号仍然是"我们这份"的序号,归属判定不受影响。
     published_seq = clipboard.get_sequence_number()
+
+    # ---- 等修饰键松开(决定"怎么贴",不影响"文字已在板上") ----
+    # 用户结束录音的方式就是再按一次热键(Ctrl+Alt+Space),识别完成时
+    # 手指常还留在键上 —— 这不是故障,是必然的时间差:
+    #   - 全松 → 正常合成 Ctrl+V
+    #   - 稳定只剩 Ctrl(用户有意按住) → **顺势只补一个 V**
+    #     (用户的物理 Ctrl + 我们的 V = 粘贴,连 Ctrl 都不用合成)
+    #   - Alt/Shift/Win 按着 → 发什么都不再是普通粘贴,继续等
+    #   - 等满 MOD_WAIT_TIMEOUT → 放弃"贴",但文字已在剪贴板里
+    mod = _wait_modifiers(attempt)
+    if mod == "timeout":
+        # 注意带上 published_seq:text_in_clipboard 判定据此走
+        # "已复制到剪贴板但没自动粘贴"文案(这句现在是真的)。
+        return False, published_seq, REASON_MODIFIER_TIMEOUT
+    ctrl_held_by_user = (mod == "ctrl")
 
     # 转写这 1 秒里用户可能切了窗口,把焦点还回去再贴
     if hwnd and get_foreground_window() != hwnd:

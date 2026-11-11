@@ -1,9 +1,8 @@
 """配置管理。
 
 配置来源优先级(后者覆盖前者):
-    1. 内置默认值 DEFAULT_CONFIG
+    1. 内置默认值(Config dataclass 的字段初始值)
     2. 项目内的 data/config.json(portable,见仓库根目录 AGENTS.md)
-    3. 仓库里的 config.example.json(模板)
 
 关于历史状态迁移:代码里**不写**旧位置适配逻辑。
 从旧位置(比如 %APPDATA%)搬数据是一次性人工操作 ——
@@ -18,12 +17,9 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any
 
-from .paths import PROJECT_DIR, config_path, ensure_dirs, hotwords_path, log_path
+from .paths import config_path, ensure_dirs, hotwords_path, log_path
 
 log = logging.getLogger("qwen3_voice.config")
-
-# 仓库内的示例配置(首次运行时复制到 data/)
-EXAMPLE_CONFIG = PROJECT_DIR / "config.example.json"
 
 # 主题档位:
 #   auto  跟随系统(Windows 的"应用模式",WebView2 直接跟着走)
@@ -120,7 +116,10 @@ class Config:
     # ---- 热键与模型
     hotkey: str = "ctrl+alt+space"
     model: str = "0.6B"                       # 可选 0.6B / 1.7B
-    model_root: str = r"D:\Dev\Environments\models"
+    # 本地 Qwen3-ASR 权重所在的根目录(其下应有 Qwen3-ASR-0.6B/ 等子目录)。
+    # 默认空 = 不指给任何人本机路径:本地后端必须显式配置;为空时引擎
+    # 找不到本地权重,会回退去 HuggingFace 拉取(离线/弱网必失败)。
+    model_root: str = ""
 
     # ---- 识别后端(本地 / 网络,互斥)
     # local    = 本地 Qwen3-ASR 模型常驻显存,离线、零等待
@@ -339,7 +338,7 @@ def load_hotwords_file(path: Path | None = None) -> list[str]:
 def load_config(path: Path | None = None) -> Config:
     """加载配置。
 
-    优先级:显式参数 > 环境变量 > data/config.json > config.example.json > 默认值
+    优先级:显式参数 > 环境变量 > data/config.json > 默认值
 
     术语表文件 ``data/hotwords.txt`` 不在这里读 —— 由
     ``engines/engine.py`` 在每次识别时实时读取(改完立即生效)。
@@ -350,7 +349,6 @@ def load_config(path: Path | None = None) -> Config:
     if path is not None:
         candidates.append(path)
     candidates.append(config_path())
-    candidates.append(EXAMPLE_CONFIG)
 
     for cand in candidates:
         if cand.is_file():

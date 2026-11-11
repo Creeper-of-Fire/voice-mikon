@@ -25,7 +25,7 @@
  *                 / setOrbMode / setOrbPosition / setHideDelay
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
  *                 / update_regions / move_capsule / begin_drag / end_drag
- *                 / copy_result / start_recording / move_orb
+ *                 / copy_result / start_recording / move_orb / dismiss
  *
  * ⚠ 胶囊的**位置档位**（follow / bottom / custom）已随重构退役：
  * Python 侧不再推 setPositionMode，前端只留一个空转的兼容入口。球和
@@ -120,6 +120,7 @@
     theme: 'auto',      // 主题档位
     previewEnabled: true,   // 实时预览文字条是否显示
     errorPayload: '',       // 错误态里可复制的原文(注入失败时带着识别文本)
+    errorDismissable: false,// 带原文的错误态:✕ 按钮 = 关掉提示(而不是取消录音)
     copying: false,         // 复制进行中(防连点)
     orbMode: false,         // 常驻悬浮球模式(球形态 ↔ 胶囊形态)
     expanded: false,        // 球有没有展开成胶囊
@@ -922,6 +923,7 @@
       if (ok) {
         // Python 侧已经把胶囊收掉了,这里把状态清干净
         ui.errorPayload = '';
+        ui.errorDismissable = false;
         if (el.pill) {
           el.pill.classList.remove('can-copy');
         }
@@ -933,6 +935,39 @@
       } else {
         setCopyNote('复制失败,再试一次');
       }
+    });
+  }
+
+  /* 用户点 ✕ 关掉带原文的错误提示(注入失败那种)。 */
+
+  // 带原文的错误态是**常驻**的:用户可以反复点「复制」重试,自动收回
+  // 会把重试的口子堵上。只有点 ✕(或开始下一轮录音)才收。
+  //
+  // 为什么不在前端自己收回:现在是不是"错误常驻态"只有 Python 侧
+  // 知道(presenter 手里才有这一轮的状态),前端自己收可能收错 ——
+  // 所以前端只负责**演**,收不收由 Python 说了算(dismiss 返回
+  // true 才收)。其它状态点 ✕ 时 dismiss 静默忽略(幂等)。
+  function onDismissClick() {
+    if (!ui.errorDismissable) {
+      return;
+    }
+    callApiAsync('dismiss').then(function (ok) {
+      if (!ok) {
+        // Python 侧不认(状态已经变了):什么都不做
+        return;
+      }
+      ui.errorDismissable = false;
+      ui.errorPayload = '';
+      ui.copying = false;
+      if (el.pill) {
+        el.pill.classList.remove('can-copy');
+      }
+      if (el.cancelBtn) {
+        el.cancelBtn.setAttribute('aria-label', '取消录音');
+      }
+      // 常驻球:收回球形态(非常驻模式的窗口由 Python 侧藏掉)
+      cancelCollapse();
+      setExpanded(false);
     });
   }
 
@@ -1269,6 +1304,13 @@
     // 取消：放弃这一轮
     if (el.cancelBtn) {
       el.cancelBtn.addEventListener('click', function () {
+        // 带原文的错误常驻态：这个 ✕ 是"关掉提示"，不是"取消这一轮"
+        // —— 那一轮早就结束了,取消没有意义。带原文的错误态不自动
+        // 收回,只有用户点这个 ✕(或开始下一轮录音)才收。
+        if (ui.errorDismissable) {
+          onDismissClick();
+          return;
+        }
         callApi('cancel_recording');
       });
     }
@@ -1396,6 +1438,16 @@
       // 胶囊里只留一句短提示(长文案会把胶囊撑宽,看着奇怪)。
       // 没有原文的错误(没听清 / 识别失败)才是真的失败 —— 错误色。
       var canCopy = !!raw.trim();
+      // 带原文的错误态**常驻**:用户可能要反复点「复制」重试(剪贴板
+      // 被占、目标窗口不给焦点)。自动收回会把重试的口子堵上 ——
+      // 只有点 ✕(dismiss)或开始下一轮录音才收(Python 侧同步)。
+      ui.errorDismissable = canCopy;
+      if (el.cancelBtn) {
+        // 这个 ✕ 在带原文的错误态里是"关掉提示",不是"取消录音"
+        // (那一轮早就结束了,没什么可取消的)—— 语义要说清楚。
+        el.cancelBtn.setAttribute('aria-label',
+          canCopy ? '关闭提示' : '取消录音');
+      }
       if (el.pill) {
         el.pill.classList.toggle('can-copy', canCopy);
       }
@@ -1408,13 +1460,18 @@
           // (一行截断即可)。
           setPhase('warning', msg);
         }
-      } else if (ui.previewEnabled) {
-        writeText(msg, 'error');
-        setPhase('error');
+        // 常驻:**不排**自动收回的定时器。反倒要把可能还挂着的
+        // 旧定时器撤掉 —— 上一轮的收起定时器不该把这一轮收走。
+        cancelCollapse();
       } else {
-        setPhase('error', msg);
+        if (ui.previewEnabled) {
+          writeText(msg, 'error');
+          setPhase('error');
+        } else {
+          setPhase('error', msg);
+        }
+        scheduleCollapse();
       }
-      scheduleCollapse();
     },
     setCancelled: function () {
       if (ui.previewEnabled) {
@@ -1433,6 +1490,11 @@
       // 上一轮错误态留下的原文与「复制」按钮也要清干净
       ui.errorPayload = '';
       ui.copying = false;
+      // 错误常驻态的标记也要清 —— 下一轮 ✕ 又是"取消录音"
+      ui.errorDismissable = false;
+      if (el.cancelBtn) {
+        el.cancelBtn.setAttribute('aria-label', '取消录音');
+      }
       if (el.pill) {
         el.pill.classList.remove('can-copy');
       }

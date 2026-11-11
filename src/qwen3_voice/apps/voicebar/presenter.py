@@ -20,9 +20,10 @@ log = get_logger("apps.voicebar")
 
 DWELL_RESULT = 1.5
 DWELL_ERROR = 4.5
-DWELL_ERROR_COPY = 12.0
 DWELL_CANCELLED = 1.0
 DWELL_REJECTED = 0.6
+# ⚠ 这里**没有**"错误带原文"的 dwell:带原文的错误态改成**常驻**
+# (用户可以无限次点「复制」重试),收回只由 ✕ 或下一轮录音触发。
 
 TEXT_RESULT = "已输入"
 TEXT_CANCELLED = "已取消"
@@ -274,6 +275,30 @@ class VoiceBarPresenter:
         capsule = self._capsule
         if capsule is not None:
             capsule.set_error(message, text)
+
+    def on_dismissed(self) -> bool:
+        """用户主动关掉了错误提示(带原文的错误常驻态)。
+
+        返回**是否真的处理了** —— 只有"带原文的错误常驻态"才认这个
+        动作:录音中、正常结果态、普通错误态收到 dismiss 一律静默
+        忽略(幂等),免得误点把正在录的一轮收掉。
+
+        带原文的错误态**刻意不排 dwell**:用户可能要反复点「复制」
+        重试(剪贴板被占、目标窗口不给焦点),自动收回会把重试的
+        出口堵上 —— 收回交给用户点 ✕ 或开始下一轮录音。
+        """
+        with self._lock:
+            if self._closed:
+                return False
+            if self._mode != protocol.MODE_ERROR or not self._can_copy:
+                return False
+            self._cancel_dwell()
+            self._mode = protocol.MODE_ORB
+            self._message = ""
+            self._text = ""
+            self._can_copy = False
+            self._reason = ""
+        return True
 
     def _enter_rejected(self, note: Notification) -> None:
         with self._lock:

@@ -104,10 +104,10 @@ WIN_H = 260
 # 各种结局之后,胶囊停留多久再隐藏(秒)
 HIDE_DELAY_OK = 1.5       # 识别成功并已注入
 HIDE_DELAY_ERROR = 4.5    # 出错:错误文案要让人看清
-# 出错而且**带着识别原文**:用户多半要点胶囊上的「复制」把文字取走,
-# 留久一点,别让人手忙脚乱。
-HIDE_DELAY_ERROR_COPY = 12.0
 HIDE_DELAY_CANCEL = 1.0   # 取消
+# ⚠ 这里**没有**"错误带原文"的自动收回时长了 —— 带原文的错误态
+# (注入失败)改成**常驻**:用户可能要反复点「复制」重试,自动收回
+# 会把重试的口子堵上。只有点 ✕ 或开始下一轮录音才收(见 set_error)。
 
 # 写完剪贴板后等一下再读回校验。剪贴板是异步通知的,立刻读有时会
 # 读到旧内容。
@@ -227,6 +227,15 @@ class _CapsuleApi:
         还是让用户再试一次。
         """
         return self._capsule._copy_result(text)
+
+    def dismiss(self) -> bool:
+        """用户主动关掉错误提示(带原文的错误常驻态)。
+
+        返回**是否真的关掉了** —— 不在"带原文的错误常驻态"时
+        静默忽略(幂等):前端多发一次、或者别的状态误触发,都不会
+        把正在录的一轮收掉。
+        """
+        return self._capsule._dismiss_error()
 
     def start_recording(self) -> None:
         """点悬浮球开始录音。
@@ -411,9 +420,29 @@ class VoiceCapsule:
         self._schedule_hide(HIDE_DELAY_OK)
 
     def set_error(self, message: str, payload: str = "") -> None:
-        """错误**可能带着识别原文**(注入失败时):一起发给前端。"""
+        """错误**可能带着识别原文**(注入失败时):一起发给前端。
+
+        带原文的错误态**常驻**:不排任何自动收回的定时器 ——
+        用户可能要反复点「复制」重试(剪贴板被占、目标窗口不给焦点),
+        自动收回会把重试的口子堵上。只有用户点 ✕(dismiss)或开始
+        下一轮录音才收。
+
+        不带原文的错误(没听清 / 识别失败)照旧 4.5 秒自动收:那种
+        错误没有可重试的动作,杵着只是挡屏幕。
+        """
         payload = payload or ""
-        delay = HIDE_DELAY_ERROR_COPY if payload else HIDE_DELAY_ERROR
+        if payload:
+            # 常驻错误态:既不推 hide delay(前端定时器)也不排 Python 侧的
+            # 隐藏定时器 —— 两条自动收回的路都断掉。
+            #
+            # ⚠ 但**要把上一轮遗留的隐藏定时器作废**:注入失败是
+            # "先 set_result 再 set_error"(状态先回 idle,失败通知后到),
+            # set_result 排过一个 1.5 秒的隐藏定时器。不作废的话,那个
+            # 定时器会在错误提示刚弹出就把窗口藏了。
+            self._cancel_hide_timer()
+            self._call_js("setError", message, payload)
+            return
+        delay = HIDE_DELAY_ERROR
         self._push_hide_delay(delay)
         self._call_js("setError", message, payload)
         self._schedule_hide(delay)
@@ -825,6 +854,33 @@ class VoiceCapsule:
 
         log.info("手动复制成功,收胶囊")
         self._cancel_hide_timer()
+        self._hide()
+        return True
+
+    # ---------- 用户主动关掉错误提示 ----------
+
+    def _dismiss_error(self) -> bool:
+        """用户点了错误提示上的 ✕:收回胶囊并复位状态。
+
+        返回**是否真的处理了** —— 不在"带原文的错误常驻态"时静默
+        忽略(幂等):前端多发一次、或者别的状态误触发,都不会把
+        正在录的一轮收掉。
+
+        收回分两种模式:
+        - 常驻球:窗口留着(球还在那儿等下一轮),胶囊收回成球形态
+          的动效在前端做(见 capsule.js 的 onDismissClick);
+        - 非常驻:窗口整个藏掉,回原样。
+        """
+        try:
+            handled = bool(self._presenter.on_dismissed())
+        except Exception as e:
+            log.debug("关闭错误提示失败: %s", e)
+            return False
+        if not handled:
+            return False
+        self._cancel_hide_timer()
+        # 非常驻:_hide() 藏掉窗口;常驻:只清掉"这一轮的胶囊还该
+        # 显示"的标记(球还在),胶囊由前端收回成球。
         self._hide()
         return True
 

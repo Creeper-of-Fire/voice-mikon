@@ -1010,10 +1010,12 @@
     if (mode === 'processing') {
       if (data.warn) {
         // 等修饰键的**瞬态警告覆盖**(状态位仍是 processing,松开后
-        // 自然流转 result):走警告两层形态 —— 中段短词(text),
-        // 文字条放完整说明(message,把"哪些键要松/Ctrl 例外"讲清)。
+        // 自然流转 result):警告三层 —— 正文(body,识别出的文字,
+        // 不能丢)+ 警告样式 + 报告位放规则说明(message)。中段
+        // 短词(text)与"没送出去"同一警告家族。
         if (ui.previewEnabled) {
-          writeText(message, 'warning');
+          writeText(data.body == null ? '' : String(data.body),
+                    'warning', message);
         }
         setPhase('warning', text || '等你松键');
       } else {

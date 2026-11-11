@@ -313,12 +313,17 @@ class VoiceBarPresenter:
             with self._lock:
                 if self._closed or self._mode != protocol.MODE_PROCESSING:
                     return
+                body = self._preview_text
             capsule = self._capsule
             if capsule is not None:
                 capsule.set_mode(protocol.MODE_PROCESSING, {
                     "warn": True,
                     "text": "等你松键",
                     "message": note.message,
+                    # 正文不能丢:等键警告只是叠加说明,识别出的文字
+                    # (预览已累计的内容)继续显示在文字条主体,报告位
+                    # 放规则说明 —— 与注入失败警告态同构。
+                    "body": body,
                 })
         elif kind == "backend_load_failed":
             self._enter_backend_failed(note)

@@ -46,13 +46,16 @@ uv pip install --python .venv\Scripts\python.exe -e .
 #    { "backend": "minimax" }
 #    其余键全部走内置默认值,写最小片段即可,不用抄全量模板。
 
-# 4. 请用户提供自己的 key 并设为环境变量(AI 不要替用户编 key):
-[Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "sk-...", "User")  # 永久
+# 4. 替用户写好 key 文件 data/.env(推荐方式,持久、portable、不碰系统):
+#    MINIMAX_API_KEY=sk-...
+#    key 由用户自己提供(AI 不要替用户编 key)。环境变量 MINIMAX_API_KEY
+#    也可以用(优先级更高,适合临时换 key / CI 注入):
+[Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "sk-...", "User")  # 可选覆盖
 ```
 
-**`MINIMAX_API_KEY` 只从环境变量读,绝不写进 config.json** ——
-配置文件会被手工编辑、截图、分享。缺 key 时切网络后端会明确报错,
-不会静默回落到本地。
+**API key 绝不写进 config.json** —— 配置文件会被手工编辑、截图、分享。
+key 只从环境变量或 `data/.env` 读(后者是持久真相,已被 `.gitignore` 的
+`*.env` 规则忽略)。缺 key 时切网络后端会明确报错,不会静默回落到本地。
 
 ### 路线 B:本地后端(用户要"音频不出本机")
 
@@ -124,7 +127,8 @@ python -m voice_mikon          # 或 venv 里的 voice-mikon 命令
 | `trailing_space` | `true` | 末尾自动补空格 |
 
 环境变量:`VOICE_MIKON_HOME`(换数据目录) / `VOICE_MIKON_CONFIG`(指定配置路径) /
-`VOICE_MIKON_LOG`(日志路径) / `MINIMAX_API_KEY`(仅网络后端)。
+`VOICE_MIKON_LOG`(日志路径)。API key 的持久配置在 **`data/.env`**
+(`MINIMAX_API_KEY=sk-...`);同名环境变量优先(临时覆盖用)。
 
 ### 术语表(热词)
 
@@ -140,8 +144,8 @@ Qwen3-ASR 内置 Context Biasing:传入的词会**偏向**出现在识别结果�
 **加新的识别后端**:实现 `src/voice_mikon/engines/base.py` 的 `ASRBackend`
 契约(本地 `engine.py`、网络 `minimax.py` 是两个现成参考),枚举登记进
 `config.py` 的 `ASR_BACKENDS`,面板与切换逻辑自动认得新档位。
-规矩:API key 只走环境变量,绝不进 config.json;识别失败要有明确的错误文案,
-不静默回落。
+规矩:API key 只走环境变量或 `data/.env`,绝不进 config.json;识别失败要有
+明确的错误文案,不静默回落。
 
 **写新的小工具**:放 `companions/<工具名>/`,架构**彻底独立** ——
 与主包零 import(双向不知道对方存在),主程序只经 subprocess 拉起(崩了不相干),
@@ -159,7 +163,8 @@ UI 技术栈自选(二维码扫描用的 tkinter,没碰主程序的 pywebview),
   出问题看 `data/voice_input.log`。
 - **网络后端不支持热词**(MiniMax 没有 context biasing 入口);切换成功的
   通知里会明说,词表本身不用改,切回本地照旧生效。
-- 依赖目前是全量的:走网络后端也会装上 torch 等本地推理栈。
+- 依赖目前是全量的:走网络后端也会装上 torch 等本地推理栈。而且，如果使用过本地模式，
+ torch 会被导入导致高内存占用，不会自动卸载。必须启动时就以网络模式启动才能规避。
 
 ## 架构(简)
 

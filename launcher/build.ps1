@@ -2,7 +2,7 @@
 #
 # 为什么不用 vcvarsall.bat:cargo 不认 vcvars —— cargo 找不到 link.exe 就直接
 # 报 "linker `link.exe` not found"。所以这个脚本自己把 MSVC / Windows SDK 的
-# PATH、INCLUDE、LIB 设好(规格 §4.3)。
+# PATH、INCLUDE、LIB 设好(cargo 不读 vcvars 的环境,缺了直接报 linker not found)。
 #
 # 用法:
 #   pwsh -File .\build.ps1

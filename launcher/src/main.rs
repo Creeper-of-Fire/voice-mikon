@@ -19,7 +19,8 @@
 //! - `runtime\pyvenv.cfg`(exe 的**父目录**,CPython 只在 exe 目录和父目录找它,
 //!   父目录优先)→ 决定 `sys.prefix` = runtime\,`sys.base_prefix` = base 解释器目录
 //! - `runtime\launcher.toml` → 真实 venv 的 site-packages,用 `site.addsitedir` 挂载
-//!   (`.pth` 只在 site 初始化时被处理,PYTHONPATH 挂不得,见规格 §2.2)
+//!   (`.pth` 只在 site 初始化时被处理 —— 目录塞进 PYTHONPATH 进得了
+//!   `sys.path`,但里面的 `.pth` 不会被执行,挂不得)
 //!
 //! # 失败兜底
 //!

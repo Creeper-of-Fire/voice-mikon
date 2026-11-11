@@ -340,10 +340,17 @@ def _open_config_file() -> None:
         get_logger("main").error("打开配置文件失败: %s", e)
 
 
-def _open_log_file(config: Config) -> None:
-    """用系统默认程序打开日志文件(V1 托盘的同名功能)。"""
+def _open_log_file() -> None:
+    """用系统默认程序打开日志文件(V1 托盘的同名功能)。
+
+    日志路径不是配置项 —— 永远派生自 data/(paths.log_path),环境变量
+    VOICE_MIKON_LOG 可覆盖。曾经允许配置,结果 save() 把当时的绝对路径
+    烧进 config.json,项目目录一改名日志就写到旧位置去了。
+    """
+    from .paths import log_path
+
     try:
-        path = Path(config.log_file)
+        path = log_path()
         if path.is_file():
             os.startfile(str(path))
     except Exception as e:
@@ -477,7 +484,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
         TrayMenuItem("打开配置文件", key="open_config",
                      action=_open_config_file),
         TrayMenuItem("查看日志", key="open_log",
-                     action=lambda: _open_log_file(config)),
+                     action=_open_log_file),
         TrayMenuItem("重启", key="restart", action=request_restart),
         TrayMenuItem("退出", key="quit", action=request_quit),
     ])
@@ -679,7 +686,8 @@ def run_headless_service(config: Config) -> int:
 
     开发者选项(用户拍板):面板上是 disabled 的第四档,只能改 config
     手动开启、重启生效 —— 运行时销毁/重建窗口会踩 pywebview 动态建窗
-    的坑(REFACTOR_SPEC 血泪条款 4),不给面板入口。headless 下同样
+    的坑(动态 create_window 在返回前就触发建窗回调,拿不到 window
+    对象、回调挂不上 —— 实测),不给面板入口。headless 下同样
     **不做任何故障提示 UI**(托盘气泡之类都不做):托盘图标颜色跟着
     状态走是唯一反馈,出问题看日志(data/voice_input.log)。
 
@@ -723,7 +731,7 @@ def run_headless_service(config: Config) -> int:
         TrayMenuItem("打开配置文件", key="open_config",
                      action=_open_config_file),
         TrayMenuItem("查看日志", key="open_log",
-                     action=lambda: _open_log_file(config)),
+                     action=_open_log_file),
         TrayMenuItem("退出", key="quit", action=request_quit),
     ])
 
@@ -786,7 +794,9 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     config = load_config()
-    setup(config.log_file, config.log_level)
+    from .paths import log_path
+
+    setup(log_path(), config.log_level)
     log = get_logger("main")
 
     log.info("=" * 60)

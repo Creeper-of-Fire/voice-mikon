@@ -46,7 +46,8 @@ UI_MODES = ("orb", "resident", "on_demand", "headless")
 # 识别后端(互斥,同一时刻只留一个):
 #   local    本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
 #   minimax  MiniMax 平台网络接口(asr-1.0,multipart 上传音频)
-# API Key **不进配置文件** —— 只从环境变量 MINIMAX_API_KEY 读。
+# API Key **不进配置文件** —— 环境变量 MINIMAX_API_KEY 优先,
+# data/.env 文件兜底(持久真相,见 engines/minimax.py)。
 ASR_BACKENDS = ("local", "minimax")
 
 # 退役的后端名 → 回退到哪个。
@@ -114,7 +115,8 @@ class Config:
     backend: str = "local"
     # 网络后端的模型名与端点前缀。
     # 国内站是 api.minimax.cn;海外站改成 https://api.minimax.io。
-    # **API Key 不在这里** —— 只从环境变量 MINIMAX_API_KEY 读。
+    # **API Key 不在这里** —— 环境变量 MINIMAX_API_KEY 优先,
+    # data/.env 兜底(见 engines/minimax.py 的 _load_api_key)。
     minimax_model: str = "asr-1.0"
     minimax_base_url: str = "https://api.minimax.cn"
 
@@ -157,7 +159,9 @@ class Config:
     orb: OrbConfig = field(default_factory=OrbConfig)
 
     # ---- 其它
-    log_file: str = ""
+    # (log_file 不再是配置项:日志路径永远派生自 data/(paths.log_path),
+    #  可用环境变量 VOICE_MIKON_LOG 覆盖 —— 曾经允许配置,结果 config.save()
+    #  把当时的绝对路径烧进配置文件,项目目录一改名日志就写到旧位置去了。)
     log_level: str = "INFO"
 
     # ---------- 校验 ----------
@@ -293,10 +297,6 @@ def load_config(path: Path | None = None) -> Config:
     # 注意:hotwords.txt 文件**不在这里并入** ——
     # 词表由 engines/engine.py 在每次识别时实时读取(改完立即生效)。
     # 这里只管 config.json 里的静态 hotwords 字段。
-
-    # 补全派生字段
-    if not cfg.log_file:
-        cfg.log_file = str(log_path())
 
     # 退役的后端值:回退 + **一条** warning。
     #

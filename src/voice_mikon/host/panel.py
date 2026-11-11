@@ -17,9 +17,9 @@
    的 ``WS_EX_TOOLWINDOW``。
 3. **默认不常驻**:托盘菜单或球菜单才打开,关掉只是隐藏,不退出程序。
 
-前端三件套与 fit/拖动/几何记忆的逻辑来自 V1 的 ``ui/panel.py``
+前端三件套与 fit/拖动/几何记忆的逻辑继承自 V1 的面板
 (退役前的那一版),但伺候旧世界的部分没搬:位置三档 UI、
-``_EventPump``、旧 controller 接口都不在了(见 REFACTOR_SPEC 的白名单)。
+``_EventPump``、旧 controller 接口都不在了。
 
 Python 与前端之间的桥接契约:
 
@@ -39,7 +39,7 @@ Python 与前端之间的桥接契约:
 1. ``evaluate_js`` 在 GUI 还没建好时会阻塞 20 秒才抛异常。
    所以所有前端调用都过 ``_frontend_ready`` 门控,前端就绪后才推;
    推送一律走**串行队列**(WebView2 是 STA COM 对象,多线程并发
-   ``evaluate_js`` 会互相踩掉 —— 见 REFACTOR_SPEC 血泪条款 2)。
+   ``evaluate_js`` 会互相踩掉 —— 音量条丢帧、动画不触发,实测过)。
 2. pywebview 建窗时给的初始尺寸会被 WinForms 的 AutoScale 再缩一次,
    内容底部几个像素会被裁掉。``_fit_window`` 自己量一次内容高度再
    resize 到刚好(``resize()`` 走的是另一条路径,尺寸是准的)。

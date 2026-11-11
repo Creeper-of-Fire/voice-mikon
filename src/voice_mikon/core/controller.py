@@ -142,8 +142,8 @@ class State(str, Enum):
 # V1 内部状态 → 对外状态常量(core/state.py,presenter 消费的那一套)。
 #
 # ⚠ ERROR **没有**对外状态:``state.py`` 里只有
-# starting / idle / recording / processing 四个(见 REFACTOR_SPEC §3
-# 「去掉 error 态」)。出错信息不靠状态走 —— 走 ``backend_health``
+# starting / idle / recording / processing 四个(error 态已退役)。
+# 出错信息不靠状态走 —— 走 ``backend_health``
 # (failed + reason)和通知流(backend_load_failed / asr_failed),
 # 状态本身回到 idle,好让用户能直接再来一轮。
 _APP_STATE_BY_V1: dict[State, str] = {

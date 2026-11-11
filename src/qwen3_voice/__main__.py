@@ -432,6 +432,8 @@ def run_gui(config: Config, entry: _Entry) -> int:
     #
     # 面板 presenter 负责翻译 core 的快照/通知;主题那一条由装配层
     # 注入(capsule.set_theme)—— 面板改了主题,胶囊要跟着换。
+    # 悬浮球的开关/待机策略同款:注入 voicebar presenter 的
+    # apply_orb_config —— 面板把球关掉,胶囊那边当场把球收起来。
     # 退出的收尾路径也在这里注入:面板的「退出」按钮走**同一条**
     # request_quit,和托盘菜单、球菜单一模一样。
     panel_presenter = PanelPresenter(
@@ -439,6 +441,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
         config=config,
         notifier=notify,
         theme_broadcaster=capsule.set_theme,
+        orb_broadcaster=presenter.apply_orb_config,
         quit_handler=request_quit,
     )
     panel_presenter.install()

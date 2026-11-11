@@ -59,6 +59,10 @@ class VoiceBarPresenter:
         self._standby = str(
             getattr(getattr(config, "orb", None), "standby",
                     protocol.STANDBY_RESIDENT) or protocol.STANDBY_RESIDENT)
+        # 悬浮球开关:记住上一次的值,才能判断面板这次是不是"变了"
+        # (变了才动窗口 —— 值没变就不动作)。
+        self._orb_enabled = bool(
+            getattr(getattr(config, "orb", None), "enabled", True))
 
         self._core_state: AppState | None = None
         self._capsule: Any = None
@@ -113,6 +117,45 @@ class VoiceBarPresenter:
         with self._lock:
             self._closed = True
             self._cancel_dwell()
+
+    # ---------- 悬浮球配置(面板推过来) ----------
+
+    def apply_orb_config(self, enabled: bool, standby: str) -> None:
+        """面板改了悬浮球的开关/待机策略:当场兑现。
+
+        面板那边改配置是**即时**的(V1 就是这样),这边不能只写 config ——
+        悬浮球的显隐得当场兑现,不然用户点了开关什么都没发生。
+
+        ``enabled`` 变了才动窗口(值没变就不动作):
+
+        - 变 False:把球收起来(``capsule.hide_orb``)。正在录音时这一轮
+          的胶囊还得留着 —— 那是 capsule 自己的语义,这边不插手。
+        - 变 True:恢复球。常驻(resident)露球;按需(on_demand)仍旧收着
+          —— 见 ``start``:on_demand 待机时球不露脸,热键时才出来。
+
+        ``standby`` 只影响**后续**的收回:运行期读它的只有
+        ``_on_dwell_expired``(终态停完到点回球时收不收)。所以只改
+        待机策略时,当场不动窗口。
+        """
+        standby = str(standby or protocol.STANDBY_RESIDENT).strip().lower()
+        if standby not in protocol.STANDBY_MODES:
+            standby = protocol.STANDBY_RESIDENT
+        with self._lock:
+            if self._closed:
+                return
+            changed = bool(enabled) != self._orb_enabled
+            self._orb_enabled = bool(enabled)
+            self._standby = standby
+            orb_enabled = self._orb_enabled
+        if not changed:
+            return
+        capsule = self._capsule
+        if capsule is None:
+            return
+        if not orb_enabled or standby == protocol.STANDBY_ON_DEMAND:
+            capsule.hide_orb()
+        else:
+            capsule.show_orb()
 
     def _on_core_state(self, state: AppState) -> None:
         with self._lock:

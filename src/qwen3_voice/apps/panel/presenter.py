@@ -17,7 +17,9 @@
 配置写回也归这一层:面板改的是配置(config.theme / show_preview /
 orb.enabled / orb.standby),主题还要**立即推给胶囊** —— 面板和胶囊共用
 一套主题,面板改了胶囊不跟着换,用户会觉得"两个窗口不是一套东西"。
-胶囊那侧的推送由装配层注入(``theme_broadcaster``),本层不认识胶囊。
+悬浮球的开关/待机策略同理:面板把球关掉,胶囊那边要当场把球收起来,
+不然用户点了开关什么都没发生(V1 就是即时的)。胶囊那侧的推送由装配层
+注入(``theme_broadcaster`` / ``orb_broadcaster``),本层不认识胶囊。
 """
 
 from __future__ import annotations
@@ -133,16 +135,20 @@ class PanelPresenter:
     def __init__(self, core: Any, config: Any = None,
                  notifier: NotificationHub | None = None,
                  theme_broadcaster: Callable[[str], None] | None = None,
+                 orb_broadcaster: Callable[[bool, str], None] | None = None,
                  quit_handler: Callable[[], None] | None = None) -> None:
         """``core`` 提供状态快照与命令;``config`` 是配置本体(读写都在这);
         ``notifier`` 是通知流(拒绝/失败的原因从这儿来);
         ``theme_broadcaster`` 把主题推给**另一个窗口**(胶囊),由装配层注入;
+        ``orb_broadcaster`` 把悬浮球的开关/待机策略推给同一个窗口,
+        由装配层注入(主题一条的同款模式);
         ``quit_handler`` 是"退出程序"的收尾路径(与托盘同一条),由装配层注入。
         """
         self._core = core
         self._config = config
         self._notifier = notifier if notifier is not None else notify
         self._theme_broadcaster = theme_broadcaster
+        self._orb_broadcaster = orb_broadcaster
         self._quit_handler = quit_handler
         self._lock = threading.RLock()
         self._closed = False
@@ -316,7 +322,11 @@ class PanelPresenter:
         self.push_full_state()
 
     def set_orb(self, enabled: bool) -> None:
-        """开关常驻悬浮球。"""
+        """开关常驻悬浮球:存配置 → 推胶囊(当场生效)→ 推面板。
+
+        胶囊那侧必须当场收到:只写 config 的话,球还挂在屏幕上,
+        用户会觉得"开关没用"。
+        """
         with self._lock:
             if self._closed:
                 return
@@ -326,10 +336,11 @@ class PanelPresenter:
                 self._config.save()
             except Exception as e:
                 log.debug("保存悬浮球开关失败: %s", e)
+        self._broadcast_orb()
         self.push_full_state()
 
     def set_standby(self, mode: str) -> None:
-        """切换悬浮球的待机策略。"""
+        """切换悬浮球的待机策略:存配置 → 推胶囊 → 推面板。"""
         mode = str(mode or "resident").strip().lower()
         if mode not in STANDBY_MODES:
             log.info("未知待机策略 %r,按 resident 处理", mode)
@@ -343,7 +354,22 @@ class PanelPresenter:
                 self._config.save()
             except Exception as e:
                 log.debug("保存待机策略失败: %s", e)
+        self._broadcast_orb()
         self.push_full_state()
+
+    def _broadcast_orb(self) -> None:
+        """把悬浮球的开关/待机策略推给另一个窗口(胶囊),当场生效。
+
+        和主题那条同款模式(``theme_broadcaster``):本层不认识胶囊,
+        推给谁、怎么推由装配层决定。
+        """
+        broadcaster = self._orb_broadcaster
+        if broadcaster is None:
+            return
+        try:
+            broadcaster(self._orb_enabled(), self._standby_mode())
+        except Exception as e:
+            log.debug("推送悬浮球设置给另一个窗口失败: %s", e)
 
     def close_panel(self) -> None:
         """隐藏面板(不退出程序)。"""

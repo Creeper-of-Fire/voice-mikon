@@ -10,6 +10,11 @@ from .streaming import (
     StreamingEngine,
     make_preview_engine,
 )
+from .vad import (
+    EnergyVadDetector,
+    VoiceDetector,
+    make_vad_detector,
+)
 
 __all__ = [
     "ASRBackend",
@@ -17,9 +22,12 @@ __all__ = [
     "ASREngine",
     "LocalASRBackend",
     "DashScopeBackend",
+    "EnergyVadDetector",
     "FullPassEngine",
     "PreviewEngineKind",
     "SentencePreviewEngine",
     "StreamingEngine",
+    "VoiceDetector",
     "make_preview_engine",
+    "make_vad_detector",
 ]

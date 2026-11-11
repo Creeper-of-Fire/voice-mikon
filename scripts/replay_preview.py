@@ -48,11 +48,14 @@ from qwen3_voice.engines.streaming import (
     SENTENCE_MAX_SECONDS,
     SENTENCE_MIN_SECONDS,
     SENTENCE_SILENCE_SECONDS,
+    SentencePreviewEngine,
+)
+from qwen3_voice.engines.vad import (
     VAD_FRAME_MS,
     VAD_GATE_CLOSE_FACTOR,
     VAD_GATE_MIN,
     VAD_GATE_OPEN_FACTOR,
-    SentencePreviewEngine,
+    make_vad_detector,
 )
 from qwen3_voice.audio.recorder import RECORDER_BLOCK_SIZE
 from qwen3_voice.config import load_config
@@ -151,6 +154,9 @@ class ReplayReport:
     elapsed: float = 0.0
     # 本次回放用的底噪估计(整段 p10);None = 音频太短没估出来
     noise_floor: float | None = None
+    # 本次用的判定层(类名)与它的分析帧长(样本)
+    vad_kind: str = ""
+    frame_samples: int = 0
 
     @property
     def voiced_frames(self) -> int:
@@ -275,7 +281,8 @@ def _estimate_noise_floor(audio: np.ndarray,
 
 def replay(audio: np.ndarray, sample_rate: int, asr_engine,           *, realtime: bool = False,
            block_size: int = RECORDER_BLOCK_SIZE,
-           verbose: bool = False) -> ReplayReport:
+           verbose: bool = False,
+           vad_kind: str | None = None) -> ReplayReport:
     """把音频按录音器的真实粒度喂给分句引擎,顺便收集诊断数据。
 
     ``block_size`` 默认取录音器的采集块大小(``RECORDER_BLOCK_SIZE``):
@@ -284,6 +291,11 @@ def replay(audio: np.ndarray, sample_rate: int, asr_engine,           *, realtim
     ``realtime`` 按真实时间推进(每块睡到它该到的时间点),
     用来复现真实节奏;``fast`` 不睡,只按块切分。
     VAD 是按帧能量算的,节奏不影响判定,但 partial 的触发时机更快。
+
+    ``vad_kind`` 选判定层(``silero`` / ``energy``),None 时读配置
+    ``preview_vad``。两种判定层的帧长不同(Silero 32ms 整窗 /
+    能量法 20ms),所以同一段音频两种模式的帧数不一样 —— 这是
+    预期的,报告里的帧占比才是可比的指标。
     """
     report = ReplayReport(
         sample_rate=int(sample_rate),
@@ -303,10 +315,19 @@ def replay(audio: np.ndarray, sample_rate: int, asr_engine,           *, realtim
     # 注入恒定 provider —— 判定与线上一致:门随底噪走。
     # 旧的固定 VAD_SILENCE_RMS 已退役(被换环境后的底噪穿透过)。
     report.noise_floor = _estimate_noise_floor(audio, sample_rate)
+    # 判定层:Silero 或能量法(Silero 不可用时自动降级)。
+    # 底噪只喂给能量法,Silero 不看它。
+    detector = make_vad_detector(
+        vad_kind, sample_rate,
+        noise_floor=(lambda: report.noise_floor)
+        if report.noise_floor is not None else None)
+    report.vad_kind = type(detector).__name__
+    report.frame_samples = detector.frame_samples
     engine = DiagnosticPreviewEngine(
         asr_engine, sample_rate, partial=on_partial,
         noise_floor=(lambda: report.noise_floor)
-        if report.noise_floor is not None else None)
+        if report.noise_floor is not None else None,
+        detector=detector)
 
     block_duration = block_size / max(1, sample_rate)
     t_start = time.monotonic()
@@ -396,12 +417,20 @@ def format_report(report: ReplayReport) -> str:
     lines.append(f"节奏      : {'真实时间(realtime)' if report.realtime else '快速(fast,不 sleep)'}")
     floor_desc = ("未估出(音频太短,门=兜底)" if report.noise_floor is None
                   else f"{report.noise_floor:.5f}")
-    lines.append(f"VAD       : 底噪估计 {floor_desc},"
-                 f"开门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_OPEN_FACTOR):.5f}"
-                 f" / 关门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_CLOSE_FACTOR):.5f},"
-                 f"连续 {SENTENCE_SILENCE_SECONDS}s 断句,"
-                 f"单句 {SENTENCE_MIN_SECONDS}~{SENTENCE_MAX_SECONDS}s,"
-                 f"帧长 {VAD_FRAME_MS}ms")
+    # 判定层说明:能量法看底噪门限,Silero 看双阈值。
+    # 帧长也跟着判定层走(Silero 32ms 整窗 / 能量法 20ms)。
+    if report.vad_kind == "SileroVadDetector":
+        vad_desc = (f"Silero VAD(神经网络),帧长 "
+                    f"{report.frame_samples} 样本"
+                    f"({report.frame_samples / max(1, report.sample_rate) * 1000:.0f}ms)")
+    else:
+        vad_desc = (f"能量法(底噪估计 {floor_desc}),"
+                    f"开门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_OPEN_FACTOR):.5f}"
+                    f" / 关门 {max(VAD_GATE_MIN, (report.noise_floor or 0) * VAD_GATE_CLOSE_FACTOR):.5f},"
+                    f"帧长 {VAD_FRAME_MS}ms")
+    lines.append(f"判定层    : {vad_desc}")
+    lines.append(f"切句      : 连续 {SENTENCE_SILENCE_SECONDS}s 断句,"
+                 f"单句 {SENTENCE_MIN_SECONDS}~{SENTENCE_MAX_SECONDS}s")
 
     lines.append("")
     lines.append("--- 帧级 VAD(引擎实际看到的帧)---")
@@ -486,6 +515,9 @@ def main(argv: list[str] | None = None) -> int:
                       help="不 sleep,只按块切分(默认)")
     parser.add_argument("--verbose", action="store_true",
                         help="逐帧打印 RMS 和静音判定")
+    parser.add_argument("--vad", choices=("silero", "energy"), default=None,
+                        help="用哪种人声判定层(默认:读配置 preview_vad)。"
+                             "silero = Silero VAD 神经网络;energy = 能量法(底噪+双门)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -522,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         audio, rate, asr_engine,
         realtime=args.realtime,
         verbose=args.verbose,
+        vad_kind=args.vad,
     )
     report.path = args.wav.name
     print(format_report(report))

@@ -18,6 +18,7 @@
   "sample_rate": 16000,
   "max_duration": 120.0,
   "save_recordings": true,
+  "preview_vad": "silero",
   "language": null,
   "hotwords": [
     "Qwen3-ASR",

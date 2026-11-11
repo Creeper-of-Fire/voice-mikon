@@ -64,6 +64,14 @@ ORB_STANDBY_MODES = ("resident", "on_demand")
 # API Key **不进配置文件** —— 只从环境变量 DASHSCOPE_API_KEY 读。
 ASR_BACKENDS = ("local", "dashscope")
 
+# 预览断句用哪种"人声判定层"(只影响**预览**的切句,不影响最终识别):
+#   silero  Silero VAD 神经网络判定(默认)—— 模型随包安装,离线可用
+#   energy  能量域判定(底噪估计 + 滞回门)—— Silero 不可用时的降级路径
+#
+# 显式配 energy 不发通知(那是用户自己选的);配 silero 但模型缺失/
+# 加载失败/采样率不支持时,自动降级并发一条 warning 通知。
+PREVIEW_VAD_MODES = ("silero", "energy")
+
 
 @dataclass
 class OrbConfig:
@@ -131,6 +139,11 @@ class Config:
     # ---- 识别
     language: str | None = None               # None = 自动检测语种
     hotwords: list[str] = field(default_factory=list)
+
+    # ---- 预览断句
+    # 预览层用什么判定"这一帧是不是人声"。**只影响预览**:
+    # 最终识别永远是把整段音频直送引擎,不加任何本地预判。
+    preview_vad: str = "silero"
 
     # ---- 文本注入
     restore_clipboard: bool = True
@@ -203,6 +216,11 @@ class Config:
                 f"当前 {self.asr_backend!r}")
         if self.sample_rate <= 0:
             issues.append("sample_rate 必须为正数")
+        if self.preview_vad not in PREVIEW_VAD_MODES:
+            issues.append(
+                "preview_vad 只能是 "
+                f"{' / '.join(PREVIEW_VAD_MODES)},"
+                f"当前 {self.preview_vad!r}")
         if self.max_duration <= 0:
             issues.append("max_duration 必须为正数")
         if self.theme not in THEME_MODES:

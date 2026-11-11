@@ -60,16 +60,13 @@ from ..win32.api import (
     WS_EX_APPWINDOW,
     WS_EX_TOOLWINDOW,
     get_foreground_window,
-    get_work_area,
     get_window_rect,
     move_window_to,
     resize_window_no_activate,
     restore_foreground,
     user32,
 )
-from ..win32.monitors import monitor_at_point
-from .drag import DragSession
-from .placement import clamp_to_work_area
+from .drag import DragSession, window_placement
 
 log = get_logger("host.panel")
 
@@ -181,17 +178,21 @@ class VoicePanel:
         # 拖动会话:按住 → 拖 → 松手的状态、焦点冻结、松手记位置都在
         # DragSession 里(见 host/drag.py)。窗口层只提供它需要的几样东西。
         #
-        # ⚠ 这里只消费**会话**部分(begin / end / 位置记忆),窗口的
-        #   摆位由本类自己做(见 move_window 的说明):DragSession.move
-        #   内置的是"球"的摆位规则(球在窗口底边居中、纵向要给胶囊留位),
-        #   那套规则对普通窗口会把窗口横向甩出屏幕。composable 要支持
-        #   多种窗口形态,得给它一个可注入的摆位策略 —— 那是另一个工单。
+        # 摆位策略也在这里注入:面板用**通用**那套(整个窗口夹进工作区),
+        # 不是胶囊的"球"那套 —— 球在窗口底边居中、纵向还要给展开后的
+        # 胶囊留位,那是固定尺寸透明窗的约束,套到普通面板窗口上会把
+        # 窗口横向甩出屏幕(球的横向留白按球宽算,面板窗口比球宽得多)。
         self._drag = DragSession(
             window_handle=self._native_handle,
             window_scale=self._current_scale,
             window_size=self._window_size,
             save_geometry=self._save_geometry,
             restore_focus=self._restore_focus_after_drag,
+            placement=window_placement(
+                window_handle=self._native_handle,
+                window_scale=self._current_scale,
+                window_size=self._window_size,
+                margin=EDGE_MARGIN),
         )
 
         import webview
@@ -571,45 +572,15 @@ class VoicePanel:
         前端每次都从 mousedown 起点算绝对目标发过来,不发增量 ——
         某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
 
-        摆位用**通用**规则(把窗口夹回工作区),不是胶囊那套"球"的规则:
-        球在窗口底边居中、纵向还要给展开后的胶囊留位 —— 那是固定尺寸
-        透明窗的约束,套到普通面板窗口上会把窗口横向甩出屏幕
-        (球的横向留白按球宽算,面板窗口比球宽得多)。
-
-        用 Win32 SetWindowPos 直接设(物理 = 逻辑 × 当前缩放),
+        摆位交给拖拽会话(注入的是**通用**策略:把窗口夹回工作区),
+        会话内部用 Win32 SetWindowPos 直接设(物理 = 逻辑 × 当前缩放),
         不走 pywebview 的 move()(内部还有一层换算与消息,更慢)。
+
+        窗口位置的记账由会话在松手时统一做(``_save_geometry`` 会先读
+        窗口的真实位置再存)—— 夹取过了还记目标值的话,账本和窗口就
+        对不上了。
         """
-        hwnd = self._native_handle()
-        if not hwnd:
-            return
-        try:
-            scale = self._current_scale()
-            size = self._window_size()
-            if size is None:
-                return
-            win_w, win_h = size
-            px = int(round(float(x) * scale))
-            py = int(round(float(y) * scale))
-            # 夹取按**目标点所在的显示器**算,不是窗口当前所在那块:
-            # 按窗口所在屏夹的话,拖到边界就会被原屏的边缘挡住,
-            # 跨屏拖不过去(屏 A 的右边框把窗口夹死在屏 A 里)。
-            area = None
-            mon = monitor_at_point(px, py)
-            if mon is not None:
-                area = mon.work_area
-            if area is None:
-                area = get_work_area(hwnd)
-            if area is None:
-                return
-            nx, ny = clamp_to_work_area(
-                px, py, win_w, win_h, area, margin=EDGE_MARGIN)
-            move_window_to(hwnd, int(nx), int(ny))
-            # 记账用**夹完之后**的真实位置 —— 夹取过了还记目标值的话,
-            # 账本和窗口就对不上了(位置记忆存的是这一份)。
-            self._pos_x = int(round(nx / scale))
-            self._pos_y = int(round(ny / scale))
-        except Exception as e:
-            log.debug("移动面板窗口失败: %s", e)
+        self._drag.move(x, y)
 
     def end_drag(self) -> None:
         """用户松手:收尾(记位置)。

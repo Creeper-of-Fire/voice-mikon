@@ -9,6 +9,12 @@
 机制**不变**:前端持续发**绝对目标位置**,这边换算成物理像素、夹回
 允许的范围,再挪窗口(见 ``DragSession.move``)。球和胶囊是同一个
 窗口、共用同一份位置记忆,所以拖哪个都是挪这一个窗口。
+
+摆位规则**可注入**:会话只管"按住 → 拖 → 松手"这套流程(状态、焦点
+冻结、记位置),"窗口该摆哪"交给构造时注入进来的**摆位策略**
+(``placement``,见 ``Placement``)。球有球的那套规则(球在窗口底边
+居中、纵向要给展开后的胶囊留位),普通窗口有普通的那套(整个窗口
+夹进工作区)—— 两种窗口形态不该共用一套夹取规则。
 """
 
 from __future__ import annotations
@@ -19,9 +25,83 @@ from typing import Any, Callable
 from ..logging_setup import get_logger
 from ..win32.api import get_window_rect, get_work_area, move_window_to
 from ..win32.monitors import monitor_at_point
-from .placement import orb_screen_position, orb_window_position
+from .placement import (EDGE_MARGIN, clamp_to_work_area, orb_screen_position,
+                        orb_window_position)
 
 log = get_logger("host.drag")
+
+# 摆位策略:输入**逻辑**像素的目标位置(窗口左上角),输出夹取后的目标
+# 位置(还是逻辑像素;DPI 换算和 SetWindowPos 由 DragSession 统一做)。
+#
+# 返回 None = 这一次**别挪**:连工作区都问不到,夹不了 —— 宁可不动,
+# 也不能把窗口甩到屏幕外面去。
+Placement = Callable[[float, float], tuple[float, float] | None]
+
+
+def orb_placement(*, window_handle: Callable[[], int],
+                  window_scale: Callable[[], float],
+                  window_size: Callable[[], tuple[int, int] | None]) -> Placement:
+    """球的摆位策略。
+
+    逐行搬迁自 ``DragSession.move`` 原来的内联实现(球的那套规则),
+    行为**零变化**:球在窗口的底边居中,先算球的屏幕坐标再夹范围,
+    纵向尤其严 —— 球的上方要留给展开后的胶囊。
+
+    ``window_handle`` 这里用不上,但和 ``window_placement`` 保持同一个
+    构造形状:换策略时消费侧不用改调用写法。
+    """
+    def place(x: float, y: float) -> tuple[float, float] | None:
+        scale = window_scale()
+        size = window_size()
+        if size is None:
+            return None
+        win_w, win_h = size
+        win_x = int(round(float(x) * scale))
+        win_y = int(round(float(y) * scale))
+        # 球在窗口的底边居中处:先算球的屏幕坐标,再夹范围
+        ox, oy = orb_screen_position(win_x, win_y, win_w, win_h, scale)
+        mon = monitor_at_point(ox, oy)
+        area = mon.work_area if mon is not None else get_work_area()
+        if area is None:
+            return None
+        nx, ny = orb_window_position(ox, oy, win_w, win_h, scale, area)
+        # 交回逻辑像素(物理 → 逻辑 → 物理 是整除还原,见 DragSession.move)
+        return nx / scale, ny / scale
+    return place
+
+
+def window_placement(*, window_handle: Callable[[], int],
+                     window_scale: Callable[[], float],
+                     window_size: Callable[[], tuple[int, int] | None],
+                     margin: int = EDGE_MARGIN) -> Placement:
+    """普通窗口的摆位策略:整个窗口夹进工作区。
+
+    和球的规则**故意不同**:球那套按球宽横向夹、纵向还要给胶囊留位,
+    套到普通窗口上会把窗口横向甩出屏幕。
+
+    夹取按**目标点所在的显示器**算,不是窗口当前所在那块:按窗口所在
+    屏夹的话,拖到边界就会被原屏的边缘挡住,跨屏拖不过去(屏 A 的
+    右边框把窗口夹死在屏 A 里)。
+    """
+    def place(x: float, y: float) -> tuple[float, float] | None:
+        scale = window_scale()
+        size = window_size()
+        if size is None:
+            return None
+        win_w, win_h = size
+        px = int(round(float(x) * scale))
+        py = int(round(float(y) * scale))
+        area = None
+        mon = monitor_at_point(px, py)
+        if mon is not None:
+            area = mon.work_area
+        if area is None:
+            area = get_work_area(window_handle())
+        if area is None:
+            return None
+        nx, ny = clamp_to_work_area(px, py, win_w, win_h, area, margin=margin)
+        return nx / scale, ny / scale
+    return place
 
 
 class DragSession:
@@ -34,6 +114,7 @@ class DragSession:
     ``window_size``    窗口当前的物理像素尺寸
     ``save_geometry``  记住位置(存 orb.geometry / orb.monitor)
     ``restore_focus``  把前台还给用户当前所在的窗口
+    ``placement``      摆位策略(见 ``Placement``):窗口该摆哪由它说了算
     """
 
     def __init__(self, *, window_handle: Callable[[], int],
@@ -41,12 +122,14 @@ class DragSession:
                  window_size: Callable[[], tuple[int, int] | None],
                  save_geometry: Callable[[], None],
                  restore_focus: Callable[[], None],
+                 placement: Placement,
                  enabled: bool = True):
         self._window_handle = window_handle
         self._window_scale = window_scale
         self._window_size = window_size
         self._save_geometry = save_geometry
         self._restore_focus = restore_focus
+        self._placement = placement
         self._enabled = bool(enabled)
         self._lock = threading.Lock()
         # 用户正拖着:这段时间守卫**不**抢回焦点
@@ -101,8 +184,10 @@ class DragSession:
         前端每次都从 mousedown 起点算绝对目标发过来(不发增量)——
         某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
 
-        摆位走"球"那套规则:球的位置会被夹回允许的范围(纵向尤其严
-        —— 球的上方要留给展开后的胶囊),窗口跟着反推。
+        摆位交给注入进来的策略:球那套会把球夹回允许的范围(纵向尤其
+        严 —— 球的上方要留给展开后的胶囊),普通窗口那套把整个窗口
+        夹进工作区。策略交回的是**逻辑**像素,DPI 换算和 SetWindowPos
+        在这里统一做。
         """
         if not self._enabled:
             return
@@ -111,22 +196,14 @@ class DragSession:
             return
         try:
             scale = self._window_scale()
-            size = self._window_size()
-            if size is None:
+            placed = self._placement(float(x), float(y))
+            if placed is None:
+                # 策略说这次别挪(夹不到工作区):宁可不动。
                 return
-            win_w, win_h = size
-            win_x = int(round(float(x) * scale))
-            win_y = int(round(float(y) * scale))
-            # 球在窗口的底边居中处:先算球的屏幕坐标,再夹范围
-            ox, oy = orb_screen_position(win_x, win_y, win_w, win_h, scale)
-            mon = monitor_at_point(ox, oy)
-            area = mon.work_area if mon is not None else get_work_area()
-            if area is None:
-                return
-            nx, ny = orb_window_position(ox, oy, win_w, win_h, scale, area)
-            move_window_to(hwnd, int(nx), int(ny))
+            nx, ny = placed
+            move_window_to(hwnd, int(round(nx * scale)), int(round(ny * scale)))
         except Exception as e:
-            log.debug("移动悬浮球失败: %s", e)
+            log.debug("移动窗口失败: %s", e)
 
     def end(self) -> None:
         """用户松手:归还焦点 + 记住位置。"""

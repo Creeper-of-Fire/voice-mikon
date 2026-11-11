@@ -89,7 +89,7 @@ from ..win32.monitors import (
     monitor_by_device,
     primary_monitor,
 )
-from .drag import DragSession
+from .drag import DragSession, orb_placement
 from .placement import (
     default_orb_position,
     encode_offset,
@@ -376,12 +376,20 @@ class VoiceCapsule:
         # 拖动会话:按住 → 拖 → 松手的状态、几何换算、焦点冻结都在
         # DragSession 里(见 host/drag.py)。窗口层只提供它需要的几样
         # 东西:窗口句柄、缩放、尺寸、保存位置、归还焦点。
+        #
+        # 摆位策略也注入:球有球的那套规则(球在窗口底边居中、纵向要给
+        # 展开后的胶囊留位),别的窗口形态有别的规则 —— 规则归策略,
+        # 会话只管流程。
         self._drag = DragSession(
             window_handle=self._native_handle,
             window_scale=self._current_scale,
             window_size=self._window_size,
             save_geometry=self._save_orb_position,
             restore_focus=lambda: self._give_back_focus(self._user_foreground()),
+            placement=orb_placement(
+                window_handle=self._native_handle,
+                window_scale=self._current_scale,
+                window_size=self._window_size),
         )
 
         self._api = _CapsuleApi(self)

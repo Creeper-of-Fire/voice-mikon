@@ -210,7 +210,7 @@ def _text_in_clipboard(text: str) -> bool:
     return bool(ok) and current == text
 
 
-def _wait_modifiers(attempt: int) -> str:
+def _wait_modifiers(attempt: int, final_text: str = "") -> str:
     """等修饰键松开,返回 "clear" / "ctrl" / "timeout"。
 
     - "clear":全松开,正常合成 Ctrl+V;
@@ -237,12 +237,14 @@ def _wait_modifiers(attempt: int) -> str:
         # 是订阅者之一,日志也顺带留痕。
         if not notified:
             notified = True
-            # warning 级:需要用户行动(松手)。这串是文字条里的**完整
-            # 说明**(中段短词由 presenter 另给) —— 把规则讲清:其他
-            # 修饰键都要松(Alt/Shift 按着发什么都不再是普通粘贴),
-            # 唯独 Ctrl 可以保持按住,会顺势只补一个 V。
+            # warning 级:需要用户行动(松手)。这串是文字条报告位里的
+            # **完整说明**(中段短词由 presenter 另给)。fields.text 带的
+            # 是**最终识别文本** —— 等键发生在识别完成之后,此刻它就是
+            # 即将贴出去的那份,胶囊显示它才与事实一致(预览拼接版
+            # 与整段识别版可能有差异,不能拿来冒充)。
             notify.publish("warning", "modifier_wait",
-                           "松开修饰键后自动粘贴；按住 Ctrl 也可以直接粘贴")
+                           "松开修饰键后自动粘贴；按住 Ctrl 也可以直接粘贴",
+                           text=final_text)
         if mods == {"ctrl"}:
             ctrl_stable += 1
             if ctrl_stable >= 2:
@@ -292,7 +294,7 @@ def _attempt_inject(text: str, hwnd: int, attempt: int) -> tuple[bool, int, str]
     #     (用户的物理 Ctrl + 我们的 V = 粘贴,连 Ctrl 都不用合成)
     #   - Alt/Shift/Win 按着 → 发什么都不再是普通粘贴,继续等
     #   - 等满 MOD_WAIT_TIMEOUT → 放弃"贴",但文字已在剪贴板里
-    mod = _wait_modifiers(attempt)
+    mod = _wait_modifiers(attempt, text)
     if mod == "timeout":
         # 注意带上 published_seq:text_in_clipboard 判定据此走
         # "已复制到剪贴板但没自动粘贴"文案(这句现在是真的)。

@@ -239,7 +239,7 @@ class CoreController:
         self._backend_factory = backend_factory or self._default_backend_factory
         # 当前生效的后端(本地模型 / 网络 API)。两种后端互斥。
         self.backend_kind = normalize_backend(
-            getattr(config, "asr_backend", BACKEND_LOCAL))
+            getattr(config, "backend", BACKEND_LOCAL))
         self.engine: ASRBackend = self._make_backend(self.backend_kind)
         # 注入器可替换 —— 测试用假实现,避免真的改剪贴板/模拟按键
         self._injector = injector or _default_injector
@@ -458,7 +458,7 @@ class CoreController:
         try:
             index, desc = choose_device(
                 self.config.input_device,
-                self.config.device_name_hints,
+                self.config.device_hints,
             )
             self.input_device = index
             log.info("麦克风: %s", desc)
@@ -1007,7 +1007,7 @@ class CoreController:
             self.backend_kind = kind
 
         try:
-            self.config.asr_backend = kind
+            self.config.backend = kind
             self.config.save()
         except Exception as e:
             log.debug("保存后端设置失败: %s", e)

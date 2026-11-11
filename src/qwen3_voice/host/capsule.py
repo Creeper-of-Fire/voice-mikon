@@ -463,11 +463,11 @@ class VoiceCapsule:
                            "setElapsed", elapsed)
 
     def hide_orb(self) -> None:
-        """把球收起来(on_demand 待机时窗口整个隐藏)。"""
+        """把球收起来(切到无球形态时窗口整个隐藏)。"""
         self._hide_orb()
 
     def show_orb(self) -> None:
-        """让球露脸(on_demand 待机结束)。"""
+        """让球露脸(切回悬浮球形态)。"""
         self._schedule_show_orb()
 
     def destroy(self) -> None:
@@ -538,12 +538,18 @@ class VoiceCapsule:
             return True
 
     def _orb_enabled(self) -> bool:
-        """常驻悬浮球模式开没开(配置项 ``orb.enabled``),读不到按开。"""
+        """悬浮球形态开没开(配置项 ``ui_mode == "orb"``),读不到按开。
+
+        这是 host 层对"球开不开"的**唯一**判断:初始露脸、终态停留后
+        窗口藏不藏(_hide),全看它。界面形态四档里只有 orb 有球;
+        resident / on_demand 都是无球形态。
+        """
         try:
-            orb = getattr(self._config, "orb", None)
-            return bool(getattr(orb, "enabled", True))
+            mode = str(getattr(self._config, "ui_mode", "orb")
+                       or "orb").strip().lower()
         except Exception:
             return True
+        return mode == "orb"
 
     # ---------- 前端桥接 ----------
 

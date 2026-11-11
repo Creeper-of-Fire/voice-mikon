@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -419,7 +420,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
 
         index, desc = choose_device(
             config.input_device,
-            config.device_name_hints,
+            config.device_hints,
         )
         config.input_device = index
         config.save()
@@ -432,7 +433,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
     # 面板 presenter 负责翻译 core 的快照/通知;主题那一条由装配层
     # 注入(capsule.set_theme)—— 面板改了主题,胶囊要跟着换。
     # 悬浮球的开关/待机策略同款:注入 voicebar presenter 的
-    # apply_orb_config —— 面板把球关掉,胶囊那边当场把球收起来。
+    # apply_ui_mode —— 面板切了界面形态,胶囊那边当场兑现(球收/露)。
     # 退出的收尾路径也在这里注入:面板的「退出」按钮走**同一条**
     # request_quit,和托盘菜单、球菜单一模一样。
     panel_presenter = PanelPresenter(
@@ -440,7 +441,7 @@ def run_gui(config: Config, entry: _Entry) -> int:
         config=config,
         notifier=notify,
         theme_broadcaster=capsule.set_theme,
-        orb_broadcaster=presenter.apply_orb_config,
+        ui_mode_broadcaster=presenter.apply_ui_mode,
         quit_handler=request_quit,
     )
     panel_presenter.install()
@@ -670,6 +671,107 @@ def run_headless(config: Config, args) -> int:
             pass
 
 
+def run_headless_service(config: Config) -> int:
+    """无界面模式(ui_mode=headless):常驻服务,不建任何 GUI 窗口。
+
+    与 ``--headless`` 参数的区别:那是**自检**(引擎就绪即退出,冒烟用);
+    这是**运行形态** —— 只有托盘和热键,录音/识别/注入照常工作。
+
+    开发者选项(用户拍板):面板上是 disabled 的第四档,只能改 config
+    手动开启、重启生效 —— 运行时销毁/重建窗口会踩 pywebview 动态建窗
+    的坑(REFACTOR_SPEC 血泪条款 4),不给面板入口。headless 下同样
+    **不做任何故障提示 UI**(托盘气泡之类都不做):托盘图标颜色跟着
+    状态走是唯一反馈,出问题看日志(data/voice_input.log)。
+
+    托盘保留(它是 headless 下唯一的退出通道 —— GUI 子系统没有控制台,
+    Ctrl+C 摸不到)。想切回别的形态:改 config.json 的 ui_mode 再重启。
+    """
+    log = get_logger("main")
+
+    from .host.hotkey import HotkeyManager
+    from .host.tray import Tray, TrayMenuItem
+    from .win32 import clipboard
+
+    clipboard.ensure_owner_window()
+
+    controller = CoreController(config, notifier=notify)
+    hotkey = HotkeyManager(notifier=notify)
+    tray = Tray(notifier=notify, title="Qwen3 语音输入(无界面)")
+
+    def on_core_state(state: AppState) -> None:
+        """托盘图标跟着状态走 —— headless 下唯一的状态反馈。"""
+        icon_state = {
+            "recording": "recording",
+            "processing": "warn",
+            "starting": "warn",
+            "idle": "idle",
+        }.get(state.state, "idle")
+        tray.set_icon_state(icon_state)
+
+    controller.subscribe(on_core_state)
+
+    stop = threading.Event()
+
+    def request_quit() -> None:
+        log.info("收到退出请求")
+        stop.set()
+
+    tray.set_menu([
+        TrayMenuItem("开始 / 停止录音", key="record",
+                     action=lambda: controller.toggle_recording(),
+                     default=True),
+        TrayMenuItem("打开配置文件", key="open_config",
+                     action=_open_config_file),
+        TrayMenuItem("查看日志", key="open_log",
+                     action=lambda: _open_log_file(config)),
+        TrayMenuItem("退出", key="quit", action=request_quit),
+    ])
+
+    def on_hotkey() -> None:
+        log.debug("热键触发")
+        try:
+            controller.toggle_recording()
+        except Exception as e:
+            log.exception("热键处理异常")
+            notify.publish("error", "hotkey_callback_failed",
+                           "快捷键触发的动作失败了", reason=str(e))
+
+    try:
+        hotkey.start()
+        if not hotkey.register(config.hotkey, on_hotkey):
+            log.warning("热键 %s 没注册上,只能用托盘菜单录音", config.hotkey)
+        if not tray.start():
+            log.error("托盘启动失败(headless 下没有其它退出通道,只能结束进程)")
+        controller.start()
+        log.info("无界面模式已启动(ui_mode=headless)。按 %s 开始录音,"
+                 "托盘菜单退出。", config.hotkey)
+        # GUI 模式由 webview.start() 的主循环挡着;这里没有窗口,
+        # 用事件等退出请求(0.5s 一轮,KeyboardInterrupt 也能进来)。
+        while not stop.wait(0.5):
+            pass
+    except KeyboardInterrupt:
+        log.info("收到 Ctrl+C")
+    finally:
+        # 清理顺序与 _shutdown_and_exit 同款:热键是全局资源,先注销。
+        try:
+            hotkey.stop()
+        except Exception:
+            log.debug("热键收尾异常", exc_info=True)
+        try:
+            controller.shutdown()
+        except Exception:
+            log.debug("core 收尾异常", exc_info=True)
+        try:
+            tray.stop()
+        except Exception:
+            log.debug("托盘收尾异常", exc_info=True)
+        try:
+            clipboard.release_ownership()
+        except Exception:
+            pass
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # 趁 sys.argv 还没被动过,把「当初是怎么被拉起来的」记下来 ——
     # 托盘「重启」要靠它原样复刻启动方式(见 _restart_plan)。
@@ -689,9 +791,12 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("=" * 60)
     log.info("Qwen3 语音输入启动  热键=%s  模型=%s  后端=%s",
-             config.hotkey, config.model, config.asr_backend)
+             config.hotkey, config.model, config.backend)
 
     try:
+        if config.ui_mode == "headless":
+            # 界面形态第四档(开发者选项,config 手动开,重启生效)
+            return run_headless_service(config)
         if args.headless:
             return run_headless(config, args)
         return run_gui(config, entry)

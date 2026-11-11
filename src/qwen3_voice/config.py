@@ -28,31 +28,20 @@ log = logging.getLogger("qwen3_voice.config")
 # 面板和胶囊共用这一套 —— 面板改了,胶囊跟着换。
 THEME_MODES = ("auto", "light", "dark")
 
-# 胶囊位置三档:
-#   follow  跟随输入光标(像输入法候选框,贴着光标出现)
-#   bottom  固定在主屏工作区底部居中(原来的行为)
-#   custom  用户拖到哪就记在哪(存相对工作区的逻辑偏移)
-CAPSULE_POSITION_MODES = ("follow", "bottom", "custom")
+# 胶囊位置三档、悬浮球位置三档(follow/pinned/custom)、待机两态
+# (resident/on_demand)均已退役:悬浮球开关 × 待机策略合并成下面这行。
 
-# 常驻悬浮球的位置三档(设计由用户拍板):
-#   follow  跟随输入光标 —— 光标真的聚焦在输入处才露脸,
-#           贴着光标出现(像输入法候选框);位置不归用户管,不可拖
-#   pinned  记住的位置 —— 可拖、持久化(orb_geometry),和 custom 共用
-#           同一份位置;同样只在光标聚焦到输入处才露脸
-#   custom  记住的位置 —— 可拖、持久化,常驻露脸(球是录音入口,随时在)
-#
-# ⚠ 和胶囊的 CAPSULE_POSITION_MODES(follow/bottom/custom)是**两套
-# 独立设计**:档位名相同不代表含义相同(球的 follow 显隐同胶囊 follow,
-# 但球的档里没有 bottom,却有 pinned)。两边各自演化,不许互相参照。
-ORB_POSITION_MODES = ("follow", "pinned", "custom")
-
-# 悬浮球的待机策略两态(悬球窗口的"待机期"怎么过):
-#   resident   窗口常驻,球形态待机(热键反馈即时)
-#   on_demand  待机时整个窗口销毁,零 WebView2/GPU 占用
-#               (热键时再建窗、恢复位置、展开)
-# 与上面的 ORB_POSITION_MODES(位置档)是两回事:一个管"待不待机",
-# 一个管"球在哪儿"。
-ORB_STANDBY_MODES = ("resident", "on_demand")
+# 界面形态四档(悬浮球开关 × 待机策略合并后的单一维度,用户拍板):
+#   orb        悬浮球常驻:屏幕上常驻一颗球,点它开始录音,拖它挪位置
+#   resident   无球,窗口常驻:按热键弹胶囊,终态停留后窗口隐藏
+#   on_demand  按需:**存意图、不存现实** —— config 保存用户选的原值,
+#              运行期按 resident 行为执行(待机销毁/重建窗口会踩
+#              pywebview 动态建窗的坑,未实现);面板 hover 会写明
+#              「暂未实现,当前行为等同常驻」。实现后存量配置无感升级
+#   headless   无界面:不建任何 GUI 窗口,只有托盘和热键的开发者选项,
+#              **只能改 config 手动开启**(重启生效)—— 面板上是
+#              disabled 的第四档:知道存在、不给误触入口
+UI_MODES = ("orb", "resident", "on_demand", "headless")
 
 # 识别后端(互斥,同一时刻只留一个):
 #   local    本地 Qwen3-ASR 模型(transformers,GPU,完全离线)
@@ -78,21 +67,19 @@ PREVIEW_VAD_MODES = ("silero", "energy")
 
 @dataclass
 class OrbConfig:
-    r"""悬浮球的配置(v2 schema 里的嵌套 orb 段)。
+    r"""悬浮球的位置记忆。
 
-    单独一个 dataclass,和 v2 的写法保持一致 —— 球的几何位置、
-    所在显示器、待不待机都收在这一段里,不再散成平铺字段。
+    球的**显示形态**归 ``Config.ui_mode`` 管(合并后那是唯一开关);
+    这里只剩**位置** —— 拖球松手后记下相对工作区的偏移和所在
+    显示器,重启后还原。ui_mode 不是 orb 时这份记忆只是躺着,
+    等哪天切回来再用。
 
     字段:
-        enabled   悬浮球开不开
-        standby   待机策略:resident(窗口常驻) / on_demand(待机时销毁窗口)
-        geometry  球的位置记忆:"dx,dy",相对所在工作区左上角的逻辑像素偏移
-        monitor   球的位置记忆的显示器设备名(如 \\.\DISPLAY1):
-                  还原时先找那块屏,找不到就退回当前屏
+        geometry  "dx,dy",相对所在工作区左上角的逻辑像素偏移
+        monitor   显示器设备名(如 \\.\DISPLAY1):还原时先找那块屏,
+                  找不到就退回当前屏
     """
 
-    enabled: bool = True
-    standby: str = "resident"
     geometry: str = ""
     monitor: str = ""
 
@@ -124,7 +111,7 @@ class Config:
     # ---- 识别后端(本地 / 网络,互斥)
     # local    = 本地 Qwen3-ASR 模型常驻显存,离线、零等待
     # minimax  = MiniMax 平台网络接口,音频出本机,有网络延迟
-    asr_backend: str = "local"
+    backend: str = "local"
     # 网络后端的模型名与端点前缀。
     # 国内站是 api.minimax.cn;海外站改成 https://api.minimax.io。
     # **API Key 不在这里** —— 只从环境变量 MINIMAX_API_KEY 读。
@@ -133,9 +120,8 @@ class Config:
 
     # ---- 音频
     input_device: int | None = None           # None = 自动挑选
-    device_name_hints: list[str] = field(default_factory=lambda: [
-        "USB PnP Audio", "USB Audio", "Realtek HD Audio Mic",
-    ])
+    # 自动挑选麦克风时优先匹配这些名称子串。
+    device_hints: list[str] = field(default_factory=lambda: ["USB"])
     sample_rate: int = 16000                  # ASR 模型要求的采样率;重采样由 qwen_asr 内部完成
     max_duration: float = 120.0
     # 每轮录音结束后把原始音频存成 WAV(调试用)。
@@ -161,54 +147,18 @@ class Config:
     panel_visible: bool = False              # 面板启动时是否显示(默认不常驻,托盘打开)
     show_tray: bool = True
     theme: str = "auto"                      # auto(跟随系统) / light(白天) / dark(黑夜)
-    # 胶囊出现在哪:
-    #   follow  跟着输入光标(默认)
-    #   bottom  固定在主屏工作区底部居中
-    #   custom  用户拖出来的位置(记在 capsule_geometry 里)
-    capsule_position: str = "follow"
+    # 界面形态四档(见文件头 UI_MODES):悬浮球 / 常驻 / 按需 / 无界面。
+    # 默认 orb(球常驻) —— 合并前 orb.enabled 默认开,行为不变。
+    ui_mode: str = "orb"
     # 录音时要不要显示实时预览文字条。关掉之后胶囊只剩波形+计时+按钮,
     # "已输入"/错误提示改在胶囊内的 label 位显示。
     show_preview: bool = True
-    # 自定义模式下记忆的胶囊位置:"dx,dy",相对**所在工作区左上角**的
-    # 逻辑像素偏移(存相对量,换缩放率/换显示器都不飞)。
-    capsule_geometry: str = ""
-    # 自定义模式下记忆的显示器设备名(如 \\.\DISPLAY1):还原时先找到
-    # 那块屏,找不到就退回当前屏。
-    capsule_monitor: str = ""
-    # 常驻悬浮球:屏幕上常驻一颗小球 —— 点它开始录音(展开成胶囊),
-    # 拖它换位置(松手就记住)。默认**关**:关着时行为和以前一模一样
-    # (按热键才弹胶囊),老用户的体验一点不变。
-    floating_orb: bool = False
-    # 悬浮球出现在哪:
-    #   follow  跟随输入光标(默认)—— 光标聚焦在输入框里才露脸,
-    #           贴着光标出现
-    #   custom  用户拖出来的位置(记在 orb_geometry 里)
-    orb_position: str = "follow"
-    # 悬浮球位置记忆:"dx,dy",相对**所在工作区左上角**的逻辑像素偏移。
-    # 和 capsule_geometry 一个路子,但两套位置**互不干扰**:
-    # 球的位置归球,胶囊的位置归胶囊。
-    orb_geometry: str = ""
-    # 悬浮球位置记忆的显示器设备名(如 \\.\DISPLAY1):还原时先找那块屏,
-    # 找不到就退回当前屏。
-    orb_monitor: str = ""
+    # 悬浮球的位置记忆(拖球松手后记住,重启还原;形态归 ui_mode 管)。
+    orb: OrbConfig = field(default_factory=OrbConfig)
 
     # ---- 其它
     log_file: str = ""
     log_level: str = "INFO"
-
-    # ---- v2 schema 新增字段(expand 阶段:与上面的旧字段并存)
-    #
-    # 下面的 backend / device_hints / orb 是 v2 写法,目前**还没有消费方** ——
-    # 引擎和音频仍读旧的 asr_backend / device_name_hints / floating_orb 等。
-    # 等 host 窗口层落地、contract 阶段把旧字段退役时,再统一切到这组。
-    #
-    # ⚠ backend 与旧的 asr_backend、device_hints 与旧的 device_name_hints
-    #   语义相同(只是 v2 改了名),并存期间**不要**两边都当真值用。
-    #   orb 与旧的 floating_orb / orb_position / orb_geometry / orb_monitor
-    #   同理:v2 把球的几何/显示器/待机策略收进了 orb 这一段。
-    backend: str = "local"                     # local / minimax(v2 改名)
-    device_hints: list[str] = field(default_factory=lambda: ["USB"])
-    orb: OrbConfig = field(default_factory=OrbConfig)
 
     # ---------- 校验 ----------
 
@@ -217,10 +167,10 @@ class Config:
         issues: list[str] = []
         if self.model not in ("0.6B", "1.7B"):
             issues.append(f"model 只能是 0.6B 或 1.7B,当前 {self.model!r}")
-        if self.asr_backend not in ASR_BACKENDS:
+        if self.backend not in ASR_BACKENDS:
             issues.append(
-                f"asr_backend 只能是 {' / '.join(ASR_BACKENDS)},"
-                f"当前 {self.asr_backend!r}")
+                f"backend 只能是 {' / '.join(ASR_BACKENDS)},"
+                f"当前 {self.backend!r}")
         if self.sample_rate <= 0:
             issues.append("sample_rate 必须为正数")
         if self.preview_vad not in PREVIEW_VAD_MODES:
@@ -233,38 +183,15 @@ class Config:
         if self.theme not in THEME_MODES:
             issues.append(
                 f"theme 只能是 {' / '.join(THEME_MODES)},当前 {self.theme!r}")
-        if self.capsule_position not in CAPSULE_POSITION_MODES:
+        if self.ui_mode not in UI_MODES:
             issues.append(
-                "capsule_position 只能是 "
-                f"{' / '.join(CAPSULE_POSITION_MODES)},"
-                f"当前 {self.capsule_position!r}")
-        if self.orb_position not in ORB_POSITION_MODES:
-            issues.append(
-                "orb_position 只能是 "
-                f"{' / '.join(ORB_POSITION_MODES)},"
-                f"当前 {self.orb_position!r}")
-
-        # ---- v2 schema 新增字段的校验 ----
-        # 类型检查照 v2 写法(backend 枚举 / device_hints 字符串列表 /
-        # orb.enabled 布尔 / orb.standby 枚举 / orb.geometry、orb.monitor
-        # 字符串),但按本文件的风格统一汇进 issues 列表。
-        if self.backend not in ASR_BACKENDS:
-            issues.append(
-                f"backend 只能是 {' / '.join(ASR_BACKENDS)},"
-                f"当前 {self.backend!r}")
+                f"ui_mode 只能是 {' / '.join(UI_MODES)},当前 {self.ui_mode!r}")
         if not isinstance(self.device_hints, list) or not all(
                 isinstance(h, str) for h in self.device_hints):
             issues.append("device_hints 必须是字符串列表")
         if not isinstance(self.orb, OrbConfig):
             issues.append(f"orb 必须是对象,当前 {type(self.orb).__name__}")
         else:
-            if not isinstance(self.orb.enabled, bool):
-                issues.append("orb.enabled 必须是布尔值")
-            if self.orb.standby not in ORB_STANDBY_MODES:
-                issues.append(
-                    "orb.standby 只能是 "
-                    f"{' / '.join(ORB_STANDBY_MODES)},"
-                    f"当前 {self.orb.standby!r}")
             if self.orb.geometry is not None and not isinstance(
                     self.orb.geometry, str):
                 issues.append("orb.geometry 必须是字符串")
@@ -374,20 +301,18 @@ def load_config(path: Path | None = None) -> Config:
     # 退役的后端值:回退 + **一条** warning。
     #
     # 不崩(老配置不该把程序搞死),也不静默(静默的话用户只会觉得
-    # "切了没反应")。asr_backend 是引擎真正读的那个;backend 是 v2
-    # 的同名影子字段,一并回退，免得它在校验时又报一次问题。
+    # "切了没反应")。
     retired_names: list[str] = []
-    for attr in ("asr_backend", "backend"):
-        raw = str(getattr(cfg, attr, "") or "").strip().lower()
-        fallback = LEGACY_BACKEND_ALIASES.get(raw)
-        if fallback:
-            setattr(cfg, attr, fallback)
-            retired_names.append(raw)
+    raw = str(getattr(cfg, "backend", "") or "").strip().lower()
+    fallback = LEGACY_BACKEND_ALIASES.get(raw)
+    if fallback:
+        cfg.backend = fallback
+        retired_names.append(raw)
     if retired_names:
         # **把退役的值写进日志** —— 用户得看见自己配的是哪个,
         # 才知道该改哪里。
         log.warning("配置里的后端值已退役(%s):已回退为 local —— "
-                    "请把 asr_backend 改成 \"local\" 或 \"minimax\"",
+                    "请把 backend 改成 \"local\" 或 \"minimax\"",
                     " / ".join(sorted(set(retired_names))))
 
     return cfg

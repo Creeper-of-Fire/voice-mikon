@@ -8,10 +8,10 @@
  *
  * 桥接契约(方法名必须与 Python 侧 _PanelApi 逐字一致):
  *   Python → JS : window.__panel.setState / setHealth / setModel / setBackend
- *                 / setTheme / setPreviewEnabled / setOrbEnabled / setStandby
+ *                 / setTheme / setPreviewEnabled / setUiMode
  *                 / setNotice / setHotkey
  *   JS → Python : window.pywebview.api.ready / switch_model / switch_backend
- *                 / set_theme / set_preview / set_orb / set_standby
+ *                 / set_theme / set_preview / set_ui_mode
  *                 / close_panel / quit_app
  *                 / begin_drag / move_window / end_drag
  *
@@ -35,8 +35,11 @@
   // 识别后端：local = 本地模型,minimax = MiniMax 网络接口（互斥）
   var BACKENDS = ['local', 'minimax'];
 
-  // 悬浮球待机策略：resident = 窗口常驻,on_demand = 待机时销毁窗口
-  var STANDBY = ['resident', 'on_demand'];
+  // 界面形态四档（与 Python 侧 config.UI_MODES 一致）：
+  // orb = 悬浮球常驻,resident = 无球窗口常驻,on_demand = 按需
+  // （暂未实现，行为等同 resident）,headless = 无界面（仅 config 手动开，
+  // 面板上 disabled —— 这里仍列出，保证 Python 推来时能正确高亮/归一）
+  var UI_MODES = ['orb', 'resident', 'on_demand', 'headless'];
 
   // 后端健康三态：loading = 加载中,ready = 就绪,failed = 失败
   var HEALTHS = ['loading', 'ready', 'failed'];
@@ -56,8 +59,7 @@
     hotkey: '',             // 当前热键（原始字符串，不含"热键"前缀）
     theme: 'auto',          // 当前主题档位
     preview: true,          // 实时预览文字条是否显示
-    orb: false,             // 常驻悬浮球是否打开
-    standby: 'resident',    // 悬浮球待机策略
+    uiMode: 'orb',          // 界面形态四档：悬浮球 / 常驻 / 按需 / 无界面
     backend: 'local'        // 当前识别后端
   };
 
@@ -243,26 +245,19 @@
     }
   }
 
-  /* 常驻悬浮球开关:打开后屏幕上常驻一颗小球,点它开始录音,
-   * 拖它挪位置;关掉后回到"按热键才弹胶囊"的老样子。 */
-  function applyOrb(enabled) {
+  /* 界面形态四档(悬浮球开关 × 待机策略合并后的同一维度):
+   * orb = 球常驻,resident = 无球窗口常驻,on_demand = 按需(暂未实现,
+   * 行为等同 resident;选择仍会存进 config,实现后无感升级)。
+   * headless 档按钮是 disabled 的,点击事件到不了这里。 */
+  function applyUiMode(mode) {
     ensureDom();
-    ui.orb = !!enabled;
-    if (el.orbToggle) {
-      el.orbToggle.checked = ui.orb;
-    }
-  }
+    var m = UI_MODES.indexOf(mode) >= 0 ? mode : 'orb';
+    ui.uiMode = m;
 
-  /* 悬浮球的待机策略:resident(窗口常驻) / on_demand(待机时销毁窗口)。 */
-  function applyStandby(mode) {
-    ensureDom();
-    var m = STANDBY.indexOf(mode) >= 0 ? mode : 'resident';
-    ui.standby = m;
-
-    if (el.standbySeg) {
-      var items = el.standbySeg.querySelectorAll('.seg-item');
+    if (el.uiModeSeg) {
+      var items = el.uiModeSeg.querySelectorAll('.seg-item');
       for (var i = 0; i < items.length; i++) {
-        var isActive = items[i].getAttribute('data-standby') === m;
+        var isActive = items[i].getAttribute('data-ui-mode') === m;
         items[i].classList.toggle('is-active', isActive);
       }
     }
@@ -483,28 +478,19 @@
       });
     }
 
-    // 常驻悬浮球开关
-    if (el.orbToggle) {
-      el.orbToggle.addEventListener('change', function () {
-        var on = !!el.orbToggle.checked;
-        applyOrb(on);                 // 先本地生效，Python 随后会用 setOrbEnabled 校正
-        callApi('set_orb', on);
-      });
-    }
-
-    // 悬浮球的待机策略
-    if (el.standbySeg) {
-      el.standbySeg.addEventListener('click', function (e) {
+    // 界面形态四档（disabled 的「无界面」项不会派发 click）
+    if (el.uiModeSeg) {
+      el.uiModeSeg.addEventListener('click', function (e) {
         var item = e.target && e.target.closest ? e.target.closest('.seg-item') : null;
         if (!item) {
           return;
         }
-        var mode = item.getAttribute('data-standby');
+        var mode = item.getAttribute('data-ui-mode');
         if (!mode) {
           return;
         }
-        applyStandby(mode);   // 先本地高亮，Python 随后会用 setStandby 校正
-        callApi('set_standby', mode);
+        applyUiMode(mode);       // 先本地高亮，Python 随后会用 setUiMode 校正
+        callApi('set_ui_mode', mode);
       });
     }
 
@@ -549,11 +535,8 @@
     setPreviewEnabled: function (enabled) {
       applyPreview(enabled);
     },
-    setOrbEnabled: function (enabled) {
-      applyOrb(enabled);
-    },
-    setStandby: function (mode) {
-      applyStandby(mode);
+    setUiMode: function (mode) {
+      applyUiMode(mode);
     },
     setBackend: function (kind) {
       applyBackend(kind);
@@ -579,8 +562,7 @@
     el.netModelText = $('netModelText');
     el.themeSeg = $('themeSeg');
     el.previewToggle = $('previewToggle');
-    el.orbToggle = $('orbToggle');
-    el.standbySeg = $('standbySeg');
+    el.uiModeSeg = $('uiModeSeg');
     el.hotkey = $('hotkeyLabel');
     el.notice = $('notice');
   }
@@ -601,8 +583,7 @@
     applyHotkey(DEFAULT_HOTKEY);
     applyTheme('auto');        // Python 就绪后会用 setTheme 推真实档位
     applyPreview(true);        // 同理:setPreviewEnabled 会推真实值
-    applyOrb(false);           // 同理:setOrbEnabled 会推真实值
-    applyStandby('resident');  // 同理:setStandby 会推真实档位
+    applyUiMode('orb');        // 同理:setUiMode 会推真实档位
     applyBackend('local');     // 同理:setBackend 会推真实后端
 
     bindEvents();

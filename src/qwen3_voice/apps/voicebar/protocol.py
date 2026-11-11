@@ -83,9 +83,3 @@ DWELL_SECONDS: dict[str, float | None] = {
 #   can_copy 有没有可复制的原文(bool):带原文的错误态为 true。
 #            这类错误**不自动收回**,只有 dismiss 或新一轮录音才收
 #   reason   机器可读的原因码(暂不参与渲染,留着以后排查)
-
-STANDBY_RESIDENT = "resident"
-
-STANDBY_ON_DEMAND = "on_demand"
-
-STANDBY_MODES = (STANDBY_RESIDENT, STANDBY_ON_DEMAND)

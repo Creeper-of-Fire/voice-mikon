@@ -15,11 +15,11 @@
 ``_NOTICE_KINDS``。
 
 配置写回也归这一层:面板改的是配置(config.theme / show_preview /
-orb.enabled / orb.standby),主题还要**立即推给胶囊** —— 面板和胶囊共用
+ui_mode),主题还要**立即推给胶囊** —— 面板和胶囊共用
 一套主题,面板改了胶囊不跟着换,用户会觉得"两个窗口不是一套东西"。
-悬浮球的开关/待机策略同理:面板把球关掉,胶囊那边要当场把球收起来,
-不然用户点了开关什么都没发生(V1 就是即时的)。胶囊那侧的推送由装配层
-注入(``theme_broadcaster`` / ``orb_broadcaster``),本层不认识胶囊。
+界面形态(四档单选)同理:面板把球关掉,胶囊那边要当场把球收起来,
+不然用户点了档位什么都没发生(V1 就是即时的)。胶囊那侧的推送由装配层
+注入(``theme_broadcaster`` / ``ui_mode_broadcaster``),本层不认识胶囊。
 """
 
 from __future__ import annotations
@@ -38,8 +38,11 @@ log = get_logger("apps.panel")
 # 不该把整个配置模块拖进来。
 THEME_MODES = ("auto", "light", "dark")
 
-# 悬浮球待机策略(resident / on_demand)—— 与 config.ORB_STANDBY_MODES 一致。
-STANDBY_MODES = ("resident", "on_demand")
+# 界面形态四档(悬浮球/常驻/按需/无界面)—— 与 config.UI_MODES 一致。
+# 同 THEME_MODES 的理由:这里抄一份而不是 import config,presenter
+# 只跟"档位名字"打交道。headless 档面板上 disabled(只能 config 手动开),
+# 但校验仍认它 —— 防 config 里真配了 headless 时读值方法乱归一。
+UI_MODES = ("orb", "resident", "on_demand", "headless")
 
 # 这些通知的 kind 会变成面板的提示语。
 #
@@ -96,13 +99,9 @@ class _PanelApi:
         """开关录音时的实时预览文字条。"""
         self._presenter.set_preview(bool(enabled))
 
-    def set_orb(self, enabled: bool) -> None:
-        """开关常驻悬浮球。"""
-        self._presenter.set_orb(bool(enabled))
-
-    def set_standby(self, mode: str) -> None:
-        """切换悬浮球的待机策略(resident / on_demand)。"""
-        self._presenter.set_standby(mode)
+    def set_ui_mode(self, mode: str) -> None:
+        """切换界面形态(悬浮球 / 常驻 / 按需;无界面档在前端是 disabled)。"""
+        self._presenter.set_ui_mode(mode)
 
     def close_panel(self) -> None:
         """隐藏面板(不是退出程序)。"""
@@ -135,12 +134,12 @@ class PanelPresenter:
     def __init__(self, core: Any, config: Any = None,
                  notifier: NotificationHub | None = None,
                  theme_broadcaster: Callable[[str], None] | None = None,
-                 orb_broadcaster: Callable[[bool, str], None] | None = None,
+                 ui_mode_broadcaster: Callable[[str], None] | None = None,
                  quit_handler: Callable[[], None] | None = None) -> None:
         """``core`` 提供状态快照与命令;``config`` 是配置本体(读写都在这);
         ``notifier`` 是通知流(拒绝/失败的原因从这儿来);
         ``theme_broadcaster`` 把主题推给**另一个窗口**(胶囊),由装配层注入;
-        ``orb_broadcaster`` 把悬浮球的开关/待机策略推给同一个窗口,
+        ``ui_mode_broadcaster`` 把界面形态推给同一个窗口,
         由装配层注入(主题一条的同款模式);
         ``quit_handler`` 是"退出程序"的收尾路径(与托盘同一条),由装配层注入。
         """
@@ -148,7 +147,7 @@ class PanelPresenter:
         self._config = config
         self._notifier = notifier if notifier is not None else notify
         self._theme_broadcaster = theme_broadcaster
-        self._orb_broadcaster = orb_broadcaster
+        self._ui_mode_broadcaster = ui_mode_broadcaster
         self._quit_handler = quit_handler
         self._lock = threading.RLock()
         self._closed = False
@@ -230,8 +229,7 @@ class PanelPresenter:
         # 配置这几项是**低频**的:只在值真的变了的时候推。
         self._push(panel, "set_theme", self._theme_mode())
         self._push(panel, "set_preview_enabled", self._preview_enabled())
-        self._push(panel, "set_orb_enabled", self._orb_enabled())
-        self._push(panel, "set_standby", self._standby_mode())
+        self._push(panel, "set_ui_mode", self._ui_mode())
         self._push(panel, "set_hotkey", self._hotkey())
 
     def _push(self, panel: Any, method: str, *args: Any) -> None:
@@ -335,55 +333,45 @@ class PanelPresenter:
                 log.debug("保存预览开关失败: %s", e)
         self.push_full_state()
 
-    def set_orb(self, enabled: bool) -> None:
-        """开关常驻悬浮球:存配置 → 推胶囊(当场生效)→ 推面板。
+    def set_ui_mode(self, mode: str) -> None:
+        """切换界面形态:存配置 → 推胶囊(当场生效)→ 推面板。
 
         胶囊那侧必须当场收到:只写 config 的话,球还挂在屏幕上,
-        用户会觉得"开关没用"。
+        用户会觉得"切了没反应"。
+
+        on_demand 存的是**意图**(config 保存原值,运行期按无球
+        形态执行);headless 到不了这里(无界面档在前端 disabled,
+        而真 headless 下面板根本不存在)—— 防御性忽略。
         """
+        mode = str(mode or "orb").strip().lower()
+        if mode not in UI_MODES or mode == "headless":
+            log.info("忽略非法的界面形态 %r", mode)
+            return
         with self._lock:
             if self._closed:
                 return
         if self._config is not None:
             try:
-                self._config.orb.enabled = bool(enabled)
+                self._config.ui_mode = mode
                 self._config.save()
             except Exception as e:
-                log.debug("保存悬浮球开关失败: %s", e)
-        self._broadcast_orb()
+                log.debug("保存界面形态失败: %s", e)
+        self._broadcast_ui_mode()
         self.push_full_state()
 
-    def set_standby(self, mode: str) -> None:
-        """切换悬浮球的待机策略:存配置 → 推胶囊 → 推面板。"""
-        mode = str(mode or "resident").strip().lower()
-        if mode not in STANDBY_MODES:
-            log.info("未知待机策略 %r,按 resident 处理", mode)
-            mode = "resident"
-        with self._lock:
-            if self._closed:
-                return
-        if self._config is not None:
-            try:
-                self._config.orb.standby = mode
-                self._config.save()
-            except Exception as e:
-                log.debug("保存待机策略失败: %s", e)
-        self._broadcast_orb()
-        self.push_full_state()
-
-    def _broadcast_orb(self) -> None:
-        """把悬浮球的开关/待机策略推给另一个窗口(胶囊),当场生效。
+    def _broadcast_ui_mode(self) -> None:
+        """把界面形态推给另一个窗口(胶囊),当场生效。
 
         和主题那条同款模式(``theme_broadcaster``):本层不认识胶囊,
         推给谁、怎么推由装配层决定。
         """
-        broadcaster = self._orb_broadcaster
+        broadcaster = self._ui_mode_broadcaster
         if broadcaster is None:
             return
         try:
-            broadcaster(self._orb_enabled(), self._standby_mode())
+            broadcaster(self._ui_mode())
         except Exception as e:
-            log.debug("推送悬浮球设置给另一个窗口失败: %s", e)
+            log.debug("推送界面形态给另一个窗口失败: %s", e)
 
     def close_panel(self) -> None:
         """隐藏面板(不退出程序)。"""
@@ -432,14 +420,11 @@ class PanelPresenter:
     def _preview_enabled(self) -> bool:
         return bool(getattr(self._config, "show_preview", True))
 
-    def _orb_enabled(self) -> bool:
-        orb = getattr(self._config, "orb", None)
-        return bool(getattr(orb, "enabled", True))
-
-    def _standby_mode(self) -> str:
-        orb = getattr(self._config, "orb", None)
-        mode = str(getattr(orb, "standby", "resident") or "resident").strip().lower()
-        return mode if mode in STANDBY_MODES else "resident"
+    def _ui_mode(self) -> str:
+        """当前界面形态(四档之一),读不到/不认识按 orb。"""
+        mode = str(getattr(self._config, "ui_mode", "orb")
+                   or "orb").strip().lower()
+        return mode if mode in UI_MODES else "orb"
 
     def _hotkey(self) -> str:
         return str(getattr(self._config, "hotkey", "") or "")

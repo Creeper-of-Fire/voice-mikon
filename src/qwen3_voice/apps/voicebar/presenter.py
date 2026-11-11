@@ -5,6 +5,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from ...config import UI_MODES
 from ...core.state import (STATE_IDLE, STATE_PROCESSING, STATE_RECORDING,
                             STATE_STARTING, AppState)
 from ...logging_setup import get_logger
@@ -56,13 +57,13 @@ class VoiceBarPresenter:
         self._preview_text = ""
         self._theme = str(getattr(config, "theme", "auto") or "auto")
         self._show_preview = bool(getattr(config, "show_preview", True))
-        self._standby = str(
-            getattr(getattr(config, "orb", None), "standby",
-                    protocol.STANDBY_RESIDENT) or protocol.STANDBY_RESIDENT)
-        # 悬浮球开关:记住上一次的值,才能判断面板这次是不是"变了"
-        # (变了才动窗口 —— 值没变就不动作)。
-        self._orb_enabled = bool(
-            getattr(getattr(config, "orb", None), "enabled", True))
+        # 界面形态四档(悬浮球/常驻/按需/无界面)。胶囊这边只关心
+        # **是不是 orb**:orb 露球,其余形态无球(窗口该藏就藏,
+        # 由 host 层的 _orb_enabled 同款判断兜底)。on_demand 存的
+        # 是意图,运行期按无球形态执行 —— 旧的"球开着+待机藏球"
+        # 组合随开关合并一起退役了。
+        mode = str(getattr(config, "ui_mode", "orb") or "orb").strip().lower()
+        self._ui_mode = mode if mode in UI_MODES else "orb"
 
         self._core_state: AppState | None = None
         self._capsule: Any = None
@@ -97,7 +98,7 @@ class VoiceBarPresenter:
                 self._mode = protocol.MODE_STARTING
             else:
                 self._mode = protocol.MODE_ORB
-            standby = self._standby
+            ui_mode = self._ui_mode
             theme = self._theme
             show_preview = self._show_preview
 
@@ -108,7 +109,8 @@ class VoiceBarPresenter:
         capsule.set_preview_enabled(show_preview)
         # 启动态也走同一条 set_mode:显示状态只有一个出口。
         self._push_mode()
-        if standby == protocol.STANDBY_ON_DEMAND:
+        if ui_mode != "orb":
+            # 无球形态(resident / on_demand):窗口收着,热键才弹胶囊。
             capsule.hide_orb()
         # 启动时的后端不可用:错误文案按 dwell 表走(和运行中一样)。
         self._schedule_dwell(protocol.MODE_ERROR, protocol.MODE_ERROR)
@@ -118,44 +120,41 @@ class VoiceBarPresenter:
             self._closed = True
             self._cancel_dwell()
 
-    # ---------- 悬浮球配置(面板推过来) ----------
+    # ---------- 界面形态(面板推过来) ----------
 
-    def apply_orb_config(self, enabled: bool, standby: str) -> None:
-        """面板改了悬浮球的开关/待机策略:当场兑现。
+    def apply_ui_mode(self, mode: str) -> None:
+        """面板改了界面形态(四档单选):当场兑现。
 
-        面板那边改配置是**即时**的(V1 就是这样),这边不能只写 config ——
-        悬浮球的显隐得当场兑现,不然用户点了开关什么都没发生。
+        面板那边改配置是**即时**的,这边不能只写 config —— 球的
+        显隐得当场兑现,不然用户点了档位什么都没发生。
 
-        ``enabled`` 变了才动窗口(值没变就不动作):
+        - orb:露球(常驻)。
+        - resident / on_demand:无球,把球收起来(``capsule.hide_orb``)。
+          正在录音时这一轮的胶囊还得留着 —— 那是 capsule 自己的
+          语义,这边不插手。
+        - headless:面板在 headless 下根本不存在,这个值到不了这里;
+          防御性收着即可。
 
-        - 变 False:把球收起来(``capsule.hide_orb``)。正在录音时这一轮
-          的胶囊还得留着 —— 那是 capsule 自己的语义,这边不插手。
-        - 变 True:恢复球。常驻(resident)露球;按需(on_demand)仍旧收着
-          —— 见 ``start``:on_demand 待机时球不露脸,热键时才出来。
-
-        ``standby`` 只影响**后续**的收回:运行期读它的只有
-        ``_on_dwell_expired``(终态停完到点回球时收不收)。所以只改
-        待机策略时,当场不动窗口。
+        ``mode`` 变了才动窗口(值没变就不动作)。
         """
-        standby = str(standby or protocol.STANDBY_RESIDENT).strip().lower()
-        if standby not in protocol.STANDBY_MODES:
-            standby = protocol.STANDBY_RESIDENT
+        mode = str(mode or "orb").strip().lower()
+        if mode not in UI_MODES:
+            mode = "orb"
         with self._lock:
             if self._closed:
                 return
-            changed = bool(enabled) != self._orb_enabled
-            self._orb_enabled = bool(enabled)
-            self._standby = standby
-            orb_enabled = self._orb_enabled
+            changed = mode != self._ui_mode
+            self._ui_mode = mode
+            orb_mode = mode == "orb"
         if not changed:
             return
         capsule = self._capsule
         if capsule is None:
             return
-        if not orb_enabled or standby == protocol.STANDBY_ON_DEMAND:
-            capsule.hide_orb()
-        else:
+        if orb_mode:
             capsule.show_orb()
+        else:
+            capsule.hide_orb()
 
     def _on_core_state(self, state: AppState) -> None:
         with self._lock:
@@ -493,9 +492,7 @@ class VoiceBarPresenter:
             self._can_copy = False
             self._reason = ""
             self._preview_text = ""
-            standby = self._standby
         self._push_mode()
-        if standby == protocol.STANDBY_ON_DEMAND:
-            capsule = self._capsule
-            if capsule is not None:
-                capsule.hide_orb()
+        # 回球形态后:orb 档窗口自然留着(前端收回球形态);无球档
+        # (resident / on_demand)由 host 层在 MODE_ORB 时把窗口藏掉
+        # (capsule._hide 的语义),这里不再需要 standby 特判。

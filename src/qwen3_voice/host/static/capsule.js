@@ -714,20 +714,17 @@
     }, WAVEFORM_START_DELAY_MS);
   }
 
-  /* 球的位置档位(follow / pinned / custom)。
-   *
-   * 只有 follow 档不响应拖动 —— pinned/custom 的位置都归用户管
-   * (共用一份持久化的 orb_geometry),拖了会记住。follow 的位置由
-   * 光标决定,拖了也会被拉回去:直接不响应,光标形状也跟着改掉,
-   * 别给出"能拖"的假象(orb-follow class 给 CSS 压 cursor 用)。 */
-  var ORB_POSITION_MODES = ['follow', 'pinned', 'custom'];
+  /* 球的位置:V2 只有"记住的位置"这一档(可拖、持久化,
+   * config.orb.geometry)—— 位置档位(follow/pinned/custom)已随
+   * 重构退役。常量保留是为了 setOrbPosition 的入参校验。 */
+  var ORB_POSITION_MODES = ['custom'];
 
   function applyOrbPosition(mode) {
-    var m = ORB_POSITION_MODES.indexOf(mode) >= 0 ? mode : 'follow';
+    var m = ORB_POSITION_MODES.indexOf(mode) >= 0 ? mode : 'custom';
     ui.orbPosition = m;
-    ui.orbDraggable = (m !== 'follow');
+    ui.orbDraggable = true;   // 唯一档"记住的位置"始终可拖
     if (document.body) {
-      document.body.classList.toggle('orb-follow', m === 'follow');
+      document.body.classList.remove('orb-follow');
     }
   }
 
@@ -1662,7 +1659,7 @@
     applyPositionMode('follow');   // 位置档位已退役:这里只负责挂上 can-drag
     applyPreviewEnabled(true);      // 同理:setPreviewEnabled 会推真实值
     applyOrbMode(false);             // 同理:setOrbMode 会推真实值
-    applyOrbPosition('follow');       // 同理:setOrbPosition 会推真实值
+    applyOrbPosition('custom');     // 唯一档:Python 启动时也会推一次同值
 
     bindEvents();
 

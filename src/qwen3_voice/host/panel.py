@@ -24,10 +24,10 @@
 Python 与前端之间的桥接契约:
 
   Python → JS   window.__panel.setState / setHealth / setModel / setBackend
-                / setTheme / setPreviewEnabled / setOrbEnabled / setStandby
+                / setTheme / setPreviewEnabled / setUiMode
                 / setNotice / setHotkey
   JS → Python   window.pywebview.api.ready / switch_model / switch_backend
-                / set_theme / set_preview / set_orb / set_standby
+                / set_theme / set_preview / set_ui_mode
                 / close_panel / quit_app
                 / begin_drag / move_window / end_drag
 
@@ -245,13 +245,9 @@ class VoicePanel:
         """要不要显示实时预览文字条。"""
         self._call_js("setPreviewEnabled", bool(enabled))
 
-    def set_orb_enabled(self, enabled: bool) -> None:
-        """常驻悬浮球开不开。"""
-        self._call_js("setOrbEnabled", bool(enabled))
-
-    def set_standby(self, mode: str) -> None:
-        """悬浮球待机策略(resident / on_demand)。"""
-        self._call_js("setStandby", str(mode or "resident"))
+    def set_ui_mode(self, mode: str) -> None:
+        """界面形态四档(悬浮球 / 常驻 / 按需 / 无界面)。"""
+        self._call_js("setUiMode", str(mode or "orb"))
 
     def set_notice(self, text: str) -> None:
         """操作提示(切换的进展/拒绝/失败)。"""

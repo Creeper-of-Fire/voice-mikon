@@ -63,23 +63,19 @@
         </div>
       </div>
 
-      <!-- 常驻悬浮球:屏幕上常驻一颗小球,点它开始录音,拖它挪位置。 -->
+      <!-- 界面形态:一行四档单选 —— 悬浮球开关 × 待机策略合并后的同一维度。
+           「按需」暂未实现(存意图,当前行为等同「常驻」,hover 写明);
+           「无界面」是开发者选项,只能改 config 手动开启(重启生效),
+           面板上 disabled —— disabled 元素不触发自身 title,hover 文案
+           挂在父容器(seg)上。 -->
       <div class="option-row">
-        <span class="row-label">悬浮球</span>
-        <label class="switch" id="orbSwitch" title="屏幕上常驻一颗悬浮球:点它开始录音,拖它可以挪位置">
-          <input type="checkbox" id="orbToggle">
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-        </label>
-      </div>
-
-      <!-- 悬浮球的待机策略:窗口常驻 / 待机时销毁窗口(零占用)。
-           这是"待不待机",和"球在哪儿"是两回事 —— 位置档位已退役,
-           这里只留待机这一档。 -->
-      <div class="option-row">
-        <span class="row-label">待机</span>
-        <div class="seg is-text" id="standbySeg" role="group" aria-label="悬浮球待机策略">
-          <button class="seg-item is-active" type="button" data-standby="resident" title="窗口常驻:球一直待在屏幕上,热键反馈即时">常驻</button>
-          <button class="seg-item" type="button" data-standby="on_demand" title="待机时整个窗口销毁:零 WebView2/GPU 占用,热键时再拉起">按需</button>
+        <span class="row-label">界面</span>
+        <div class="seg is-text" id="uiModeSeg" role="group" aria-label="界面形态"
+             title="「无界面」是开发者选项:在 data/config.json 里把 ui_mode 设为 headless 并重启(不建任何窗口,只有托盘和热键)">
+          <button class="seg-item is-active" type="button" data-ui-mode="orb" title="屏幕上常驻一颗悬浮球:点它开始录音,拖它挪位置">悬浮球</button>
+          <button class="seg-item" type="button" data-ui-mode="resident" title="无悬浮球:按热键弹胶囊,终态停留后窗口隐藏">常驻</button>
+          <button class="seg-item" type="button" data-ui-mode="on_demand" title="暂未实现,当前行为等同「常驻」:选择会被保存,实现后自动生效">按需</button>
+          <button class="seg-item" type="button" data-ui-mode="headless" disabled title="开发者选项:在 data/config.json 里手动开启(重启生效)">无界面</button>
         </div>
       </div>
 

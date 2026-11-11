@@ -266,6 +266,13 @@ class PanelPresenter:
         if panel is None:
             return
         panel.on_frontend_ready()
+        # 就绪前的所有推送都被 _frontend_ready 门控丢弃过 —— 装配期的
+        # push_full_state、以及模型加载就绪那波 _update_state 都可能
+        # 赶在前端加载完之前发生(MiniMax 后端 load 只要 0.2s,而 WebView
+        # 加载页面要几秒)。不重推的话,面板会一直显示前端自己的默认值
+        # (典型症状:引擎已是 minimax,面板却显示"本地")。就绪即重推全量,
+        # 这正是"快照订阅:新订阅者立刻收到当前快照"的应有语义。
+        self.push_full_state()
 
     def switch_model(self, tag: str) -> None:
         """切模型。拒绝/失败由通知流反馈(见模块 docstring)。"""

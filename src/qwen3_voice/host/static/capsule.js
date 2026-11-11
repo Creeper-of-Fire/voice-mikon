@@ -22,8 +22,13 @@
  *                 / setPreview / setTheme / setPreviewEnabled
  *                 / setOrbMode / setOrbPosition / setOrbHint
  *   JS → Python : window.pywebview.api.ready / cancel_recording / stop_recording
- *                 / update_regions / move_capsule / begin_drag / end_drag
- *                 / copy_result / start_recording / move_orb / dismiss
+ *                 / update_regions / copy_result / start_recording / dismiss
+ *
+ * ⚠ **模块私有**(拖拽 composable 内部使用,业务侧勿直接调用):
+ *                 move_orb / move_capsule / begin_drag / end_drag
+ *   这四个是"拖拽怎么落到窗口上"的实现细节。消费侧只需要
+ *   makeDraggable(把手, {...}) —— 自己拼 begin/move/end 序列的话,
+ *   焦点冻结、位置记忆这两处很容易跟着错。
  *
  * ⚠ 显示状态的**唯一入口**是 setMode(mode, payload):Python(presenter)
  * 推 mode,前端只演、不决策 —— 展开/收回/淡入的速度与曲线都是前端
@@ -430,6 +435,180 @@
     }
   }
 
+  /* ==================== 拖拽 composable ==================== */
+
+  /* makeDraggable(handleEl, opts):把"按住 → 拖 → 松手"封成一块能复用的。
+   *
+   * 为什么要有这层:球和胶囊拖的是**同一个窗口**、走的是**同一条**
+   * Python 路径,差别只有"什么时候算拖动"和"拖动中发哪个 API"。以前
+   * 两边各写一套 mousedown/mousemove/mouseup,于是"5px 判据 / 排除
+   * 按钮 / 位置换算 / 样式类 / begin-move-end 序列"这些约定要各记一遍,
+   * 改一边容易漏另一边。现在只有这一份,消费侧一行 makeDraggable。
+   *
+   * opts:
+   *   threshold     位移判据(px):按下后位移超过它才算"在拖动"。球=5
+   *                 (区分"点球开始录音"和"拖球挪位置");胶囊=0,非按钮
+   *                 区按下即拖。
+   *   move          拖动中推送位置的 API 名(move_orb / move_capsule)。
+   *   draggingClass 拖动期间挂到 body 的样式类(球/胶囊各一个)。
+   *   throttle      位置推送的发法:'sync' = 每个 mousemove 事件同步发
+   *                 一次;'raf' = 每帧最多一次(rAF 节流)。
+   *   filter        function(e):返回 true 表示这次按下**不**启动拖动
+   *                 (胶囊/球都要排除 closest('button'))。
+   *   enabled       function():当前形态是否响应这套拖动(球形态 vs
+   *                 胶囊形态)。默认恒响应。
+   *   dragEnabled   function():当前是否**允许**真的拖。false 时仍然
+   *                 跟踪按下/松手(球在跟随档拖不动,但"点球开始录音"
+   *                 还得靠按下/松手判定)。
+   *   onClick       function(e):松手时判定为"点击而非拖动"的回调
+   *                 (球的"点一下开始录音"走这里)。 */
+  function makeDraggable(handleEl, opts) {
+    if (!handleEl) {
+      return;
+    }
+    var threshold = opts.threshold || 0;
+    var useRaf = (opts.throttle || 'raf') === 'raf';
+    var state = {
+      pressing: false,     // 按下了,还在等松手
+      dragging: false,     // 已经算"在拖动"(越过阈值;粘滞,不回退)
+      dragEnabled: false,  // 这一轮允许真的拖
+      startScreenX: 0,
+      startScreenY: 0,
+      startWinX: 0,
+      startWinY: 0,
+      pending: null,       // 还没发出去的那一帧鼠标位置
+      raf: 0
+    };
+
+    // 从按下点到当前点的位移(屏幕坐标 = CSS 逻辑像素)
+    function moved(e) {
+      var dx = e.screenX - state.startScreenX;
+      var dy = e.screenY - state.startScreenY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // 发**绝对目标位置**,不是增量:某一次 IPC 丢了也不漂
+    // (某一次调用丢了或慢了,下一次直接覆盖)。
+    function send(e) {
+      var x = state.startWinX + (e.screenX - state.startScreenX);
+      var y = state.startWinY + (e.screenY - state.startScreenY);
+      if (useRaf && x === state.startWinX && y === state.startWinY) {
+        // 位置没变就不发
+        return;
+      }
+      callApi(opts.move, x, y);
+    }
+
+    // 把积攒的那一帧发出去(rAF 节流路径)
+    function flush() {
+      state.raf = 0;
+      var e = state.pending;
+      state.pending = null;
+      if (!e || !state.pressing) {
+        return;
+      }
+      send(e);
+    }
+
+    function onMove(e) {
+      if (!state.pressing || !state.dragEnabled) {
+        return;
+      }
+      if (!state.dragging) {
+        // 阈值内还只是"可能手抖":不算拖动
+        if (threshold > 0 && moved(e) <= threshold) {
+          return;
+        }
+        state.dragging = true;
+        if (document.body) {
+          document.body.classList.add(opts.draggingClass);
+        }
+      }
+      if (!useRaf) {
+        send(e);
+        return;
+      }
+      state.pending = e;
+      if (!state.raf) {
+        state.raf = requestAnimationFrame(flush);
+      }
+    }
+
+    function onUp(e) {
+      if (!state.pressing) {
+        return;
+      }
+      state.pressing = false;
+      document.removeEventListener('mousemove', onMove, false);
+      document.removeEventListener('mouseup', onUp, false);
+      if (document.body) {
+        document.body.classList.remove(opts.draggingClass);
+      }
+      if (state.raf) {
+        cancelAnimationFrame(state.raf);
+        state.raf = 0;
+      }
+      state.pending = null;
+      var wasDragging = state.dragging;
+      state.dragging = false;
+      if (!wasDragging && !state.dragEnabled && e) {
+        // 这一轮压根不能拖,但**按着划走**也不算"点了一下" ——
+        // 否则用户随手一划就莫名其妙开始录音。
+        wasDragging = moved(e) > threshold;
+      }
+      // 松手:归还焦点(点球那一下把前台激活到胶囊了)
+      callApi('end_drag');
+      if (!wasDragging && opts.onClick) {
+        opts.onClick(e);
+      }
+    }
+
+    function onDown(e) {
+      if (e.button !== 0) {
+        return;
+      }
+      if (opts.filter && opts.filter(e)) {
+        return;
+      }
+      if (opts.enabled && !opts.enabled()) {
+        return;
+      }
+      state.pressing = true;
+      state.dragging = false;
+      state.dragEnabled = opts.dragEnabled ? !!opts.dragEnabled() : true;
+      state.startScreenX = e.screenX;
+      state.startScreenY = e.screenY;
+      // 窗口在屏幕上的位置:拖动的基准点。窗口自己会动,基准只能取
+      // 按下那一刻的值,之后一律发绝对目标。
+      state.startWinX = window.screenX;
+      state.startWinY = window.screenY;
+      state.pending = null;
+      if (state.dragEnabled && threshold <= 0) {
+        // 没有位移判据(胶囊):按下就算在拖,样式类立刻挂上,
+        // 和"按住胶囊马上变 grabbing 手势"一致。
+        state.dragging = true;
+        if (document.body) {
+          document.body.classList.add(opts.draggingClass);
+        }
+      }
+      document.addEventListener('mousemove', onMove, false);
+      document.addEventListener('mouseup', onUp, false);
+      if (state.dragEnabled) {
+        // 告诉 Python:拖动期间别抢回焦点(焦点来回跳会拖垮
+        // WebView2 的鼠标捕获),松手时统一还回去。
+        callApi('begin_drag');
+      }
+      e.preventDefault();
+    }
+
+    handleEl.addEventListener('mousedown', onDown, false);
+  }
+
+  /* 点在按钮上(✕ / ✓ / 复制)时不启动拖动 —— 按钮自己有点击语义。 */
+  function noButtons(e) {
+    return !!(e.target && e.target.closest && e.target.closest('button'));
+  }
+
   /* 预览开关:关掉之后文字条整块消失(胶囊只剩波形+计时+按钮),
    * "已输入"/错误提示改在胶囊里的 label 位显示。 */
   function applyPreviewEnabled(enabled) {
@@ -469,15 +648,6 @@
   // e.screenX/Y 就是 CSS 像素(= 逻辑像素),5px 的意思就是"手抖一下"。
   // 太小:想点击却被当成拖动,球不响应;太大:想拖动却触发了录音。
   var ORB_DRAG_THRESHOLD = 5;
-
-  var orbDrag = {
-    pressing: false,
-    dragging: false,
-    startScreenX: 0,
-    startScreenY: 0,
-    startWinX: 0,
-    startWinY: 0
-  };
 
   // 球形态 ↔ 胶囊形态。动效全在 CSS 里(见 capsule.css 的 orb-mode 一节),
   // 这里只切 class。
@@ -584,87 +754,31 @@
    * 到点了 Python 会再推一次 mode 过来,前端照着演。
    * 前端只留"怎么收"(动画、类名)。 */
 
-  function onOrbMouseDown(e) {
-    if (!ui.orbMode || e.button !== 0) {
-      return;
-    }
-    // 点在按钮上(展开态的 ✕ / ✓ / 复制)不算拖球
-    if (e.target && e.target.closest && e.target.closest('button')) {
-      return;
-    }
-    orbDrag.pressing = true;
-    orbDrag.dragging = false;
-    orbDrag.startScreenX = e.screenX;
-    orbDrag.startScreenY = e.screenY;
-    // 窗口在屏幕上的位置:拖动的基准点(和面板/胶囊同一套机制)
-    orbDrag.startWinX = window.screenX;
-    orbDrag.startWinY = window.screenY;
-    if (ui.orbDraggable) {
-      // 自定义档才真的拖:挂 mousemove 实时挪球,并通知 Python "开始拖"
-      // (按下到松手这段时间里守卫别抢回焦点 —— 焦点来回跳会拖垮
-      //  WebView2 的鼠标捕获,拖到一半就断了)
-      document.addEventListener('mousemove', onOrbMouseMove, false);
-      callApi('begin_drag');
-    }
-    // 跟随档**不挂 mousemove** —— 那里压根没有"拖动"这回事
-    // (位置由光标决定,拖了也拖不动),跟胶囊在跟随档下
-    // 干脆不响应拖动是一个道理。pinned/custom 都可拖。
-    //
-    // 但 mouseup 两种情况都要听:点球开始录音这个功能不能因为
-    // "不能拖"就一起没了。
-    document.addEventListener('mouseup', onOrbMouseUp, false);
-    e.preventDefault();
-  }
-
-  function onOrbMouseMove(e) {
-    if (!orbDrag.pressing) {
-      return;
-    }
-    var dx = e.screenX - orbDrag.startScreenX;
-    var dy = e.screenY - orbDrag.startScreenY;
-    if (!orbDrag.dragging) {
-      // 阈值内还只是"可能手抖":不算拖动
-      if (Math.sqrt(dx * dx + dy * dy) <= ORB_DRAG_THRESHOLD) {
-        return;
-      }
-      orbDrag.dragging = true;
-      if (document.body) {
-        document.body.classList.add('orb-dragging');
+  /* 球的拖动/点击:球形态下按住球 → 挪位置;按着没动 → 点球开始录音。
+   *
+   * 球和胶囊拖的是同一个窗口、走同一条 Python 路径,差别只有"什么时候
+   * 算拖动":球要 5px 判据(否则想点球录音的人一碰就变成拖球),胶囊按住
+   * 即拖。所以这里只剩一份参数,拖动流程全在 makeDraggable 里。 */
+  var ORB_DRAG_OPTS = {
+    threshold: ORB_DRAG_THRESHOLD,   // 5px 判据:区分"点球"和"拖球"
+    move: 'move_orb',
+    draggingClass: 'orb-dragging',
+    // 球的推送维持"每个 mousemove 事件一次":拖动跟手的程度全靠它,
+    // 换成 rAF 节流会整体慢一帧。
+    throttle: 'sync',
+    filter: noButtons,               // 展开态的 ✕ / ✓ / 复制按钮不拖球
+    // 只有**球形态**(常驻模式且没展开)走这一套
+    enabled: function () { return ui.orbMode && !ui.expanded; },
+    // 跟随档的位置由光标决定,拖不动 —— 但"点球开始录音"还得用
+    // 按下/松手来判定,所以那一档只是不启动拖动。
+    dragEnabled: function () { return ui.orbDraggable; },
+    // 松手时判定为"点击而非拖动":点球 → 开始录音
+    onClick: function () {
+      if (!ui.expanded) {
+        callApi('start_recording');
       }
     }
-    // 发**绝对目标位置**,不是增量:某一次 IPC 丢了也不漂
-    callApi('move_orb', orbDrag.startWinX + dx, orbDrag.startWinY + dy);
-  }
-
-  function onOrbMouseUp(e) {
-    if (!orbDrag.pressing) {
-      return;
-    }
-    orbDrag.pressing = false;
-    document.removeEventListener('mousemove', onOrbMouseMove, false);
-    document.removeEventListener('mouseup', onOrbMouseUp, false);
-    if (document.body) {
-      document.body.classList.remove('orb-dragging');
-    }
-    var wasDragging = orbDrag.dragging;
-    orbDrag.dragging = false;
-    if (!wasDragging && !ui.orbDraggable && e) {
-      // 不可拖的档位没有"拖动"这回事,但**按着划走**也不算"点球" ——
-      // 否则用户随手一划就莫名其妙开始录音。
-      // 这里现算一下起终点的位移,超过阈值就当没点。
-      var dx = e.screenX - orbDrag.startScreenX;
-      var dy = e.screenY - orbDrag.startScreenY;
-      wasDragging = Math.sqrt(dx * dx + dy * dy) > ORB_DRAG_THRESHOLD;
-    }
-    // 松手:归还焦点(点球那一下把前台激活到胶囊了)
-    callApi('end_drag');
-    if (!wasDragging && !ui.expanded) {
-      // 阈值内松手 = 点球 → 开始录音
-      // (Python 那边会先把前台还给用户,否则文字会贴到胶囊自己身上)
-      // 展开态下不触发:那时松手只是"点了一下胶囊",不能再开一轮录音。
-      callApi('start_recording');
-    }
-  }
+  };
 
   /* ==================== 球的右键菜单与操作提示 ==================== */
 
@@ -1334,110 +1448,27 @@
 
   /* ==================== 拖动(自定义位置) ==================== */
 
-  /* 胶囊本体(非按钮区)当拖拽把手 —— 只有「自定义」模式才允许:
-   * 跟随输入模式下拖了也没意义(下一轮还是回到光标那里),
-   * 固定底部模式下拖了会被下一次录音直接掰回去。
+  /* 胶囊的拖动:胶囊本体(非按钮区)按住即拖。
    *
-   * 发**绝对目标位置**,不发增量 —— 面板那套已经验证过:
-   * 增量在 IPC 慢的时候会漂,而绝对目标天然不漂
-   * (某一次调用丢了或慢了,下一次直接覆盖)。
+   * 位置档位(follow / bottom / custom)已随重构退役 —— 没有"不可拖"的
+   * 档位了,胶囊本体恒可拖。所以这一套没有位移判据(threshold=0)。
    *
-   * 坐标用 e.screenX(鼠标的**屏幕**坐标)而不是 clientX ——
-   * 窗口自己一动 clientX(视口内坐标)就变,会被窗口移动污染。 */
-  var drag = {
-    active: false,
-    startScreenX: 0,
-    startScreenY: 0,
-    startWinX: 0,
-    startWinY: 0,
-    pending: null,
-    raf: 0
+   * ⚠ 拖动期间前台会留在胶囊上 —— begin_drag 冻结了守卫的焦点归还
+   * (焦点来回跳会拖垮 WebView2 的鼠标捕获),松手时 end_drag 统一
+   * 还回去。这是"按下即拖"的代价,换来"看到把手就能拖"。
+   *
+   * 位置用 e.screenX(鼠标的**屏幕**坐标)而不是 clientX —— 窗口自己
+   * 一动 clientX(视口内坐标)就变,会被窗口移动污染;发的是**绝对
+   * 目标位置**,不发增量(增量在 IPC 慢的时候会漂)。 */
+  var CAPSULE_DRAG_OPTS = {
+    threshold: 0,                   // 按下即拖,没有位移判据
+    move: 'move_capsule',
+    draggingClass: 'capsule-dragging',  // 拖动期间光标换成 grabbing
+    throttle: 'raf',                // 每帧最多发一次,别把 IPC 塞爆
+    filter: noButtons,              // 点在 ✕ / ✓ 按钮上时不触发拖动
+    // 只有**胶囊形态**(非常驻模式,或常驻模式但已展开)走这一套
+    enabled: function () { return !ui.orbMode || ui.expanded; }
   };
-
-  function onDragStart(e) {
-    if (e.button !== 0) {
-      return;
-    }
-    // 常驻球模式:**球形态**(未展开)走球自己那套(按下 = 可能开始
-    // 录音,拖动 = 挪位置);**胶囊形态**(已展开)落到下面这套胶囊拖动。
-    //
-    // 球和胶囊是同一个窗口、共用同一份位置记忆(config.orb.geometry),
-    // 所以"拖胶囊"和"拖球"是同一件事:挪这个窗口。V1 就是这样,用户
-    // 拍板也要这样 —— 胶囊上有一块看着像把手的地方却拖不动,样式和
-    // 行为分叉在物理上不该可能。
-    if (ui.orbMode && !ui.expanded) {
-      onOrbMouseDown(e);
-      return;
-    }
-    // 位置档位(follow / bottom / custom)已随重构退役:没有"不可拖"的
-    // 档位了,胶囊本体(非按钮区)恒可拖。
-    //
-    // ⚠ 拖动期间前台会留在胶囊上 —— begin_drag 冻结了守卫的焦点归还
-    // (焦点来回跳会拖垮 WebView2 的鼠标捕获),松手时 end_drag 统一
-    // 还回去。这是"按下即拖"的代价,换来"看到把手就能拖"。
-    // 点在 ✕ / ✓ 按钮上时不触发拖动
-    if (e.target && e.target.closest && e.target.closest('button')) {
-      return;
-    }
-    drag.active = true;
-    drag.startScreenX = e.screenX;
-    drag.startScreenY = e.screenY;
-    drag.startWinX = window.screenX;
-    drag.startWinY = window.screenY;
-    drag.pending = null;
-    // 拖动期间光标换成"抓"的手势(grabbing),放手恢复 grab
-    if (document.body) {
-      document.body.classList.add('capsule-dragging');
-    }
-    document.addEventListener('mousemove', onDragMove, false);
-    document.addEventListener('mouseup', onDragEnd, false);
-    // 告诉 Python:拖动期间别抢回焦点(焦点来回跳会拖垮鼠标捕获)
-    callApi('begin_drag');
-    e.preventDefault();
-  }
-
-  function onDragMove(e) {
-    if (!drag.active) {
-      return;
-    }
-    drag.pending = e;
-    if (!drag.raf) {
-      drag.raf = requestAnimationFrame(flushDrag);
-    }
-  }
-
-  function flushDrag() {
-    drag.raf = 0;
-    var e = drag.pending;
-    drag.pending = null;
-    if (!e || !drag.active) {
-      return;
-    }
-    var x = drag.startWinX + (e.screenX - drag.startScreenX);
-    var y = drag.startWinY + (e.screenY - drag.startScreenY);
-    if (x === drag.startWinX && y === drag.startWinY) {
-      return;
-    }
-    callApi('move_capsule', x, y);
-  }
-
-  function onDragEnd() {
-    if (!drag.active) {
-      return;
-    }
-    drag.active = false;
-    document.removeEventListener('mousemove', onDragMove, false);
-    document.removeEventListener('mouseup', onDragEnd, false);
-    if (document.body) {
-      document.body.classList.remove('capsule-dragging');
-    }
-    if (drag.raf) {
-      cancelAnimationFrame(drag.raf);
-      drag.raf = 0;
-    }
-    flushDrag();       // 把最后一次位置补上
-    callApi('end_drag');   // Python 侧:归还焦点 + 记住位置
-  }
 
   /* ==================== 事件绑定 ==================== */
 
@@ -1465,7 +1496,10 @@
 
     // 胶囊本体当拖拽把手(恒可拖:位置档位已退役)
     if (el.pill) {
-      el.pill.addEventListener('mousedown', onDragStart, false);
+      // 球形态 / 胶囊形态:同一个元素,两套"什么时候算拖动"的参数。
+      // 流程(按下 → 拖 → 松手、桥接序列、坐标换算)全在 makeDraggable 里。
+      makeDraggable(el.pill, ORB_DRAG_OPTS);
+      makeDraggable(el.pill, CAPSULE_DRAG_OPTS);
       // 球形态右键 → 通用功能菜单(展开成胶囊后右键无效)
       el.pill.addEventListener('contextmenu', onOrbContextMenu, false);
     }

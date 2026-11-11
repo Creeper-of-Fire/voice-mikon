@@ -13,10 +13,16 @@ Python 与前端之间的桥接契约:
                 / setPreview / setTheme / setPreviewEnabled
                 / setOrbMode / setOrbPosition / setOrbHint
   JS → Python   window.pywebview.api.ready / cancel_recording / stop_recording
-                / update_regions / move_capsule / move_orb / begin_drag
-                / end_drag / copy_result / start_recording / open_panel
+                / update_regions / copy_result / start_recording / open_panel
                 / quit_app / launch_qr_scanner / selecting_text / focus_textbar
                 / dismiss
+
+  ⚠ **模块私有**(拖拽 composable 内部使用,业务侧勿直接调用):
+                window.pywebview.api.move_orb / move_capsule
+                / begin_drag / end_drag
+    这四个是"拖拽怎么落到窗口上"的实现细节 —— 消费侧只需要
+    makeDraggable(把手, {...}),自己拼 begin/move/end 序列的话,
+    焦点冻结和位置记忆这两处很容易跟着错。
 
   **setMode 是显示状态的唯一入口**:Python(presenter)推
   ``setMode(mode, payload)``,前端只演、不决策 —— 停多久、到点回哪
@@ -68,7 +74,6 @@ from ..win32.api import (
     enable_layered_window,
     get_foreground_window,
     get_window_rect,
-    get_work_area,
     hide_window,
     is_window_visible,
     move_window_to,
@@ -84,6 +89,7 @@ from ..win32.monitors import (
     monitor_by_device,
     primary_monitor,
 )
+from .drag import DragSession
 from .placement import (
     default_orb_position,
     encode_offset,
@@ -215,12 +221,18 @@ class _CapsuleApi:
         self._capsule._on_update_regions(payload)
 
     def begin_drag(self) -> None:
-        """用户开始拖胶囊(按住不放)。"""
-        self._capsule._begin_drag()
+        """拖拽 composable 内部使用(**勿直接调用**)。
+
+        用户开始拖(按住不放)。这一下会冻结焦点守卫。
+        """
+        self._capsule._drag.begin()
 
     def end_drag(self) -> None:
-        """用户松手:归还焦点 + 记住位置。"""
-        self._capsule._end_drag()
+        """拖拽 composable 内部使用(**勿直接调用**)。
+
+        用户松手:归还焦点 + 记住位置。
+        """
+        self._capsule._drag.end()
 
     def copy_result(self, text: str) -> bool:
         """把识别结果手动写进剪贴板(注入失败时的兜底出口)。
@@ -250,24 +262,28 @@ class _CapsuleApi:
         self._capsule._start_recording_from_orb()
 
     def move_orb(self, x: float, y: float) -> None:
-        """拖动悬浮球:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+        """拖拽 composable 内部使用(**勿直接调用**)。
+
+        拖动悬浮球:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
 
         前端每次都从 mousedown 起点算绝对目标,发过来的不是增量 ——
         某一次调用丢了或慢了,下一次直接覆盖,天然不漂。
         """
-        self._capsule._move_orb_abs(x, y)
+        self._capsule._drag.move(x, y)
 
     def move_capsule(self, x: float, y: float) -> None:
-        """拖动胶囊:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
+        """拖拽 composable 内部使用(**勿直接调用**)。
+
+        拖动胶囊:窗口左上角移到 (x, y) —— **绝对位置,CSS(逻辑)像素**。
 
         和 ``move_orb`` **同一条路径**:球和胶囊是同一个窗口、共用同一份
         位置记忆(``config.orb.geometry``),拖胶囊就是挪这个窗口 ——
         摆位规则(DPI 换算、夹回工作区)自然也一致,不存在第二套实现。
 
-        松手时走的 ``_end_drag`` 和拖球完全相同:只存 orb.geometry /
+        松手时走的 ``end_drag`` 和拖球完全相同:只存 orb.geometry /
         orb.monitor 这一份。
         """
-        self._capsule._move_orb_abs(x, y)
+        self._capsule._drag.move(x, y)
 
     def open_panel(self) -> None:
         """球菜单里的「设置」:打开面板(回调由入口注入)。"""
@@ -344,13 +360,8 @@ class VoiceCapsule:
         self._orb_regions_ready = False
         # 已经上传过的透明 surface 的窗口尺寸。
         self._surface_size: tuple[int, int] | None = None
-        # 用户正拖着球:拖动期间守卫**不**抢回焦点
-        self._dragging = False
-        self._drag_lock = threading.Lock()
         # 用户正在文字条里选文本:这段时间守卫不抢前台
         self._selecting_text = False
-        # 按下时的窗口位置:松手时对比一下,没动过就别去写配置
-        self._drag_start_rect: tuple[int, int, int, int] | None = None
 
         import webview
 
@@ -361,6 +372,17 @@ class VoiceCapsule:
         self._push_thread = threading.Thread(
             target=self._push_loop, name="ui-capsule-push", daemon=True)
         self._push_thread.start()
+
+        # 拖动会话:按住 → 拖 → 松手的状态、几何换算、焦点冻结都在
+        # DragSession 里(见 host/drag.py)。窗口层只提供它需要的几样
+        # 东西:窗口句柄、缩放、尺寸、保存位置、归还焦点。
+        self._drag = DragSession(
+            window_handle=self._native_handle,
+            window_scale=self._current_scale,
+            window_size=self._window_size,
+            save_geometry=self._save_orb_position,
+            restore_focus=lambda: self._give_back_focus(self._user_foreground()),
+        )
 
         self._api = _CapsuleApi(self)
         html = STATIC_DIR / "capsule.html"
@@ -650,7 +672,7 @@ class VoiceCapsule:
                         and is_window_visible(hwnd)):
                     hide_window(hwnd)
                 elif (fg == hwnd and last_fg and last_fg != hwnd
-                      and not self._is_dragging()
+                      and not self._drag.is_dragging()
                       and not self._is_selecting_text()):
                     # 前台被胶囊占了 → 还回去。
                     #
@@ -670,10 +692,6 @@ class VoiceCapsule:
             interval = (GUARD_INTERVAL if time.monotonic() < dense_until
                         else GUARD_SPARSE)
             time.sleep(interval)
-
-    def _is_dragging(self) -> bool:
-        with self._drag_lock:
-            return self._dragging
 
     def _is_selecting_text(self) -> bool:
         return self._selecting_text
@@ -1077,80 +1095,26 @@ class VoiceCapsule:
 
     # ---------- 拖动 ----------
 
-    def _move_orb_abs(self, x: float, y: float) -> None:
-        """拖动悬浮球:窗口左上角 → (x, y) 逻辑像素。
+    def set_draggable(self, enabled: bool) -> None:
+        """开/关本窗口的拖拽能力。
 
-        前端每次都从 mousedown 起点算绝对目标发过来(不发增量)。
+        **新窗口接入拖拽的公开入口**:调 ``set_draggable(True)`` 之后,
+        前端发来的拖拽指令就都走统一的拖拽会话(焦点冻结 + 松手记
+        位置都在 ``DragSession`` 里),窗口自己不用再实现一遍。
 
-        摆位走"球"那套规则:球的位置会被夹回允许的范围(纵向尤其严
-        —— 球的上方要留给展开后的胶囊),窗口跟着反推。
+        当前这个窗口恒可拖(位置档位已退役),所以没人调它 —— 形状
+        留着,是为了下一个窗口不用再往 ``VoiceCapsule`` 里加一套。
         """
-        hwnd = self._native_handle()
-        if not hwnd:
-            return
-        try:
-            scale = self._current_scale()
-            size = self._window_size()
-            if size is None:
-                return
-            win_w, win_h = size
-            win_x = int(round(float(x) * scale))
-            win_y = int(round(float(y) * scale))
-            # 球在窗口的底边居中处:先算球的屏幕坐标,再夹范围
-            ox, oy = orb_screen_position(win_x, win_y, win_w, win_h, scale)
-            mon = monitor_at_point(ox, oy)
-            area = mon.work_area if mon is not None else get_work_area()
-            if area is None:
-                return
-            nx, ny = orb_window_position(ox, oy, win_w, win_h, scale, area)
-            move_window_to(hwnd, int(nx), int(ny))
-        except Exception as e:
-            log.debug("移动悬浮球失败: %s", e)
-
-    def _begin_drag(self) -> None:
-        """用户开始拖球。
-
-        拖动期间守卫**不**抢回焦点:焦点来回跳会拖垮 WebView2 的
-        鼠标捕获(拖到一半就断了)。松手时统一还一次。
-        """
-        with self._drag_lock:
-            self._dragging = True
-        try:
-            self._drag_start_rect = get_window_rect(self._native_handle())
-        except Exception:
-            self._drag_start_rect = None
-
-    def _end_drag(self) -> None:
-        """用户松手:归还焦点 + 记住位置。"""
-        with self._drag_lock:
-            self._dragging = False
-        start_rect = getattr(self, "_drag_start_rect", None)
-        self._drag_start_rect = None
-        # 这一轮还没开始,没有"注入落点"可言 —— 该还给的是用户
-        # **此刻**所在的窗口(守卫动态跟踪的)。
-        self._give_back_focus(self._user_foreground())
-        # 拖过才记位置(点一下没动就别去写配置)
-        if self._orb_moved(start_rect):
-            self._save_orb_position()
-
-    def _orb_moved(self, start_rect: Any) -> bool:
-        """这一下拖动有没有真的挪过位置。
-
-        点球(想开始录音)和拖球(想挪位置)走的是同一套按下/松手
-        流程 —— 靠"有没有真的动过"区分。
-        """
-        if start_rect is None:
-            return True
-        rect = get_window_rect(self._native_handle())
-        if rect is None:
-            return False
-        return rect[:2] != start_rect[:2]
+        self._drag.set_enabled(bool(enabled))
 
     def _save_orb_position(self) -> None:
         """记住悬浮球的位置(相对所在工作区的逻辑偏移)。
 
         存的是**球**的偏移,不是窗口的:球是用户真正盯着的那一小块。
         存相对量而不是绝对坐标:换缩放率、换显示器都不飞。
+
+        这是拖拽会话的"保存位置"回调 —— 什么时候存由 DragSession 决定
+        (拖过才存),这里只管怎么存。
         """
         hwnd = self._native_handle()
         if not hwnd:

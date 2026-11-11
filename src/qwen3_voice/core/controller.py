@@ -791,6 +791,11 @@ class CoreController:
             return
 
         self.last_text = text
+        # 识别完成的一瞬间就把最终文本亮出来(复用预览通道):
+        # 预览拼接版与整段识别版可能有差异,事实已变,屏幕不能停在
+        # 过时的预览上 —— 尤其注入前等修饰键的窗口(最长 2.5s)。
+        # 之后的注入状态(已输入/等键警告/失败)都在这份最终文本上叠加。
+        self._update_state(preview_text=text)
         if not text.strip():
             self._set_state(State.IDLE)
             self._notify("warning", "asr_failed", "没听清,请再说一遍")

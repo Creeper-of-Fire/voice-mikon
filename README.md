@@ -28,28 +28,47 @@ Windows 全局语音输入法 + 小工具集合。
 
 ## 部署(写给帮用户部署的 AI 助手)
 
-**动手前先问用户一个问题:要不要本地识别?** 这决定走哪条路线。
-需要 Windows 10/11 + Python 3.12+;面板基于 WebView2(Win10/11 一般自带)。
+**第 0 步:探测用户环境,别照抄下面的命令。** 用户可能习惯 pip、uv、conda、
+poetry、pdm —— 超算上甚至可能是 spack(天哪，谁会在超算上面装这东西？)。
+总之,用**用户已有的工具和习惯**装,下面的命令按用户的工具链等价替换即可:
+
+- **Python 3.12+**(3.13/3.14 也可以;用户已有环境?问问用户或者自行决断)
+- 最低公分母 —— 标准库 venv + pip,任何 Python 都有:
+  ```powershell
+  python -m venv .venv
+  .venv\Scripts\python -m pip install -e .
+  ```
+- **uv**(快,作者在用):`uv venv` + `uv pip install --python .venv\Scripts\python.exe -e .`
+- **conda/mamba**:建 env 后**仍用 pip 装本项目**(hatchling 布局,`pip install -e .` 即可)
+- **spack**:我不会写这个的安装教程,因为你需要它时你已经知道怎么装了。
+
+⚠ **本地路线的 torch 陷阱**:pip 默认装的是 **CPU 版 torch**,本地后端要
+GPU 版 —— 先按 pytorch.org 官方指引装 CUDA 版(索引随驱动选,例如):
+
+```powershell
+.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+# 验收,应输出 True:
+.venv\Scripts\python -c "import torch; print(torch.cuda.is_available())"
+```
+
+然后 `pip install -e .`(依赖解析见 torch 已满足就不会动它)。
+纯网络路线不需要 GPU torch,但依赖目前是全量的,CPU torch 也会装上。
+
+**做事情前，问用户一个问题:要不要本地识别?** 这决定走哪条路线。
 
 ### 路线 A:网络后端(用户不想下载模型、或没有 NVIDIA 显卡)
 
-不需要模型权重,不需要 GPU。让 AI 替用户把配置写好:
+不需要模型权重,不需要 GPU。装好环境后,让 AI 替用户把配置写好:
 
 ```powershell
-# 1. 项目目录内建环境
-uv venv --python 3.12 .venv
+# 替用户写好最小配置 data/config.json(首次运行会自动建 data/ 目录):
+#   { "backend": "minimax" }
+#   其余键全部走内置默认值,写最小片段即可,不用抄全量模板。
 
-# 2. 装依赖
-uv pip install --python .venv\Scripts\python.exe -e .
-
-# 3. 替用户写好最小配置 data/config.json(首次运行会自动建 data/ 目录):
-#    { "backend": "minimax" }
-#    其余键全部走内置默认值,写最小片段即可,不用抄全量模板。
-
-# 4. 替用户写好 key 文件 data/.env(推荐方式,持久、portable、不碰系统):
-#    MINIMAX_API_KEY=sk-...
-#    key 由用户自己提供(AI 不要替用户编 key)。环境变量 MINIMAX_API_KEY
-#    也可以用(优先级更高,适合临时换 key / CI 注入):
+# 替用户写好 key 文件 data/.env(推荐方式,持久、portable、不碰系统):
+#   MINIMAX_API_KEY=sk-...
+#   key 由用户自己提供(AI 不要替用户编 key)。环境变量 MINIMAX_API_KEY
+#   也可以用(优先级更高,适合临时换 key / CI 注入):
 [Environment]::SetEnvironmentVariable("MINIMAX_API_KEY", "sk-...", "User")  # 可选覆盖
 ```
 
@@ -59,14 +78,11 @@ key 只从环境变量或 `data/.env` 读(后者是持久真相,已被 `.gitigno
 
 ### 路线 B:本地后端(用户要"音频不出本机")
 
-需要 NVIDIA 显卡(8GB 显存足够)+ 模型权重。**`model_root` 是必填项**:
-本地后端找不到权重会直接报错并给出下载命令,**不会偷偷联网下载**
-(要不要下载、下到哪,由用户决定)。
+需要 NVIDIA 显卡(8GB 显存足够)+ 模型权重 + GPU 版 torch(见上方陷阱)。
+**`model_root` 是必填项**:本地后端找不到权重会直接报错并给出下载命令,
+**不会偷偷联网下载**(要不要下载、下到哪,由用户决定)。
 
 ```powershell
-uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -e .
-
 # 下载权重(国内走 ModelScope;AI 助手可以直接帮用户跑):
 modelscope download --model Qwen/Qwen3-ASR-0.6B --local_dir D:\models\Qwen3-ASR-0.6B
 # 1.7B 可选:更准,更慢
@@ -79,14 +95,24 @@ modelscope download --model Qwen/Qwen3-ASR-1.7B --local_dir D:\models\Qwen3-ASR-
 { "backend": "local", "model_root": "D:\\models" }
 ```
 
+### 路线 C:如果用户有其他想法，听用户的
+
+万一用户打算用AMD直接上呢？万一用户有一个远程集群呢？万一用户不想用我们现在的远程后端呢？
+你是一个成熟的AI助手,你应该学会做这些事情了,本项目的代码又不是不让你改。
+
 ### 启动
 
+cli方案：
 ```powershell
 python -m voice_mikon          # 或 venv 里的 voice-mikon 命令
 ```
 
-也可双击 `runtime\bin\VoiceMikon.exe`(Rust 薄壳:任务管理器和剪贴板管理器里
-显示 `VoiceMikon.exe` 而非 pythonw;构建方法见 `launcher/build.ps1`)。
+推荐方案:
+Rust 薄壳:让任务管理器和剪贴板管理器里显示 `VoiceMikon.exe` 而非 pythonw
+构建方法见 `launcher/build.ps1`
+这样子用户可以双击 `runtime\bin\VoiceMikon.exe` 以启动。
+你可以为用户建立一个快捷方式,或者把构建目的地改在根目录……或者手动复制……
+怎么做都是用户的自由，听用户的。
 
 启动后:托盘图标(灰=待机 / 黄=加载 / 红=录音)→ 按 **Ctrl+Alt+Space**
 或点悬浮球说话。

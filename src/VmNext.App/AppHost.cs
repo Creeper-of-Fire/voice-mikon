@@ -247,7 +247,11 @@ public sealed class AppHost : IDisposable
                 model: Config.MinimaxModel,
                 baseUrl: Config.MinimaxBaseUrl,
                 hotwords: Config.Hotwords,
-                hotwordsFile: Paths.HotwordsPath);
+                hotwordsFile: Paths.HotwordsPath,
+                // data 目录必须由装配层注入 —— Engines 不自己猜位置。
+                // 自猜的回落是 AppContext.BaseDirectory/data,`dotnet run` 时那是
+                // bin/Debug/net*/data/,找不到仓库根的 data/.env,key 永远读不到。
+                dataDir: Paths.DataDir);
         }
 
         return new LocalBackend(

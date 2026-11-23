@@ -1,0 +1,76 @@
+<shell:OverlayWindow xmlns="https://github.com/avaloniaui"
+                      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                      xmlns:shell="using:VmNext.Shell"
+                      x:Class="DemoC.MainWindow"
+                      Title="Demo C — 拖拽 / 多屏 / 文字选择"
+                      BallSize="96"
+                      AllowActivation="True"
+                      KeepRightEdgeFixed="True">
+
+  <Border x:Name="Capsule"
+          Width="96"
+          Height="96"
+          CornerRadius="48"
+          ClipToBounds="True"
+          Background="{DynamicResource Overlay.Surface.Brush}"
+          BorderBrush="{DynamicResource Overlay.Border.Brush}"
+          BorderThickness="1">
+
+    <Grid>
+
+      <!-- 球态：麦克风轮廓（按住可以拖） -->
+      <Path x:Name="BallIcon"
+            Data="M12 3 C13.7 3 15 4.3 15 6 L15 12 C15 13.7 13.7 15 12 15 C10.3 15 9 13.7 9 12 L9 6 C9 4.3 10.3 3 12 3 Z M5 11 C5 14.5 7.6 17 12 17 C16.4 17 19 14.5 19 11 M12 17 L12 21 M8 21 L16 21"
+            Stroke="{DynamicResource Overlay.Foreground.Brush}"
+            StrokeThickness="1.6"
+            StrokeLineCap="Round"
+            StrokeJoin="Round"
+            Width="30"
+            Height="30"
+            Stretch="Uniform"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center" />
+
+      <!-- 胶囊态：可选中的文字 -->
+      <Grid x:Name="CapsuleContent"
+            Opacity="0"
+            IsVisible="False"
+            ColumnDefinitions="40,*,40">
+
+        <Path x:Name="MicIcon"
+              Grid.Column="0"
+              Data="M12 3 C13.7 3 15 4.3 15 6 L15 12 C15 13.7 13.7 15 12 15 C10.3 15 9 13.7 9 12 L9 6 C9 4.3 10.3 3 12 3 Z M5 11 C5 14.5 7.6 17 12 17 C16.4 17 19 14.5 19 11 M12 17 L12 21 M8 21 L16 21"
+              Stroke="{DynamicResource Overlay.Foreground.Brush}"
+              StrokeThickness="1.6"
+              StrokeLineCap="Round"
+              StrokeJoin="Round"
+              Width="24"
+              Height="24"
+              Stretch="Uniform"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center" />
+
+        <!-- 可选中文字：拖选后 Ctrl+C 复制（Avalonia 11.1 的 SelectableTextBlock 自带 Copy） -->
+        <SelectableTextBlock x:Name="SampleText"
+                             Grid.Column="1"
+                             Text="按住球拖动可以移动窗口。双击球展开这段文字，用鼠标拖选，再按 Ctrl+C 复制。"
+                             FontSize="13"
+                             FontFamily="Microsoft YaHei UI, Segoe UI"
+                             Foreground="{DynamicResource Overlay.Foreground.Brush}"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center"
+                           Margin="4,0" />
+
+        <TextBlock x:Name="Hint"
+                   Grid.Column="2"
+                   Text="ⓘ"
+                   FontSize="14"
+                   Foreground="{DynamicResource Overlay.Foreground.Brush}"
+                   Opacity="0.6"
+                   VerticalAlignment="Center"
+                   HorizontalAlignment="Center" />
+      </Grid>
+    </Grid>
+  </Border>
+
+</shell:OverlayWindow>

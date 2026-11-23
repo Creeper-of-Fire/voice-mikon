@@ -1,0 +1,89 @@
+<shell:OverlayWindow xmlns="https://github.com/avaloniaui"
+                      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                      xmlns:shell="using:VmNext.Shell"
+                      x:Class="DemoB.MainWindow"
+                      Title="Demo B — 形变 / 呼吸 / 旋转 / 波形"
+                      BallSize="96"
+                      KeepRightEdgeFixed="True">
+
+  <!-- 胶囊本体：Width / CornerRadius 过渡就是"球长成胶囊"的形变。
+       注意这里刻意不用 RenderTransform 做形变：形变必须改变布局尺寸，
+       否则会和 SetWindowRgn 的窗口区域错位（点击穿透范围会与视觉对不上）。 -->
+  <Border x:Name="Capsule"
+          Width="96"
+          Height="96"
+          CornerRadius="48"
+          ClipToBounds="True"
+          Background="{DynamicResource Overlay.Accent.Brush}"
+          BorderBrush="{DynamicResource Overlay.Border.Brush}"
+          BorderThickness="1">
+
+    <Grid>
+
+      <!-- 球态：麦克风轮廓 -->
+      <Path x:Name="BallIcon"
+            Data="M12 3 C13.7 3 15 4.3 15 6 L15 12 C15 13.7 13.7 15 12 15 C10.3 15 9 13.7 9 12 L9 6 C9 4.3 10.3 3 12 3 Z M5 11 C5 14.5 7.6 17 12 17 C16.4 17 19 14.5 19 11 M12 17 L12 21 M8 21 L16 21"
+            Stroke="{DynamicResource Overlay.Foreground.Brush}"
+            StrokeThickness="1.6"
+            StrokeLineCap="Round"
+            StrokeJoin="Round"
+            Width="30"
+            Height="30"
+            Stretch="Uniform"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center" />
+
+      <!-- 胶囊态：旋转 loader + 波形条 + 呼吸麦克风 -->
+      <Grid x:Name="CapsuleContent"
+            Opacity="0"
+            IsVisible="False"
+            ColumnDefinitions="40,182,40">
+
+        <!-- 旋转 loader -->
+        <Path x:Name="Spinner"
+              Grid.Column="0"
+              Data="M12 2 A10 10 0 1 1 4 12"
+              Stroke="{DynamicResource Overlay.Wave.Brush}"
+              StrokeThickness="2.2"
+              StrokeLineCap="Round"
+              Width="22"
+              Height="22"
+              Stretch="Uniform"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              RenderTransformOrigin="50%,50%" />
+
+        <!-- 波形条：左边 10px 渐隐 -->
+        <Canvas x:Name="WaveCanvas"
+                Grid.Column="1"
+                Width="182"
+                Height="56"
+                ClipToBounds="True">
+          <Canvas.OpacityMask>
+            <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+              <GradientStop Offset="0" Color="#00000000" />
+              <GradientStop Offset="0.06" Color="#FF000000" />
+              <GradientStop Offset="1" Color="#FF000000" />
+            </LinearGradientBrush>
+          </Canvas.OpacityMask>
+        </Canvas>
+
+        <!-- 呼吸麦克风 -->
+        <Path x:Name="MicIcon"
+              Grid.Column="2"
+              Data="M12 3 C13.7 3 15 4.3 15 6 L15 12 C15 13.7 13.7 15 12 15 C10.3 15 9 13.7 9 12 L9 6 C9 4.3 10.3 3 12 3 Z M5 11 C5 14.5 7.6 17 12 17 C16.4 17 19 14.5 19 11 M12 17 L12 21 M8 21 L16 21"
+              Stroke="{DynamicResource Overlay.Foreground.Brush}"
+              StrokeThickness="1.6"
+              StrokeLineCap="Round"
+              StrokeJoin="Round"
+              Width="26"
+              Height="26"
+              Stretch="Uniform"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              RenderTransformOrigin="50%,50%" />
+      </Grid>
+    </Grid>
+  </Border>
+
+</shell:OverlayWindow>

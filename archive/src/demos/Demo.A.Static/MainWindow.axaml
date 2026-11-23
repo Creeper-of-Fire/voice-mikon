@@ -1,0 +1,37 @@
+<shell:OverlayWindow xmlns="https://github.com/avaloniaui"
+                      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                      xmlns:shell="using:VmNext.Shell"
+                      x:Class="DemoA.MainWindow"
+                      Title="Demo A — 透明球"
+                      BallSize="96">
+
+  <Border Width="96"
+          Height="96"
+          CornerRadius="48"
+          Background="{DynamicResource Overlay.Accent.Brush}"
+          BorderBrush="{DynamicResource Overlay.Border.Brush}"
+          BorderThickness="1.5">
+
+    <Border.ContextMenu>
+      <ContextMenu>
+        <MenuItem Header="开始听写" />
+        <MenuItem Header="设置…" />
+        <Separator />
+        <MenuItem Header="退出" Click="OnExitClick" />
+      </ContextMenu>
+    </Border.ContextMenu>
+
+    <!-- 麦克风轮廓（描边） -->
+    <Path Data="M12 3 C13.7 3 15 4.3 15 6 L15 12 C15 13.7 13.7 15 12 15 C10.3 15 9 13.7 9 12 L9 6 C9 4.3 10.3 3 12 3 Z M5 11 C5 14.5 7.6 17 12 17 C16.4 17 19 14.5 19 11 M12 17 L12 21 M8 21 L16 21"
+          Stroke="{DynamicResource Overlay.Foreground.Brush}"
+          StrokeThickness="1.6"
+          StrokeLineCap="Round"
+          StrokeJoin="Round"
+          Width="28"
+          Height="28"
+          Stretch="Uniform"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center" />
+  </Border>
+
+</shell:OverlayWindow>

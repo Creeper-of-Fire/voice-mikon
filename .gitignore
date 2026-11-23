@@ -1,0 +1,12 @@
+## .NET / MSBuild
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## AOT 发布产物
+publish/
+
+## 本地实验产物
+*.log

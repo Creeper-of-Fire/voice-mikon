@@ -1,0 +1,25 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- 覆盖层颜色令牌。控件一律用 {DynamicResource} 引用，
+       运行时由 Theme.cs 就地改这些 brush 的 Color 做平滑过渡。 -->
+
+  <!-- 主色：球体 / 波形条 -->
+  <SolidColorBrush x:Key="Overlay.Accent.Brush" Color="#FF3B6EF6" />
+
+  <!-- 表面色：胶囊底板 -->
+  <SolidColorBrush x:Key="Overlay.Surface.Brush" Color="#E6141A22" />
+
+  <!-- 前景文字色 -->
+  <SolidColorBrush x:Key="Overlay.Foreground.Brush" Color="#FFF2F5FA" />
+
+  <!-- 描边色 -->
+  <SolidColorBrush x:Key="Overlay.Border.Brush" Color="#66FFFFFF" />
+
+  <!-- 波形条颜色 -->
+  <SolidColorBrush x:Key="Overlay.Wave.Brush" Color="#FF7FD1FF" />
+
+  <!-- 右键菜单底色 -->
+  <SolidColorBrush x:Key="Overlay.Menu.Brush" Color="#F01B2029" />
+
+</ResourceDictionary>

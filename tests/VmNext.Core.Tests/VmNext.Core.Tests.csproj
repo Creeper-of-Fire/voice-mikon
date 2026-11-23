@@ -27,11 +27,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\VmNext.Core\VmNext.Core.csproj" />
 
-    <!--
-      K3 追加：注入验证宿主（自建 Win32 EDIT 窗口）抽到共享测试工具项目，
-      VmNext.App.Tests 也用同一份。
-    -->
-    <ProjectReference Include="..\VmNext.TestSupport\VmNext.TestSupport.csproj" />
   </ItemGroup>
 
 </Project>

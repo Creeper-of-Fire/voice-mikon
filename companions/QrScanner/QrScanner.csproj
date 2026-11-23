@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      WinExe：GUI 子系统，双击运行时**不弹控制台窗口**。
+      （selftest / image 两个开关的输出走 stdout；从 cmd / PowerShell 启动时继承父控制台可见。）
+    -->
+    <OutputType>WinExe</OutputType>
+    <!--
+      WinForms 需要带 -windows 的目标框架（TFM 必须如此）。
+      ⚠ 本项目**不引用任何 VmNext.* 程序集** —— 与语音主程序零 import（双向都不认识对方）。
+      主程序只经 Process.Start 把本工具当**独立进程**拉起。
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>QrScanner</RootNamespace>
+    <AssemblyName>QrScanner</AssemblyName>
+    <!--
+      卫星资源只留英文：省得每个 UI 线程都去查缺失的本地化资源。
+      （界面文案是中文，但这跟卫星资源是两回事。）
+    -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      解码：ZXing.Net（纯托管、多格式 —— 对等 Python 版的 pyzbar/zbar）。
+      这个包对 net6.0+ **没有任何传递依赖**（不会拖进 System.Drawing.Common）。
+    -->
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
+  </ItemGroup>
+
+</Project>

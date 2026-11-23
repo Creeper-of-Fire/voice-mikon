@@ -171,6 +171,7 @@ public sealed class GuiHost : IDisposable
         // 球菜单的「退出」与托盘的「退出」汇到**同一条**收尾路径。
         binder.QuitRequested += (_, _) => gui.RequestQuit();
         binder.SettingsRequested += (_, _) => gui.OnSettingsRequested();
+        binder.QrScanRequested += (_, _) => gui.LaunchQrScanner();
 
         // ---- 托盘 ----
         gui.StartTray();
@@ -312,6 +313,47 @@ public sealed class GuiHost : IDisposable
     /// 已经开着就把它激活到前面，不重复建。</para>
     /// </summary>
     private void OnSettingsRequested() => OpenPanel();
+
+    // ==================== 附属工具（二维码扫描）====================
+
+    /// <summary>
+    /// 球菜单的「二维码扫描」：拉起附属工具（**独立进程**）。
+    ///
+    /// <para>照 Python 版 <c>make_qr_scanner_launcher</c> 的语义：不等它、不看它的输出、
+    /// 不管它的死活 —— 它崩了不影响主程序；工具缺失时**明确报错**（不静默）。</para>
+    ///
+    /// <para>本层**不引用**工具的任何程序集（零 import）：只有一行 <c>Process.Start</c>。</para>
+    /// </summary>
+    private void LaunchQrScanner()
+    {
+        string? exe = Companions.LocateQrScanner(AppContext.BaseDirectory);
+
+        if (exe is null)
+        {
+            string expected = Companions.QrScannerPath(AppContext.BaseDirectory);
+            _log.Error($"二维码扫描工具不见了: {expected}");
+            _host.Notifier.Publish("error", "qr_scanner_missing", $"二维码扫描工具缺失：{expected}");
+            return;
+        }
+
+        try
+        {
+            // UseShellExecute = false：直接跑 exe，不经 shell 解释。
+            // 不等它、不读输出 —— 工具自己管自己的窗子与剪贴板。
+            using Process? process = Process.Start(new ProcessStartInfo(exe)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
+            });
+
+            _log.Info($"二维码扫描：已拉起附属工具({exe})");
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"拉起二维码扫描工具失败: {ex.Message}");
+            _host.Notifier.Publish("error", "qr_scanner_launch_failed", $"拉起二维码扫描工具失败：{ex.Message}");
+        }
+    }
 
     // ==================== 面板 ====================
 

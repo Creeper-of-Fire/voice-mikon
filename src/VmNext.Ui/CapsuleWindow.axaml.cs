@@ -249,6 +249,9 @@ public partial class CapsuleWindow : OverlayWindow
     /// <summary>用户点了菜单里的「设置」（面板是 K5，宿主负责回话）。</summary>
     public event EventHandler? SettingsRequested;
 
+    /// <summary>用户点了菜单里的「二维码扫描」（拉起附属工具的独立进程，宿主负责回话）。</summary>
+    public event EventHandler? QrScanRequested;
+
     /// <summary>
     /// 读上次记住的球位置（<c>orb.geometry</c> + <c>orb.monitor</c>）。
     /// 宿主注入；返回 null = 没拖过 → 走默认位置。
@@ -1263,10 +1266,12 @@ public partial class CapsuleWindow : OverlayWindow
 
         // 菜单里的设置 / 退出项。
         SettingsMenuButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
+        QrMenuButton.Click += (_, _) => QrScanRequested?.Invoke(this, EventArgs.Empty);
         QuitMenuButton.Click += (_, _) => QuitRequested?.Invoke(this, EventArgs.Empty);
 
         // 菜单按钮的 hover 色（CSS: .orb-menu-btn:hover / .orb-menu-btn.orb-menu-quit:hover）。
         WireMenuButtonHover(SettingsMenuButton, isQuit: false);
+        WireMenuButtonHover(QrMenuButton, isQuit: false);
         WireMenuButtonHover(QuitMenuButton, isQuit: true);
 
         // 结束钮（✓）→ 停止录音。

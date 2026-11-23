@@ -55,6 +55,7 @@ public sealed class UiBinder : IDisposable
         _window.DismissRequested += OnDismiss;
         _window.CopyRequested += OnCopy;
         _window.SettingsRequested += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
+        _window.QrScanRequested += (_, _) => QrScanRequested?.Invoke(this, EventArgs.Empty);
         _window.QuitRequested += (_, _) => QuitRequested?.Invoke(this, EventArgs.Empty);
     }
 
@@ -63,6 +64,9 @@ public sealed class UiBinder : IDisposable
 
     /// <summary>用户点了菜单里的「设置」（面板是 K5，宿主负责回话）。</summary>
     public event EventHandler? SettingsRequested;
+
+    /// <summary>用户点了菜单里的「二维码扫描」（宿主去拉起附属工具的独立进程）。</summary>
+    public event EventHandler? QrScanRequested;
 
     /// <summary>窗口（不创建 UI 时也能拿到状态机之外的引用）。</summary>
     public CapsuleWindow Window => _window;

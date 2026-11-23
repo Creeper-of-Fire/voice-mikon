@@ -12,5 +12,9 @@ publish/
 *.log
 TestResults/
 
+## 运行时数据（portable：只落在项目目录内，但不进 git）
+## 配置 / 日志 / 录音留存 / WebView 数据都是本机状态，不该进版本库
+data/
+
 ## IDE 配置
 .idea/

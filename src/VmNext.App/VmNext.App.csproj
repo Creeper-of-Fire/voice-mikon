@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VmNext.App</RootNamespace>
+    <!-- 控制台入口（K3 阶段不做 GUI；GUI 阶段再换 OutputType / 加 Avalonia）。 -->
+    <OutputType>Exe</OutputType>
+    <AssemblyName>VmNext.App</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VmNext.Core\VmNext.Core.csproj" />
+    <ProjectReference Include="..\VmNext.Audio\VmNext.Audio.csproj" />
+    <ProjectReference Include="..\VmNext.Engines\VmNext.Engines.csproj" />
+    <ProjectReference Include="..\VmNext.Shell\VmNext.Shell.csproj" />
+  </ItemGroup>
+
+</Project>

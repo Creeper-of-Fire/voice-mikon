@@ -142,6 +142,29 @@ VmNext.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这�
 - **本地推理走 Python 子进程**（`python/asr_server/`），C# 侧用命名管道通信。
   不要为了"少一个进程"把 torch 拉回主进程 —— 那样几百 MB 常驻内存就回来了。
 
+### 附属工具（companions/）
+
+附属工具（当前：二维码扫描 `companions/QrScanner/`）住在 `companions/` 下，
+**与主程序零 import**：双向都不认识对方。
+
+- **"零 import" 在 C# 里的含义**：
+  - 工具项目**不 ProjectReference 任何 `VmNext.*` 项目**；
+  - `VmNext.*` 也**不 Reference** 工具的程序集（工具的产物不参与主程序的依赖图）。
+  - **构建期把工具的产物复制到输出目录不算引用** —— 那是"把一个独立 exe 放在旁边"，
+    不是代码依赖。`VmNext.App.csproj` 里那个 build-only 的 `ProjectReference`
+    （`ReferenceOutputAssembly="false"`）只用来**定构建顺序 + 复制产物**，
+    工具的类型不参与主程序的编译。
+- **主程序只经 `Process.Start` 拉起独立进程**：不等它、不看它的输出、不管它的死活；
+  工具崩了不相干。工具缺失 → 发一条通知报路径（不静默、不崩）。
+- **工具自己的 UI 技术栈自选**（当前：WinForms）—— 不碰 Avalonia，不与主程序的
+  透明 / 裁形那套纠缠。附属工具坏也只坏自己。
+- **工具不继承主程序的"规矩"**：比如剪贴板 owner 窗口那条（`ClipboardService`）是
+  主程序的需要；工具是独立进程，`Clipboard.SetText` 就够。
+- **附属工具在 `VmNext.sln` 的 `companions` solution folder 里**（它不是主程序的一部分，
+  但**要在同一个 sln 里** —— sln 外的项目拿不到 sln 的配置映射，
+  `dotnet build VmNext.sln -c Release` 会拿 Debug 产物去复制）。
+  它的测试项目也在 sln 里（`tests/VmNext.Companions.Tests`）。
+
 ### presenter 契约（改 UI 先看这个）
 
 **[`docs/core-api.md`](docs/core-api.md) 是 UI 的唯一接口依据。**
@@ -172,6 +195,7 @@ VmNext.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这�
 | [`docs/k4a-ui.md`](docs/k4a-ui.md) | 胶囊 UI 接上真实状态机 + 正式 GUI 入口 |
 | [`docs/k4b-shell.md`](docs/k4b-shell.md) | 拖拽 / 摆位 / 位置记忆 / 托盘 / 退出重启 / 右键菜单 |
 | [`docs/k5-panel.md`](docs/k5-panel.md) | 设置面板：PanelPresenter + PanelWindow |
+| [`docs/k7-qr-scanner.md`](docs/k7-qr-scanner.md) | 附属工具：二维码扫描（C# 独立进程）+ 球菜单入口 |
 | [`python/asr_server/README.md`](python/asr_server/README.md) | 本地推理子进程的 IPC 协议定稿 |
 | [`archive/`](archive/) | 2026-11-23 的可行性验证（**冻结**，不是设计参考） |
 

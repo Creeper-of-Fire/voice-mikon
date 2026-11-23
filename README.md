@@ -34,14 +34,17 @@ src/VmNext.Ui/          胶囊窗口 + 面板窗口 + 拖拽 / 摆位 / 命中�
 src/VmNext.App/         GUI 入口 + 托盘装配 + `--headless` 自检 + `--mock` 假后端
 src/demos/Capsule.Demo/ 离线视觉预览（不连 core，热键直接推 mode、波形用模拟电平）
 python/asr_server/      本地推理子进程（named pipe IPC，协议定稿见其 README）
+companions/QrScanner/   二维码扫描（附属工具：独立进程，WinForms + ZXing.Net；见其 README）
 tests/                  只留纯计算 / 无头的测试（见「测试」）
-docs/                   过程记录（k1–k5）+ presenter 契约（core-api.md）
+docs/                   过程记录（k1–k5、k7）+ presenter 契约（core-api.md）
 archive/                2026-11-23 的可行性验证（冻结，不是设计参考）
 data/                   运行时数据：配置 / 日志 / 录音留存（portable，不进 git）
 ```
 
 依赖方向：`Engines` 与 `Shell` 不引用本仓库任何项目；`Core → Shell + Engines`；
 `Audio → Core`；`Ui → Core + Shell`；`App` 装配一切。详见 [`AGENTS.md`](AGENTS.md)。
+`companions/` 下的附属工具**不在这个依赖图里**（零 import：主程序只经 `Process.Start`
+拉起它，不等、不看输出、不管它的死活）。
 
 ## 运行方式
 
@@ -144,6 +147,7 @@ NAudio 没有"全局设备索引"这个概念，硬凑一张映射表反而更�
 | `tests/VmNext.Audio.Tests` | 底噪估计 / WAV 落盘 | `cd tests/VmNext.Audio.Tests; dotnet test` |
 | `tests/VmNext.Engines.Tests` | 重采样 / VAD / 分句状态机 / IPC 协议 / 网络后端 | `cd tests/VmNext.Engines.Tests; dotnet test` |
 | `tests/VmNext.Ui.Tests` | 胶囊与面板的显示状态 / 摆位 / 拖拽几何 / 命中区 / 动效降级 | `cd tests/VmNext.Ui.Tests; dotnet test` |
+| `tests/VmNext.Companions.Tests` | 附属工具（二维码扫描）的解码 / 框选几何 | `cd tests/VmNext.Companions.Tests; dotnet test` |
 | `tests/VmNext.TokenCheck` | `capsule.css` 的色值与 palette 逐个核对（不是测试项目，是个小程序；不一致时退出码非 0） | `dotnet run --project tests/VmNext.TokenCheck` |
 
 > ⚠ **必须进项目目录跑**：MTP（Microsoft.Testing.Platform）项目在 .NET 10 SDK 上
@@ -175,7 +179,7 @@ NAudio 没有"全局设备索引"这个概念，硬凑一张映射表反而更�
 | 界面 | 窗口尺寸 | 固定 512×260 | 宽度固定 512，**高度跟着内容** | 内容驱动的高度不会让上方留白空着 |
 | 界面 | 命中区 | 前端上报的**矩形** | **带圆角**的矩形（圆角抄 CSS） | 视觉与命中一致 |
 | 界面 | 托盘图标 | PIL 画 | GDI 画（同样 64×64、同样的圆与麦克风） | Python 生态差别，外观一致 |
-| 界面 | 球菜单 | 三项：设置 / 二维码扫描 / 退出 | 两项：设置 / 退出 | 二维码是 `companions/` 附属工具，这一轮不做 |
+| 界面 | 球菜单 | 三项：设置 / 二维码扫描 / 退出 | 三项：设置 / 二维码扫描 / 退出 | 二维码扫描换成 C# 版独立工具（`companions/QrScanner/`） |
 | 界面 | 拖动窗口 | JS 量位移后 IPC 回 Python | 系统原生 `BeginMoveDrag` | 都比"自己算"稳；原生拖动带虚线框 |
 | 界面 | 拖球换算 | 前端持续发绝对目标位置 | 按"按下锚点 + 位移"自己算 | 没有前端 ↔ Python 的桥；结果等价且不累积误差 |
 | 面板 | 关闭后 | **常驻隐藏**，再开还是同一个前端实例 | **关闭即销毁，再开重建** | Python 版必须常驻只是因为 pywebview 的 `start()` 之后不能建窗 |

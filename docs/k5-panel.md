@@ -1,5 +1,7 @@
 # K5 —— 设置面板：PanelPresenter + PanelWindow
 
+> 本文是 **K5 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 > **接口依据**：[`docs/core-api.md`](./core-api.md)（事件名 / 线程模型 / 退出顺序）。
 > **翻译源**：`voice-mikon/src/voice_mikon/apps/panel/presenter.py`（381 行）、
 > `host/panel.py`（616 行）、`host/static/panel.{html,css,js}`（110 / 505 / 565 行）。
@@ -289,6 +291,7 @@
 
 ### 疑问 #1（最重要）：提示语要不要按级别配色
 
+- **状态**：**仍然成立**。`PanelSnapshot.NoticeLevel` 三档（info / warning / error），UI 层只管上色。
 - **目的**：任务书明确要求"`notice` 按 level 配色"（测试项里也有）。
 - **我的处理**：`PanelSnapshot` 多带一个 `NoticeLevel`（`info` / `warning` / `error`），
   面板按它给提示语上色：error → `--danger`、warning → `--warn`、info → `--text2`。
@@ -299,6 +302,7 @@
 
 ### 疑问 #2：提示语的生命周期归谁管
 
+- **状态**：**仍然成立**。窗口起 8 秒计时器 → 淡掉后抛 `NoticeExpired` → 装配层转给 presenter 的 `ClearNotice()`（事实归零）。
 - **目的**：提示语 8 秒后自己淡掉（`panel.js` 的 `NOTICE_MS`）。
 - **我的处理**：**两层各管一半** —— 窗口（怎么呈现）起 8 秒计时器，淡掉后抛 `NoticeExpired`；
   装配层转给 presenter 的 `ClearNotice()`（事实归零），快照里的提示语才真正清空。
@@ -310,6 +314,7 @@
 
 ### 疑问 #3：面板的配色没有自动核对
 
+- **状态**：**仍未解决（已知缺口）**。`tests/VmNext.TokenCheck` 仍只核对 `capsule.css`；面板的 21 个 token 只在 K5 手工核对过一遍，没有自动化测试守着。
 - **目的**：`panel.css` 的 21 个 token 抄进 `PanelTheme`，但**没有自动化测试守着**。
 - **我的处理**：本版**手工核对过一遍**（把 CSS 两块解析出来、解析 `var()` 引用与 3 位缩写，
   与两张 palette 逐个比对，21 个 token 全一致；阴影 alpha 也按 CSS 规则换算核对过）。
@@ -323,6 +328,7 @@
 
 ### 疑问 #4：开关的圆钮位移交给 Avalonia
 
+- **状态**：**仍然成立**。圆钮位移交给 Avalonia 的 `KnobTransitions`，我们只把尺寸摆对。
 - **目的**：CSS 的开关是"38×22 的轨道 + 16px 的圆钮，选中后圆钮 `translateX(16px)`"。
 - **我的处理**：用 `ToggleSwitch`，但**自己写模板**（Avalonia 的 `ToggleSwitch` 有两个
   **必需**的模板部件：`PART_MovingKnobs` / `PART_SwitchKnob`）。
@@ -336,6 +342,7 @@
 
 ### 疑问 #5：`panel_geometry` 的逻辑像素 ↔ Avalonia 的物理像素
 
+- **状态**：**仍然成立**。`PanelGeometry` 只认 `"x,y,w,h"` 四个整数；逻辑像素 ↔ 物理像素的换算留在窗口里。
 - **目的**：`config.panel_geometry` 的格式必须与 Python 版**逐字兼容**（旧配置直接能用）。
 - **我的处理**：`PanelGeometry` 只认 `"x,y,w,h"` 四个整数（纯函数，可测）；
   逻辑像素 ↔ 物理像素的换算放在窗口里（`RenderScaling`），

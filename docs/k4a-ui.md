@@ -1,5 +1,7 @@
 # K4a —— 胶囊 UI 接上真实状态机 + 正式 GUI 入口 + 解决渲染问题
 
+> 本文是 **K4a 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 > **接口依据**：[`docs/core-api.md`](./core-api.md)（事件名 / mode 枚举 / payload 字段 / dwell 表）。
 > **翻译源**：`voice-mikon/src/voice_mikon/host/static/capsule.css`（样式与数值）、
 > `capsule.js`（状态 class 组合与文案）、`host/capsule.py`（窗口显隐 / 焦点）、
@@ -18,7 +20,7 @@
 | `src/VmNext.App/Gui/` | `App.axaml(.cs)`（Avalonia 应用 + palette）、`GuiHost.cs`（窗口 + 绑定层 + 界面形态） |
 | `src/VmNext.Shell/` | **只补不改**：`OverlayWindow.HitRegions`（自定义命中区）、`NativeMethods.CombineRgn`、`NativeMethods.SetForegroundWindow` |
 | `tests/VmNext.Ui.Tests/` | 新增（`Avalonia.Headless.XUnit`）：12 条 mode → 视觉状态断言 |
-| `tests/VmNext.App.Tests/` | K3 的 10 条全过 + 新增 1 条 GUI 子进程渲染测试 |
+| `tests/VmNext.App.Tests/` | K3 的 10 条全过 + 新增 1 条 GUI 子进程渲染测试（**该项目现已删除**） |
 | `tests/VmNext.TokenCheck/` | 改引用 `VmNext.Ui`（palette 搬家），仍通过 |
 
 ---
@@ -190,7 +192,7 @@ mode 取自 `core-api.md` §4.1；class 组合取自 `capsule.js` 的 `applyMode
 | 项目 | 总数 | 通过 | 失败 | 跳过 |
 |---|---|---|---|---|
 | `VmNext.Ui.Tests`（**新增**） | 12 | **12** | 0 | 0 |
-| `VmNext.App.Tests`（K3 + 新增 1 条 GUI） | 11 | **10** | 0 | **1** |
+| `VmNext.App.Tests`（K3 + 新增 1 条 GUI；现已删除） | 11 | **10** | 0 | **1** |
 | `VmNext.Core.Tests`（未动） | 23 | 22 | 0 | 1 |
 | `VmNext.Audio.Tests`（未动） | 10 | 10 | 0 | 0 |
 | `VmNext.Engines.Tests`（未动） | 80 | 78 | 0 | 2 |
@@ -209,8 +211,8 @@ Assert.Equal(40, window.Pill.MaxWidth);
 Assert.Equal(CapsuleTheme.DarkPalette["--wave"], BackgroundOf(window.Pill.Background));
 ```
 
-**`tests/VmNext.App.Tests/GuiWindowTests`**（真子进程）：起 GUI → 等窗口 → `PrintWindow`
-统计非透明像素（> 500）与录音红像素（> 200）→ `WM_CLOSE` → 正常退出（退出码 0）。
+**`tests/VmNext.App.Tests/GuiWindowTests`**（真子进程，**该项目现已删除**）：起 GUI → 等窗口 →
+`PrintWindow` 统计非透明像素（> 500）与录音红像素（> 200）→ `WM_CLOSE` → 正常退出（退出码 0）。
 
 ### 6.2 命令行实测
 
@@ -231,6 +233,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #1：CSS 的 padding 简写 ≠ Avalonia 的简写
 
+- **状态**：**仍然成立**。`CapsuleWindow.axaml` 里写的是 `Padding="8,10,8,10"`（左 8、上 10、右 8、下 10）。
 - **原文**：`capsule.css` 的 `.stack { padding: 10px 8px }`；Avalonia 的 `Padding` 是
   `Thickness`，两个值的写法是"左,上"（省略时右=左、下=上）。
 - **我的处理**：XAML 里写 `Padding="8,10,8,10"`（左 8、上 10、右 8、下 10）。
@@ -239,6 +242,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #2：窗口宽度该设在 Window 上还是内容上
 
+- **状态**：**仍然成立**。宽度同时设在 `Window.Width` 与根控件的 `Width`（512 逻辑像素），`SizeToContent` 只管高度。
 - **原文**：真机 `capsule.py` 的 `WIN_W = 512` 是**窗口**的宽度，内容在里面居中。
 - **我的处理**：宽度同时设在 `Window.Width` 和 `Root.Width` 上（都是 512 逻辑像素），
   `SizeToContent` 只管高度。
@@ -249,6 +253,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #3：命中区怎么做到"只有球能点"
 
+- **状态**：**已解决（K4b）**。K4b 删掉了 `OverlayWindow.HitRegions` 这个「外部填矩形」的公共属性，命中区算法全在 `CapsuleWindow.BuildHitRegions`；Shell 侧只保留 `protected virtual BuildHitRegions()` 挂点。
 - **原文**：真机由前端 `update_regions` 上报文字条 / 胶囊 / 浮层的矩形，Python 侧
   `SetWindowRgn` 裁成并集；`capsule.js` 的注释特别强调"浮层要单独报，不能并进球的包围盒"。
 - **我的处理**：Shell 加了 `OverlayWindow.HitRegions`（客户区坐标，物理像素）；
@@ -259,6 +264,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #4：文字条按下要临时激活，但激活了就抢焦点
 
+- **状态**：**仍然成立**（K4b 又补了一条：选文本期间 `PointerReleased` 之前不切回不激活）。
 - **原文**：`capsule.py` 的 `focus_textbar` —— 文字条被按下时把前台与键盘焦点送进去
   （不这样就选不了文本、Ctrl+C 不了）；真机还靠 `webview_tweaks` 额外处理 WebView2 的焦点。
 - **我的处理**：文字条按下 → `SetAllowActivation(true)`；松手 → `SetAllowActivation(false)`。
@@ -267,6 +273,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #5：点球开始录音的焦点陷阱
 
+- **状态**：**仍然成立**。点球时记下当前前台 HWND，焦点跑掉了就 `SetForegroundWindow` 还回去。
 - **原文**：`capsule.py` 的 `_start_recording_from_orb` —— 鼠标点在 WebView2 子窗口上会激活
   整棵窗口树，前台被胶囊抢走，注入就贴到胶囊自己身上。
 - **我的处理**：点球时记下当前前台 HWND，`TryStartRecording()` 之后核一遍，焦点跑掉了就
@@ -276,6 +283,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #6：通知要不要直接绑到 UI
 
+- **状态**：**仍然成立**。UI 只认 mode，不直接订阅 `NotificationPosted`。
 - **原文**：`core-api.md` §3 列了 `NotificationHub.NotificationPosted`，但也说
   "显示状态只有一个出口（presenter 翻译后的 mode）"。
 - **我的处理**：**不绑**。通知由 presenter 翻译成 mode（`error_terminal` /
@@ -285,6 +293,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #7：WinExe 下 `--headless` 的控制台输出
 
+- **状态**：**仍然成立**。`Program.TryAttachParentConsole` 仍是「先看标准输出句柄可用不，可用就不附加」。
 - **原文**：任务书要求"WinExe 下用 `AttachConsole(ATTACH_PARENT_PROCESS)` 附加到父控制台"。
 - **我的处理**：先看 `GetStdHandle(STD_OUTPUT_HANDLE)` 是不是可用 —— **可用就不附加**，
   只有拿不到句柄（双击启动）才尝试附加。
@@ -294,6 +303,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #8：面板改主题 / 改界面形态之后，胶囊怎么跟上
 
+- **状态**：**已解决（K5）**。面板已实现（`PanelPresenter` + `PanelWindow`），`ThemeChanged` / `UiModeChanged` 已接到胶囊与 presenter。
 - **原文**：Python 的面板改完 `config` 会推给 presenter（`setTheme` / `hide_orb` / `show_orb`）。
 - **我的处理**：`presenter.ThemeChanged` → `SetTheme`；`presenter.OrbVisibilityChanged` → `SetOrbVisible`；
   `presenter.ApplyUiMode(mode)` → 球的显隐。面板本身是 K4b。
@@ -301,6 +311,7 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ### 疑问 #9（K1 的老问题，没改）：`Dpi.SetDpiAwareness()` 的退化分支
 
+- **状态**：**仍未解决**。退化分支返回的档位字符串可能不准 —— 那只是日志里的字样，不影响实际生效的 DPI 模式。
 - **原文**：`Core/Interop/Dpi.cs` 里 `SetProcessDpiAwareness(2) == 0` 被当成"成功"，
   但 MSDN 说它失败时返回的也是 0（`DPI_AWARENESS_INVALID`）。
 - **我的处理**：**不改**（K1 的行为，K4a 不动）。主路径

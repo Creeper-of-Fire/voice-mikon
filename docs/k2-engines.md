@@ -1,14 +1,18 @@
 # K2 —— 核心层：识别引擎层 + 本地推理 Python IPC（Python → C#）
 
+> 本文是 **K2 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 翻译对象：`voice-mikon/src/voice_mikon/engines/`（`base.py` / `minimax.py` / `_http.py` /
 `streaming.py` / `vad.py` / `vad_silero.py` / `engine.py`）→
 `voice-mikon-next/src/VmNext.Engines/` + `voice-mikon-next/python/asr_server/`。
 
-原则同 K1：**翻译不是重写**。Python 的逻辑一一对应到 C#，注释里的"为什么"（踩坑记录）
-一并带进 C#；不优化、不改进、不凭感觉改行为。
+原则同 K1：**目的是让引擎层的行为与 Python 版一致**，不是重新设计一套。做法是 Python 的逻辑
+一一对应到 C#，注释里的"为什么"（踩坑记录）一并带进 C#；凡是不改行为就不动，
+确实要改的地方下文每条都写了理由。
 
 **唯一一处架构变化**：本地推理从"进程内 `import torch`"改成
-"**Python 子进程 + named pipe**"（详见 §2）。其余行为逐条对齐。
+"**Python 子进程 + named pipe**"（详见 §2）。**目的是"主进程不背着几百 MB 的 torch"** ——
+子进程存在的唯一理由就是持有模型。其余行为逐条对齐（对齐的是**行为**，不是实现细节）。
 
 约束遵守情况：
 
@@ -261,6 +265,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 1（最重要）：Silero 的"有声段概率 > 0.5"在合成音频上达不到
 
+- **状态**：**仍然成立**。断言已改成「明显高于静音段」（实测比值 ≈ 7 倍）；真正的「判定正确」由与 Python 参考实现逐窗比对保证（偏差 < 1e-4）。
 - **原文**：任务书要求"合成音频（静音段 + 正弦"有声"段），断言静音段概率 < 0.5、有声段 > 0.5"。
 - **实测**：Silero 是在**真实语音**上训练的神经网络。合成信号实测概率（onnxruntime 1.20.1）：
   正弦 200Hz 峰值 **0.22**、120Hz 谐波峰值 **0.47**、白噪声 0.04、脉冲串 0.05、
@@ -274,13 +279,17 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 2（重要）：词表文件被删掉后，旧词**继续生效**
 
+- **状态**：**仍然成立**。`HotwordSource.RefreshFileWords()` 仍是「文件不存在就 return、保留旧缓存」。要改成「文件删了就清空」得先改 Python 版 —— 那是另一个工程的事。
 - **原文**（`base.py`）：`except OSError: pass` —— 文件不存在时只是跳过，缓存里的旧词不清空。
-- **我的处理**：如实翻译（`HotwordSource.RefreshFileWords()`：文件不存在就 `return`，保留旧缓存）。
-- **为什么**：翻译不改行为。但它看着像 bug，所以写进了测试与注释（"Python 版实际行为"）。
+- **我的处理**：**目的是行为一致**（词表文件被删后旧词继续生效）—— 照搬了 Python 的
+  `except OSError: pass` 语义（`HotwordSource.RefreshFileWords()`：文件不存在就 `return`，
+  保留旧缓存）。它看着像 bug，所以写进了测试与注释（"Python 版实际行为"）。
+- **为什么**：这一版的任务是"行为一致"，不是"顺手修好看着别扭的地方"。
   要改成"文件删了就清空词表"的话，得先改 Python 版 —— 那是另一个工程的事。
 
 ### 疑问 3（重要）：本地后端 `unload` 的语义被收紧了
 
+- **状态**：**仍然成立**。C# 版的 `Unload()` 仍会把 Python 子进程一起结束（子进程存在的唯一理由就是持有模型）。
 - **原文**（`engine.py`）：`unload()` 只做 `del model` + `torch.cuda.empty_cache()`，
   **Python 进程还留着**（torch 运行时本身还占着几百 MB）。
 - **我的处理**：C# 版的 `Unload()` 转发 `unload` 给 Python（那边照样释放显存），
@@ -291,14 +300,18 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 4：热词去重口径 —— config 列表内部**不去重**
 
+- **状态**：**仍然成立**。config 里的重复词仍原样保留；去重只发生在「文件词 vs 已收集词」之间。
 - **原文**（`base.py`）：`words = [w.strip() for w in self.hotwords if w and w.strip()]` —— 只滤空；
   去重只发生在"文件词 vs 已收集词"之间。
-- **我的处理**：如实翻译，并写了一条测试把这个口径钉住（config 里重复的词会**原样保留**两次）。
+- **我的处理**：**目的是行为一致**（config 列表内部不去重）—— 照搬了 Python 的
+  `words = [w.strip() for w in self.hotwords if w and w.strip()]`（只滤空），
+  并写了一条测试把这个口径钉住（config 里重复的词会**原样保留**两次）。
 - **为什么**：任务书写的是"热词双来源合并去重"，容易读成"全局去重"。Python 实际不是那样，
-  翻译不能顺手"改进"。真要全局去重，得先改 Python 版。
+  这一版不顺手"改进"。真要全局去重，得先改 Python 版。
 
 ### 疑问 5：多声道混音的溢出行为（numpy 回绕 vs C# 饱和）
 
+- **状态**：**仍然成立（有意差异）**。C# 侧仍用饱和（clamp 到 ±32767/32768）。
 - **原文**（`streaming.py`）：`arr.mean(axis=-1).astype(np.int16)` —— numpy 越界是**回绕**
   （全幅 +32768 混音后会变成 -32768）。
 - **我的处理**：C# 侧用**饱和**（clamp 到 ±32767/32768）。
@@ -307,6 +320,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 6：协议多出两种响应（`unloaded` / `bye`）和一个命令（`shutdown`）
 
+- **状态**：**仍然成立**。协议以 `python/asr_server/README.md` 为准。
 - **原文**：任务书列了 5 种响应（`ready` / `loaded` / `result` / `error` / `pong`）和 5 个命令。
 - **我的处理**：加了 `unloaded`（`unload` 的应答）和 `bye`（`shutdown` 的应答），
   以及 `shutdown` 命令。
@@ -317,6 +331,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 7：`switch_model` 只在本地后端有
 
+- **状态**：**仍然成立**。`IAsrBackend.SwitchModel` 提到接口上，MiniMax 实现抛明确错误。
 - **原文**：`ASRBackend` 基类里**没有** `switch_model`（只有 `engine.py` 的 `ASREngine` 有）。
 - **我的处理**：提到 `IAsrBackend` 接口上（任务书要求接口含 `SwitchModel`），
   MiniMax 的实现抛明确错误："MiniMax 后端不支持切换模型规格(没有本地权重可切)"。
@@ -324,6 +339,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 8：预览引擎的工厂函数没翻
 
+- **状态**：**仍然成立**。调用方直接 `new SentencePreviewEngine(...)` / `new FullPassEngine(...)`。
 - **原文**（`streaming.py`）：`make_preview_engine(kind, engine, ...)` 按 `PreviewEngineKind`
   造引擎（`SENTENCE` / `FULL_PASS`）。
 - **我的处理**：C# 侧由调用方直接 `new SentencePreviewEngine(...)` / `new FullPassEngine(...)`。
@@ -332,6 +348,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 9：VAD 降级通知没法在本层发
 
+- **状态**：**已解决**。K3 把「去重与通知」收进了控制器；降级仍由 `VadFactory.Make(..., onFallback)` 交给上层。
 - **原文**（`vad.py`）：`make_vad_detector()` 降级时会 `notify.publish("warning", "vad_fallback", ...)`，
   且**同一原因只通知一次**（进程级 `_notified_reasons` 集合）。
 - **我的处理**：`VadFactory.Make()` 通过 `onFallback(reason, message)` 回调把降级交给上层，
@@ -342,6 +359,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 10：识别接口的音频约定与语种参数
 
+- **状态**：**仍然成立**。`IAsrBackend.Transcribe(short[] audio, int sampleRate)`，约定单声道 int16。
 - **原文**：Python 的 `transcribe(audio, sample_rate)` 接受**任意 ndarray**（可多声道），
   本地后端还有 `language` 参数（默认取构造时的值）。
 - **我的处理**：`IAsrBackend.Transcribe(short[] audio, int sampleRate)` —— 约定**单声道 int16**；
@@ -352,6 +370,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 11：热词 context 的传递方向
 
+- **状态**：**仍然成立**。协议里传词表数组，两边各自合并去重。
 - **原文**（`engine.py`）：本地后端自己调 `self._build_context()`，把拼好的字符串交给 `qwen_asr`。
 - **我的处理**：C# 侧用 `HotwordSource` 合并好词表，把**词表数组**（`context[]`）发给 Python；
   Python 侧再与它自己那份词表文件合并去重，最后拼成官方格式
@@ -361,6 +380,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
 
 ### 疑问 12：音频 int16 → float32 的"顺序坑"在 C# 侧怎么落地
 
+- **状态**：**仍然成立**。混音仍在 `StreamingEngine.AsAudio()` 里做**整数**混音，刻度不丢。
 - **原文**（`base.py`）：`_to_float32` 先记住原始 dtype 再混音 —— mean 会把 int16 提升成
   float64，之后再判断"是不是整数"就永远判不到了，那样 int16 的刻度会被当成已归一化的浮点，
   直接 clip 成 ±1（全幅方波）。

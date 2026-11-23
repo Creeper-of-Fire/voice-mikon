@@ -1,5 +1,7 @@
 # K4b —— 胶囊的拖拽 / 摆位 / 位置记忆 / 托盘 / 退出重启 / 右键菜单
 
+> 本文是 **K4b 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 > **接口依据**：[`docs/core-api.md`](./core-api.md)（事件名 / mode 枚举 / 退出顺序）。
 > **翻译源**：`voice-mikon/src/voice_mikon/host/placement.py`（几何）、
 > `host/drag.py`（拖拽会话）、`host/tray.py` + `__main__.py`（托盘）、
@@ -348,6 +350,7 @@
 
 ### 疑问 #1：任务书说的"三种位置模式（跟随光标 / 固定默认位 / 用户自定义）"在 Python 版里已经不存在了
 
+- **状态**：**已否决（按 Python 版的现状定案）**。只做两档：默认右下角 + 用户拖动记忆；「跟随光标」是**新功能**，要单独一轮做。
 - **原文**：任务书 §2 写"三种位置模式（跟随光标 / 固定默认位 / 用户自定义 —— 见 `capsule.css` L663-668 的
   `.orb-follow` 注释和 `host/placement.py`）按 `config` 选"。
 - **查证**：`voice-mikon/src/voice_mikon/config.py` L31-32 明确写
@@ -362,6 +365,7 @@
 
 ### 疑问 #2：位置记忆存"球"的位置还是"窗口"的位置？
 
+- **状态**：**仍然成立**。`orb.geometry` 存的是**球**相对工作区的逻辑偏移，与 Python 版逐字相同（持久化格式必须兼容）。
 - **原文**：`placement.py` L162 `orb_position_from_geometry` 的注释说
   "存的是**球**的偏移（不是窗口的）：球是用户真正盯着的那一小块"；
   但 `encode_offset`（L52）的入参是"窗口左上角"。
@@ -376,6 +380,7 @@
 
 ### 疑问 #3：拖拽的位移换算，Python 依赖前端发"逻辑像素绝对位置"，我们怎么算？
 
+- **状态**：**仍然成立**。`DragGeometry.WindowPosition` 的换算链未变（物理位移 → 逻辑位移 → 物理位移）。
 - **原文**：`drag.py` L181 `DragSession.move` —— "前端每次都从 mousedown 起点算绝对目标发过来"，
   Python 侧 `move_window_to(hwnd, round(nx * scale), round(ny * scale))`，
   其中 `scale` 是**当前**窗口所在显示器的缩放。
@@ -388,6 +393,7 @@
 
 ### 疑问 #4：命中区为什么用"显式列出可见元素"而不是"打标记后遍历可视树"？
 
+- **状态**：**仍然成立**。参与命中的元素显式列出，与 CSS 的选择器一一对应。
 - **原文**：任务书给了 (a) / (b) 两个方案，(b) 是
   "`OverlayWindow` 提供 attached property `ParticipatesInHitRegion`，`ApplyRegion` 时遍历可视树找标记的元素"。
 - **我的处理**：**a 的主体 + b 的骨架** —— 删掉 `OverlayWindow.HitRegions`（外部填矩形），
@@ -400,6 +406,7 @@
 
 ### 疑问 #5：托盘菜单多了"开始 / 停止录音"，"设置面板"改成了"设置"
 
+- **状态**：**部分过时**。菜单文案与顺序仍是那样；但「设置」现在**真的打开面板**了（K5 实现了 `PanelWindow`），不再是「面板尚未实现」的占位。
 - **原文**：任务书 §4 的菜单清单是"打开配置文件 / 打开日志 / 重新探测麦克风 / 设置（K5 未做）/ 重启 / 退出"，
   没有"开始 / 停止录音"；但同一节又说"照搬 `tray.py` 的……菜单项文案与顺序"，
   而 Python 的菜单（`__main__.py` L478-490）第一项就是"开始 / 停止录音"（默认项）。
@@ -409,6 +416,7 @@
 
 ### 疑问 #6：`prefers-reduced-motion` 的 Windows 对应物不是精确等价
 
+- **状态**：**仍然成立**。用 `SPI_GETCLIENTAREAANIMATION`，读不到时按「有动画」处理。
 - **原文**：CSS L675 `@media (prefers-reduced-motion: reduce)`；
   任务书指定用 Windows 的 `SPI_GETCLIENTAREAANIMATION`。
 - **我的处理**：用 `SPI_GETCLIENTAREAANIMATION`（"在显示中显示动画"）；
@@ -433,8 +441,8 @@
 | `--headless --mock --timeout 60` | — | ✓ 引擎就绪，退出码 0 | — | — | K3 的自检路径仍通 |
 
 **故意没跑的**：`tests/VmNext.App.Tests`（含"起 GUI 子进程 + `PrintWindow`"那条 ——
-会往用户屏幕上弹窗口）；以及一切涉及 Win32 桌面行为的自动化（托盘 / 退出顺序 / 重启 /
-拖拽真机行为），按任务书由用户真机验证。
+会往用户屏幕上弹窗口；该项目**现已删除**）；以及一切涉及 Win32 桌面行为的自动化
+（托盘 / 退出顺序 / 重启 / 拖拽真机行为），按任务书由用户真机验证。
 
 **验证手段只有三种**：纯函数单元测试、`Avalonia.Headless` 无头控件测试、`dotnet build`。
 **测试代码**里没有调用过 `SendInput` / `keybd_event` / `mouse_event` / `SetCursorPos` /

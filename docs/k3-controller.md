@@ -1,13 +1,16 @@
 # K3 —— 核心层：状态机 + 编排 + presenter + headless 入口（Python → C#）
 
+> 本文是 **K3 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 翻译对象：`voice-mikon/src/voice_mikon/core/controller.py`（1058 行）、
 `core/state.py`、`apps/voicebar/protocol.py`、`apps/voicebar/presenter.py`、
 `host/hotkey.py`、`__main__.py`（装配部分）
 → `voice-mikon-next/src/VmNext.Core/Controller/`、`src/VmNext.Core/Presentation/`、
 `src/VmNext.App/`、`src/VmNext.Audio/RecorderAdapter.cs`。
 
-原则同 K1 / K2：**翻译不是重写**。Python 的逻辑一一对应到 C#，Python 注释里的
-"为什么"（踩坑记录）一并带进 C#；不优化、不改进、不凭感觉改行为。
+原则同 K1 / K2：**目的是让核心层的行为与 Python 版一致**，不是重新设计一套。做法是 Python 的逻辑
+一一对应到 C#，Python 注释里的"为什么"（踩坑记录）一并带进 C#；凡是不改行为就不动，
+确实要改的地方（§3 的差异表里每条都写了理由）单独标出来。
 `voice-mikon/AGENTS.md` 的规矩逐条落地并写明理由。
 
 **UI 阶段的接口依据是 [`docs/core-api.md`](./core-api.md)**，本文件是翻译笔记。
@@ -119,7 +122,7 @@
 | `run_gui(config, entry)` 的装配 | `AppHost` 构造函数 + `Start()` | 见 `core-api.md` §1 的装配表 |
 | `run_headless(config, args)` | `Program.RunHeadless` | 退出码 0 / 2 |
 | `run_headless_service(config)` | `Program.RunConsoleService` | 本阶段没有托盘 |
-| `_shutdown_and_exit(...)` | `AppHost.Shutdown()` | 顺序照搬 |
+| `_shutdown_and_exit(...)` | `AppHost.Shutdown()` | 退出顺序照 `core-api.md` §1 |
 | `_print_state(state)` | `AppHost.PrintState` | `[状态] …` |
 | `_print_notification(note)` | `AppHost.PrintNotification` | `[通知] …` |
 | `reload_mic()` | `CoreController.ReloadMic()` | 收口到控制器 |
@@ -212,17 +215,21 @@
 
 ```powershell
 # 每个测试项目目录里各放了一份 global.json（MTP runner），要进项目目录跑
-cd tests\VmNext.App.Tests   && dotnet test
 cd tests\VmNext.Core.Tests  && dotnet test
 cd tests\VmNext.Engines.Tests && dotnet test
 cd tests\VmNext.Audio.Tests  && dotnet test
+cd tests\VmNext.Ui.Tests    && dotnet test
 ```
+
+> ⚠ **历史记录**：`tests\VmNext.App.Tests`（端到端那套）**现已删除** —— 它碰桌面
+> （真麦克风、真剪贴板、真注入目标窗口），按「不碰桌面」的原则不再保留。
+> 下面的数据是 K3 当时的结果，留档用，命令已不可跑。
 
 ### 4.2 汇总
 
 | 测试项目 | 总数 | 通过 | 失败 | 跳过 |
 |---|---|---|---|---|
-| `VmNext.App.Tests`（**新增**） | 10 | **9** | 0 | **1** |
+| `VmNext.App.Tests`（**新增**，现已删除） | 10 | **9** | 0 | **1** |
 | `VmNext.Core.Tests`（K1，宿主抽走后复跑） | 23 | 22 | 0 | 1 |
 | `VmNext.Engines.Tests`（K2，未动） | 80 | 78 | 0 | 2 |
 | `VmNext.Audio.Tests`（K1，未动） | 10 | 10 | 0 | 0 |
@@ -232,7 +239,7 @@ cd tests\VmNext.Audio.Tests  && dotnet test
   （K1 疑问 #4 已经记过；Python 版在同样场景下同样写不回去）；
 - Engines.Tests 2 条：环境变量 `MINIMAX_API_KEY` 不存在。
 
-### 4.3 `VmNext.App.Tests` 逐条
+### 4.3 `VmNext.App.Tests` 逐条（该项目现已删除，下表留档）
 
 | 测试 | 结果 | 说明 |
 |---|---|---|
@@ -286,6 +293,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #1（最重要）：焦点保护的语义被改了
 
+- **状态**：**仍然成立（有意的行为差异）**。`CoreController._focusAtStart` 仍在开始录音时记下前台窗口，注入时贴回那一个。
 - **原文**：`core/controller.py` 的 `_process()`：
   ```python
   # 粘贴前捕获焦点窗口 —— 转写这 1 秒用户可能切窗口
@@ -307,6 +315,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #2：`max_duration` 在 Python 里是死配置
 
+- **状态**：**仍然成立**。每轮录音仍起一个 `System.Threading.Timer`，到点自动 `StopRecording()` 并发 `recording_timeout` 通知。
 - **原文**：`config.py` 有 `max_duration: float = 120.0`，`README.md` 写着"单次录音上限(秒)"，
   但 `grep max_duration` 全仓库**只有定义与校验，没有任何地方读它** —— 录音可以无限长。
 - **我的处理**：每轮录音起一个 `System.Threading.Timer`，到点自动 `StopRecording()`，
@@ -317,6 +326,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #3：Core 不能引用 Audio（依赖方向）
 
+- **状态**：**仍然成立**。`Core` 仍不引用 `Audio`；窄接口 `IRecorder` / `IDrainableRecorder` + `VmNext.Audio.RecorderAdapter` 适配。
 - **原文**：`core/controller.py` 直接用 `audio/recorder.py` 的 `Recorder`（鸭子类型）。
 - **我的处理**：
   - `VmNext.Core` → `VmNext.Engines`（控制器要 `IAsrBackend` 与流式引擎；
@@ -329,6 +339,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #4：`TryCopyResult` 是新增的
 
+- **状态**：**仍然成立**。UI 侧的复制走 `presenter.TryCopyResult()`，UI 不直接摸剪贴板。
 - **原文**：Python 的胶囊（`host/capsule.py`）自己管"复制"按钮，直接写剪贴板；
   `apps/voicebar/presenter.py` 里没有对应方法。
 - **我的处理**：presenter 上加 `TryCopyResult()`（把 `CoreController.LastText` 写进剪贴板）。
@@ -339,6 +350,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #5：热键单字符取大写码位
 
+- **状态**：**仍然成立**。`HotkeyBinding.Parse` 用 `char.ToUpperInvariant`（键位按大写字母定义）。
 - **原文**：`parse_hotkey` 里的 `elif len(part) == 1: vk = ord(part.upper())`。
 - **我的处理**：C# 侧第一版照抄成了 `part[0]`（小写码位），被测试抓出来
   （`win+a` 解析出 97 而不是 65），已改成 `char.ToUpperInvariant(part[0])`。
@@ -347,6 +359,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #6：`Recorder` 的设备索引口径（K1 遗留，影响本层）
 
+- **状态**：**仍然成立**。与 K1 疑问 #1 同源：旧 `input_device` 数值不能沿用，首次要重选或留 `null`。
 - **原文**：Python 的 `config.input_device` 是 PortAudio 的**全局设备索引**（输出设备也占号）。
 - **我的处理**：K1 已经记过 —— NAudio 只有采集端点列表，`InputDevice.Index` 是
   **采集端点列表内的序号**。本层的麦克风探测（`DevicePicker.ChooseDevice`）
@@ -358,6 +371,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #7：`--mock` 是新增的命令行开关
 
+- **状态**：**仍然成立**。`--mock` 仍在 `AppOptions` 里，自检走它（否则本机永远是退出码 2）。
 - **原文**：Python 的 `build_parser()` 只有 `--headless` / `--timeout`。
 - **我的处理**：加 `--mock`（本地后端走 mock 模式，不加载真模型）。
 - **为什么**：自检/测试不能加载真模型 —— 一来用户的 voice-mikon 正占着显存，
@@ -367,18 +381,21 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #8：`config.input_device` 的探测耗时落在后台
 
+- **状态**：**仍然成立**。`InitMic()` 在 `mic-warmup` 线程；`ReloadMic()` 是同步的（用户主动点的托盘菜单项）。
 - **原文**：Python 的 `_init_mic()` 在 `mic-warmup` 线程里跑 `choose_device()`，
   探测要 2 秒。
-- **我的处理**：照搬（`InitMic()` 也在 `mic-warmup` 线程）。
+- **我的处理**：**目的是探测不占住热键路径** —— 照搬了 Python 的做法
+  （`InitMic()` 也在 `mic-warmup` 线程）。
   `ReloadMic()` 是**同步**的 —— 它是用户主动点的托盘菜单项，等 2 秒可以接受。
 - **为什么**：探测放在热键路径上会把用户说话的开头吃掉。
 
 ### 疑问 #9：测试宿主抽到共享项目，顺手修了一个真 bug
 
+- **状态**：**已失效**。`tests/VmNext.TestSupport/` 与 `tests/VmNext.App.Tests/` 都已删除（「不碰桌面」原则）；本条描述的静态字段覆盖 bug 随测试宿主一起没了，只留作背景知识。
 - **原文**：`tests/VmNext.Core.Tests/InjectTarget.cs` 里的 `TestEditHost`
   用**单个静态字段** `s_editHwnd` 记编辑控件句柄（窗口过程是静态委托，拿不到实例）。
-- **我的处理**：抽到共享项目 `tests/VmNext.TestSupport/`（两个测试项目共用），
-  并把静态字段改成**按窗口**的映射（`Dictionary<IntPtr, IntPtr>`）。
+- **我的处理**：抽到共享项目 `tests/VmNext.TestSupport/`（两个测试项目共用；
+  该项目现已删除），并把静态字段改成**按窗口**的映射（`Dictionary<IntPtr, IntPtr>`）。
 - **为什么**：**两个窗口同时存在时**，第二个宿主会覆盖第一个的映射 ——
   第一个窗口 WM_SETFOCUS 时把焦点设到**第二个**窗口的控件上，焦点被另一个线程抢走，
   实测"目标窗口怎么都拿不回前台焦点"。焦点保护那条测试一开始就是被这个坑挡住的。
@@ -416,7 +433,7 @@ src/VmNext.Shell/NativeMethods.cs                   + MOD_WIN 常量
 src/VmNext.Core/VmNext.Core.csproj                  + VmNext.Engines 引用
 ```
 
-**测试**
+**测试**（下面两个项目**现已删除** —— 碰桌面的端到端测试，留档用）
 ```
 tests/VmNext.TestSupport/                           共享注入验证宿主（从 Core.Tests 抽出）
 tests/VmNext.App.Tests/                             端到端测试（FakeBackend / 真链路）

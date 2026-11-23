@@ -1,11 +1,15 @@
 # K1 —— 核心层：基础设施 + Win32 互操作 + 音频层（Python → C#）
 
+> 本文是 **K1 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
+
 翻译对象：`voice-mikon/src/voice_mikon/` 下的 12 个模块 → `voice-mikon-next/src/VmNext.Core/` 与
 `src/VmNext.Audio/`。
 
-原则：**翻译不是重写**。Python 的逻辑一一对应到 C#，Python 注释里的"为什么"（踩坑记录）
-一并带进 C# 注释；不优化、不改进、不凭感觉改行为。`voice-mikon/AGENTS.md` 的规矩是用户拍板的，
-逐条落地并写明理由。
+**这一阶段的目标**：让 C# 版的核心层与音频层**行为与 Python 版一致**，不是重新设计一套。
+做法是 Python 的逻辑一一对应到 C#，Python 注释里的"为什么"（踩坑记录）一并带进 C# 注释 ——
+那些坑是真机踩出来的，照搬代码时一起照搬能省一轮返工。
+凡是不改行为就不动；确实要改的地方下文每条都写了理由。
+`voice-mikon/AGENTS.md` 的规矩是用户拍板的，逐条落地并写明理由。
 
 ---
 
@@ -157,6 +161,12 @@
 > 从仓库根目录跑 `dotnet test tests\...` 不会命中那份 `global.json`，会报
 > "Testing with VSTest target is no longer supported by Microsoft.Testing.Platform"。
 
+> ⚠ **历史记录**：本节（以及 §3 的实测数字）记的是 **K1 当时**的结果。
+> 下面提到的 `ClipboardIntegrationTests` / `InjectorIntegrationTests` /
+> `RecorderIntegrationTests` 等**碰桌面的集成测试现已删除** —— 它们会写真实剪贴板、
+> 占真实麦克风、往屏幕上弹窗，按「不碰桌面」的原则不再保留。
+> 现在 `Core.Tests` / `Audio.Tests` 只剩纯计算的那几条。
+
 | 测试项目 | 总数 | 通过 | 失败 | 跳过 | 耗时 |
 |---|---|---|---|---|---|
 | `VmNext.Core.Tests` | 23 | 22 | 0 | **1** | 15.1 s |
@@ -216,6 +226,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #1 设备索引口径变了（最要紧的一条）
 
+- **状态**：**仍然成立**。NAudio 只有采集端点列表，`InputDevice.Index` 就是列表内序号；旧 `config.json` 的 `input_device` 数值仍然不能沿用（首次要重选，或留 `null` = 自动挑选）。
 - **原文**：`audio/devices.py` 用 `sd.query_devices()` 的**全局设备索引**（输出设备也占号），
   `config.input_device` 存的就是这个号；`choose_device(explicit_index=...)` 也按它比对。
 - **我的处理**：NAudio 只有采集端点列表，`InputDevice.Index` = **采集端点列表内的序号**
@@ -226,6 +237,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #2 `LevelPump` 在 Python 里没有直接对应物
 
+- **状态**：**仍然成立**。`Core` 依然不引用 `Audio`（`ILevelSource` / `IRecorder` 窄接口），依赖方向没变。
 - **原文**：`core/levels.py`（68 行）只有 `dbfs_to_unit` / `level_gate` 两个纯函数；
   30 fps 的电平泵在 `core/controller.py`（`_level_loop` / `_mapped_levels`，属 K3 的范围）。
 - **我的处理**：`LevelPump` = 两个纯函数 + 30 fps 泵（`PushInterval = 1/30`）+ 计时，
@@ -235,6 +247,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #3 注入验证目标：Windows 11 的新记事本没法自动化
 
+- **状态**：**已解决，不再适用**。K3 改用「自建 Win32 编辑窗口 + 独立线程消息循环」落地了同一件事；相关碰桌面的集成测试（`InjectTarget.cs` 等）已按「不碰桌面」原则删除 —— 本条只留作背景知识。
 - **原文**：验收要求"启动 Notepad → 等到窗口 → 设前台 → 注入 → 用 `WM_GETTEXT` 读 Edit 控件"。
 - **我的处理**：默认目标是**自建的最小 Win32 编辑窗口**（顶层窗口 + `EDIT` 控件，跑在
   **独立线程 + 消息循环**上）；真记事本保留在 `VMNEXT_TEST_TARGET=notepad` 开关下。
@@ -248,8 +261,10 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #4 归还原内容在本机会被系统拒绝（1418）
 
+- **状态**：**仍然成立**（本机环境限制，不是移植引入的缺陷）。写入重试（3 次）留在 `ClipboardService.SetTextVerified` 里；相关集成测试已删除。
 - **原文**：`core/inject.py` 的 `_restore()` → `clipboard.set_text(original)`。
-- **我的处理**：逻辑照搬；另外给 `SetTextVerified` 加了**写失败重试**（3 次，间隔
+- **我的处理**：**目的是"借板用完还原，原内容一个字不能丢"** —— 照搬了 Python 的归还逻辑
+  （先分配、后清板）；另外给 `SetTextVerified` 加了**写失败重试**（3 次，间隔
   0.5 / 1.0 / 1.5 s，因为 1418 常是瞬时的）；本机仍失败 → 集成测试该档 skip 并写明原因。
 - **为什么**：本机 `SetClipboardData` 返回 **1418（ERROR_NOT_ENOUGH_QUOTA）** —— 剪贴板被
   "粘贴消费"之后进入 OLE / 延迟渲染状态，普通写入被拒。用 **Python 版做过对照实验**：
@@ -258,6 +273,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #5 `NativeMethods.cs` 的"绝不注入输入"约定需要例外
 
+- **状态**：**仍然成立**。注入能力仍集中在 `VmNext.Core.Inject.Injector`，唯一调用方式是「剪贴板 + Ctrl+V」且必须读回校验。
 - **原文**：文件头第 1 条："只做查询与窗口样式/区域设置，绝不注入输入。禁止 SendInput …"
 - **我的处理**：加了**有记录的例外**并写明理由：注入能力集中在 `VmNext.Core.Inject.Injector`
   一处，唯一调用方式是「剪贴板 + Ctrl+V」且**必须读回校验**；窗口层与验证壳仍然只做查询。
@@ -266,6 +282,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #6 配置值类型不匹配时的行为
 
+- **状态**：**仍然成立**。`Config.FromDictionary` 仍是「warning + 用默认值顶上 + 不崩」。
 - **原文**：`Config.from_dict` 不校验类型（`sample_rate` 写成字符串会一路带着，直到用的时候才炸）；
   `OrbConfig.from_dict` 对未知子键会 warning。
 - **我的处理**：已知键类型对不上 → **warning + 用默认值顶上 + 不崩**；未知键 → warning + 忽略。
@@ -274,6 +291,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #7 测试框架：xunit v2 → v3
 
+- **状态**：**部分过时**。`Core.Tests` / `Audio.Tests` / `Engines.Tests` 用 xunit v3 + 项目目录里的 `global.json`；但 `tests/VmNext.Ui.Tests` 仍是 **xunit v2**（`Avalonia.Headless.XUnit` 只支持 v2），而且它没有 `global.json`。
 - **原文**：任务写的是 `xunit` + `xunit.runner.visualstudio` + `Microsoft.NET.Test.Sdk`。
 - **我的处理**：用 `xunit.v3` 4.0.3 + `xunit.runner.visualstudio` 4.0.1 + `Microsoft.NET.Test.Sdk` 17.12.0，
   每个测试项目目录放一份 `global.json`（`test.runner = Microsoft.Testing.Platform`）。
@@ -284,6 +302,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #8 "主线程"在 C# 里没有对应概念
 
+- **状态**：**仍然成立**。`ClipboardService` 构造时记录 owner 线程，`EnsureOwnerWindow()` 只在 owner 线程建窗口。
 - **原文**：`clipboard._is_main_thread()` = `threading.current_thread() is threading.main_thread()`；
   非主线程**不建** owner 窗口，只复用。
 - **我的处理**：`ClipboardService` 构造时记录 **owner 线程**（构造它的那个线程）；
@@ -295,6 +314,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #9 WASAPI 共享模式没有"选采样率"这回事
 
+- **状态**：**仍然成立**。`DevicePicker.SupportedRate()` 取设备 mix format，拿不到时兜底 48000。
 - **原文**：`devices.supported_rate()` 从高到低试候选（48000 / 44100 / 32000 / 22050 / 16000）。
 - **我的处理**：`DevicePicker.SupportedRate()` 直接取设备的 **mix format** 采样率；
   拿不到时兜底 48000（Python 兜底 16000）。
@@ -303,6 +323,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #10 顺手修了一个真问题：转交所有权时的顺序
 
+- **状态**：**仍然成立（已修）**。多余的那次 `EmptyClipboard()` 已去掉，归还走「先分配、后清板」。
 - **原文**：`clipboard._relinquish_ownership()` 先 `EmptyClipboard()`，再 `_write_text_locked(text)`
   （而 `_write_text_locked` 内部**又**会 EmptyClipboard 一次）。
 - **我的处理**：去掉多余的那次 `EmptyClipboard()`，直接走"先分配、后清板"的写入。
@@ -312,14 +333,17 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #11 录音的回调模型（NAudio 与 PortAudio 不同）
 
+- **状态**：**仍然成立**。NAudio 事件驱动 → 混音入队 → 按 1024 样本凑块。
 - **原文**：`sounddevice.InputStream(blocksize=1024, callback=...)`，回调里 append 帧。
 - **我的处理**：NAudio 的 `WasapiCapture` 是**事件驱动**（`DataAvailable`）→ 事件里把数据混音成
-  int16 单声道入队 → 采集线程按 **1024 样本**凑块（块大小与 Python 一致）。
-- **为什么**：NAudio 没有"指定 blocksize 的流回调"。块大小必须对齐 —— 回放工具要按**同样的粒度**
-  切音频喂引擎，否则复现不出真实的喂入节奏。
+  int16 单声道入队 → 采集线程按 **1024 样本**凑块（块大小对齐 Python 的 1024）。
+- **为什么**：**目的是让喂进引擎的音频粒度与 Python 版一致** —— 回放工具要按**同样的粒度**
+  切音频喂引擎，否则复现不出真实的喂入节奏。NAudio 没有"指定 blocksize 的流回调"，
+  所以在 NAudio 的事件模型里自己凑块。
 
 ### #12 其它小差异（不影响行为）
 
+- **状态**：**仍然成立**。三条都是实现细节差异，不改变行为。
 - Python `frames_to_int16` 支持 float 输入并按 `*32768` 缩放；C# 侧输入恒为 int16（WASAPI 混音后），
   缩放系数用 NAudio 口径（`*32767`）并 clamp。
 - Python 的 `NoiseFloorTracker` 用无锁 `deque`；C# 用锁 —— 行为等价。
@@ -351,7 +375,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 **追加（Shell，只追加不改已有函数）**
 `src/VmNext.Shell/NativeMethods.cs`：剪贴板 / 键盘注入 / 焦点 / 显示器与 DPI / 消息循环 相关声明
 
-**测试**
+**测试**（其中带 `Integration` 的三个文件**现已删除** —— 碰桌面的测试）
 `tests/VmNext.Core.Tests/`：`ConfigTests.cs`、`LevelPumpTests.cs`、`ClipboardIntegrationTests.cs`、
 `InjectorIntegrationTests.cs`、`InjectTarget.cs`（注入验证目标：真记事本 or 自建 Win32 编辑窗口）
 `tests/VmNext.Audio.Tests/`：`NoiseFloorTests.cs`、`RecordingStoreTests.cs`、`RecorderIntegrationTests.cs`

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VmNext.Audio</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VmNext.Core\VmNext.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      NAudio：WASAPI 采集（WasapiCapture）+ 设备枚举（MMDeviceEnumerator）。
+      只用这两个用途，其余 API 不引。
+    -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+</Project>

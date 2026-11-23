@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VmNext.Audio.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- xunit v3：测试项目是 Exe（自带入口点），并且支持运行时动态 skip（Assert.Skip） -->
+    <OutputType>Exe</OutputType>
+    <!-- .NET 10 SDK 上 dotnet test 走 Microsoft.Testing.Platform（VSTest target 已不再支持 MTP 项目） -->
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <!-- xunit v3：集成测试要能在"没有麦克风"的机器上运行时跳过 -->
+    <PackageReference Include="xunit.v3" Version="4.0.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\VmNext.Audio\VmNext.Audio.csproj" />
+    <ProjectReference Include="..\..\src\VmNext.Core\VmNext.Core.csproj" />
+  </ItemGroup>
+
+</Project>

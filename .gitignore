@@ -10,3 +10,4 @@ publish/
 
 ## 本地实验产物
 *.log
+TestResults/

@@ -247,6 +247,19 @@ public static class NativeMethods
     [DllImport("gdi32.dll", SetLastError = true)]
     public static extern bool DeleteObject(IntPtr hObject);
 
+    /// <summary>
+    /// 把两个区域合并成一个（CombineRgn 的模式）。
+    /// RGN_OR = 2：取并集（两块都在）。
+    /// </summary>
+    public const int RGN_OR = 2;
+
+    /// <summary>
+    /// 合并区域：hDest = hSrc1 ∪ hSrc2（模式 RGN_OR）。
+    /// 目标区域的所有权归调用方（合并完要 DeleteObject）。
+    /// </summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CombineRgn(IntPtr hDest, IntPtr hSrc1, IntPtr hSrc2, int iMode);
+
     #endregion
 
     #region 窗口查询

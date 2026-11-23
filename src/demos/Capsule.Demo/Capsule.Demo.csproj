@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- OutputType=Exe（不是 WinExe）：demo 需要在控制台打印引导文字，
+         用户要能一眼看到"按什么键做什么"。 -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Capsule.Demo</RootNamespace>
+    <AssemblyName>Capsule.Demo</AssemblyName>
+    <!-- AOT 友好：默认编译期绑定，避免运行时反射查控件 -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      版本用 11.* 浮动（与 src/VmNext.Shell 保持一致）。
+      首次 restore 后实际解析到 11.3.23（见 docs/capsule-translation.md 的"环境"一节）。
+      浮动版本会随 NuGet 漂移，正式发布前应锁定具体版本（archive 意外发现 #9）。
+    -->
+    <PackageReference Include="Avalonia" Version="11.*" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.*" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\VmNext.Shell\VmNext.Shell.csproj" />
+    <ProjectReference Include="..\..\VmNext.Ui\VmNext.Ui.csproj" />
+  </ItemGroup>
+
+</Project>

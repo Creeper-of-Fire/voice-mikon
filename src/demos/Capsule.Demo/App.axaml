@@ -1,0 +1,22 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Capsule.Demo.App"
+             RequestedThemeVariant="Dark">
+
+  <Application.Styles>
+    <!-- Fluent 只提供控件的默认骨架（字体、FocusAdorner 等），
+         配色一律走下面自己的令牌，不依赖 Fluent 的主题色。 -->
+    <FluentTheme />
+  </Application.Styles>
+
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <!-- 胶囊的 palette 与派生色在 VmNext.Ui/CapsuleTheme.axaml（两处引用同一份，
+             值由 tests/VmNext.TokenCheck 对着 capsule.css 核对）。 -->
+        <ResourceInclude Source="avares://VmNext.Ui/CapsuleTheme.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+</Application>

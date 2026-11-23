@@ -1,0 +1,77 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ==================== 令牌（深色基准）====================
+       值逐字来自 voice-mikon/src/voice_mikon/host/static/capsule.css 的 :root 块。
+       ⚠ CSS 的 8 位十六进制是 #RRGGBBAA（alpha 在**最后**），
+         这里已按 CSS 规范换算成 Avalonia 的 #AARRGGBB。
+       换算说明见 docs/k4a-ui.md 的"疑问清单"第 1 条。
+       注：注释里的 css.xxx 指的是 capsule.css 的 CSS 变量（双连字符前缀）——
+           XML 注释里不允许出现连续两个连字符，所以这里写成 css. 形式。 -->
+
+  <!-- css.deep: #0b0b0c  卡片底色（文字条 + 胶囊） -->
+  <SolidColorBrush x:Key="Capsule.Deep.Brush" Color="#FF0B0B0C" />
+  <!-- css.fg: #f4f4f5  前景字色 -->
+  <SolidColorBrush x:Key="Capsule.Fg.Brush" Color="#FFF4F4F5" />
+  <!-- css.stroke: #ffffff33  描边（白 20% 透明） -->
+  <SolidColorBrush x:Key="Capsule.Stroke.Brush" Color="#33FFFFFF" />
+  <!-- css.err-bg: #2a0f11  错误态底色 -->
+  <SolidColorBrush x:Key="Capsule.ErrBg.Brush" Color="#FF2A0F11" />
+  <!-- css.err-stroke: #ff6b6b4d  错误态描边（红 30% 透明） -->
+  <SolidColorBrush x:Key="Capsule.ErrStroke.Brush" Color="#4DFF6B6B" />
+  <!-- css.err-fg: #fecaca  错误态文字 -->
+  <SolidColorBrush x:Key="Capsule.ErrFg.Brush" Color="#FFFECACA" />
+  <!-- css.err-icon: #fca5a5  错误态图标 -->
+  <SolidColorBrush x:Key="Capsule.ErrIcon.Brush" Color="#FFFCA5A5" />
+  <!-- css.warn-bg: #2a1f0b  警告态底色（琥珀，不是错误红） -->
+  <SolidColorBrush x:Key="Capsule.WarnBg.Brush" Color="#FF2A1F0B" />
+  <!-- css.warn-stroke: #fbbf244d  警告态描边 -->
+  <SolidColorBrush x:Key="Capsule.WarnStroke.Brush" Color="#4DFBBF24" />
+  <!-- css.warn-fg: #fde68a  警告态文字 -->
+  <SolidColorBrush x:Key="Capsule.WarnFg.Brush" Color="#FFFDE68A" />
+  <!-- css.warn-icon: #fcd34d  警告态图标 -->
+  <SolidColorBrush x:Key="Capsule.WarnIcon.Brush" Color="#FFFCD34D" />
+  <!-- css.cancel-btn: #3a3a3e  取消按钮底色 -->
+  <SolidColorBrush x:Key="Capsule.CancelBtn.Brush" Color="#FF3A3A3E" />
+  <!-- css.cancel-btn-hover: #4a4a4f  取消按钮悬停底色 -->
+  <SolidColorBrush x:Key="Capsule.CancelBtnHover.Brush" Color="#FF4A4A4F" />
+  <!-- css.state-bg: #ffffff14  状态图标圆的底 -->
+  <SolidColorBrush x:Key="Capsule.StateBg.Brush" Color="#14FFFFFF" />
+  <!-- css.wave-fg: #0b0b0c  红色块上的字色（结束钮 / 完成圆钮） -->
+  <SolidColorBrush x:Key="Capsule.WaveFg.Brush" Color="#FF0B0B0C" />
+  <!-- css.dim: rgba(244,244,245,.5)  空态占位文字 -->
+  <SolidColorBrush x:Key="Capsule.Dim.Brush" Color="#80F4F4F5" />
+  <!-- css.dim2: rgba(244,244,245,.7)  计时 -->
+  <SolidColorBrush x:Key="Capsule.Dim2.Brush" Color="#B3F4F4F5" />
+  <!-- css.dim3: rgba(244,244,245,.65)  取消态文字 -->
+  <SolidColorBrush x:Key="Capsule.Dim3.Brush" Color="#A6F4F4F5" />
+  <!-- css.wave: #ff5a5a  录音红（两套主题一样 —— 红是语义色，不是主题色） -->
+  <SolidColorBrush x:Key="Capsule.Wave.Brush" Color="#FFFF5A5A" />
+  <!-- css.wave-dim: rgba(244,244,245,.28)  波形里的静音条 -->
+  <SolidColorBrush x:Key="Capsule.WaveDim.Brush" Color="#47F4F4F5" />
+
+  <!-- ==================== 派生色 ====================
+       这些不是 CSS 令牌：它们的值由「当前形态 + 当前阶段 + 当前主题」算出来
+       （例如胶囊底色在球形态是录音红、在错误态是 err-bg、在展开态是 deep）。
+       所以它们不能挂在 palette 上，只能由 CapsuleTheme 在状态变化时重算并补间。 -->
+
+  <!-- 胶囊底色（初始值 = 展开态 + 深色主题的 deep） -->
+  <SolidColorBrush x:Key="Capsule.Pill.Background.Brush" Color="#FF0B0B0C" />
+  <!-- 胶囊描边（初始值 = stroke） -->
+  <SolidColorBrush x:Key="Capsule.Pill.Border.Brush" Color="#33FFFFFF" />
+  <!-- 胶囊前景（初始值 = fg） -->
+  <SolidColorBrush x:Key="Capsule.Pill.Foreground.Brush" Color="#FFF4F4F5" />
+  <!-- 文字条底色（初始值 = deep） -->
+  <SolidColorBrush x:Key="Capsule.Textbar.Background.Brush" Color="#FF0B0B0C" />
+  <!-- 文字条描边（初始值 = stroke） -->
+  <SolidColorBrush x:Key="Capsule.Textbar.Border.Brush" Color="#33FFFFFF" />
+  <!-- 文字条前景（初始值 = fg） -->
+  <SolidColorBrush x:Key="Capsule.Textbar.Foreground.Brush" Color="#FFF4F4F5" />
+  <!-- 胶囊里那行状态文字的颜色（初始值 = fg） -->
+  <SolidColorBrush x:Key="Capsule.Label.Foreground.Brush" Color="#FFF4F4F5" />
+  <!-- 右侧状态图标圆的底色（初始值 = state-bg） -->
+  <SolidColorBrush x:Key="Capsule.StateIcon.Background.Brush" Color="#14FFFFFF" />
+  <!-- 右侧状态图标的颜色（初始值 = wave） -->
+  <SolidColorBrush x:Key="Capsule.StateIcon.Foreground.Brush" Color="#FFFF5A5A" />
+
+</ResourceDictionary>

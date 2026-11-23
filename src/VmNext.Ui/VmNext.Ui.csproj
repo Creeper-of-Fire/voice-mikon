@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VmNext.Ui</RootNamespace>
+    <AssemblyName>VmNext.Ui</AssemblyName>
+    <!-- AOT 友好：默认编译期绑定，避免运行时反射查控件 -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      版本用 11.* 浮动（与 src/VmNext.Shell 保持一致）。
+      正式发布前应锁定具体版本（archive 意外发现 #9）。
+    -->
+    <PackageReference Include="Avalonia" Version="11.*" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.*" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UI 层只依赖 core（显示协议 / presenter）与 shell（窗口层 / 主题机制） -->
+    <ProjectReference Include="..\VmNext.Core\VmNext.Core.csproj" />
+    <ProjectReference Include="..\VmNext.Shell\VmNext.Shell.csproj" />
+  </ItemGroup>
+
+</Project>

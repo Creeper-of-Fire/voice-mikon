@@ -6,16 +6,29 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <RootNamespace>VmNext.App</RootNamespace>
-    <!-- 控制台入口（K3 阶段不做 GUI；GUI 阶段再换 OutputType / 加 Avalonia）。 -->
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe（GUI 子系统）：双击运行时**不弹控制台窗口**，程序安静地在后台跑。
+      headless 开关走控制台路径：从 cmd / PowerShell 启动时子进程继承父控制台，
+      输出照常可见；双击时没有父控制台 → 静默（见 Program.TryAttachParentConsole）。
+    -->
+    <OutputType>WinExe</OutputType>
     <AssemblyName>VmNext.App</AssemblyName>
+    <!-- AOT 友好：默认编译期绑定，避免运行时反射查控件 -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.*" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.*" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.*" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\VmNext.Core\VmNext.Core.csproj" />
     <ProjectReference Include="..\VmNext.Audio\VmNext.Audio.csproj" />
     <ProjectReference Include="..\VmNext.Engines\VmNext.Engines.csproj" />
     <ProjectReference Include="..\VmNext.Shell\VmNext.Shell.csproj" />
+    <ProjectReference Include="..\VmNext.Ui\VmNext.Ui.csproj" />
   </ItemGroup>
 
 </Project>

@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using VmNext.Core.Interop;
 using VmNext.Shell;
+using VmNext.TestSupport;
 using Xunit;
 
 namespace VmNext.Core.Tests;

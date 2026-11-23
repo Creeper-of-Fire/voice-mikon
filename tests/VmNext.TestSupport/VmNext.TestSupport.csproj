@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VmNext.TestSupport</RootNamespace>
+    <!--
+      共享测试工具（不是测试项目）：把"自建 Win32 EDIT 窗口"这个注入验证宿主
+      从 VmNext.Core.Tests 里抽出来，供 VmNext.App.Tests 一起用。
+
+      为什么抽出来：K1 的注入测试要一个"能 WM_GETTEXT 读回文字"的真实编辑控件，
+      而 Windows 11 的新记事本是 packaged 单实例应用 —— 没法自动化
+      （见 docs/k1-core-audio.md 疑问 #3）。K3 的端到端测试要同一件东西，
+      复制一份就是两份会各自漂移的代码。
+    -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\VmNext.Shell\VmNext.Shell.csproj" />
+    <!-- 焦点归还 / 修饰键等待要用 Core 的 Injector 静态方法。 -->
+    <ProjectReference Include="..\..\src\VmNext.Core\VmNext.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -5,10 +5,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 using VmNext.Shell;
 
-namespace VmNext.Core.Tests;
+namespace VmNext.TestSupport;
 
 /// <summary>注入验证的目标窗口（编辑控件）。</summary>
-internal interface IInjectTarget : IDisposable
+public interface IInjectTarget : IDisposable
 {
     /// <summary>目标窗口名（用于日志）。</summary>
     string Name { get; }
@@ -37,7 +37,7 @@ internal interface IInjectTarget : IDisposable
 ///
 /// 写字板（write.exe）也考虑过：这台机器上 write.exe 启动即退出（WordPad 已被弃用）。
 /// </summary>
-internal static class InjectTargetFactory
+public static class InjectTargetFactory
 {
     /// <summary>造一个注入验证目标。</summary>
     public static IInjectTarget Create()
@@ -122,22 +122,10 @@ internal static class InjectTargetFactory
             return false;
         }
     }
-
-    private static bool HasRunning(string processName)
-    {
-        try
-        {
-            return Process.GetProcessesByName(processName).Length > 0;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
 }
 
 /// <summary>真正的记事本窗口（测试结束直接杀掉进程）。</summary>
-internal sealed class NotepadTarget : IInjectTarget
+public sealed class NotepadTarget : IInjectTarget
 {
     private readonly Process? _process;
 
@@ -183,7 +171,7 @@ internal sealed class NotepadTarget : IInjectTarget
 ///
 /// 独立线程还更贴近真实场景：真实的目标是**别的应用**（别的进程、别的消息循环）。
 /// </summary>
-internal sealed class TestEditHost : IInjectTarget
+public sealed class TestEditHost : IInjectTarget
 {
     private const string ClassName = "VmNextTestEditHost";
 
@@ -239,6 +227,12 @@ internal sealed class TestEditHost : IInjectTarget
     /// <summary>诊断：编辑控件当前是否有键盘焦点。</summary>
     public bool EditHasFocus => s_editHasFocus;
 
+    /// <summary>
+    /// 把窗口设成前台（带 AttachThreadInput 那套 —— Windows 的前台锁会让裸
+    /// SetForegroundWindow 失败）。
+    /// </summary>
+    public bool BringToFront() => VmNext.Core.Inject.Injector.RestoreForeground(_hwnd);
+
     public void Dispose()
     {
         _quit = true;
@@ -275,7 +269,12 @@ internal sealed class TestEditHost : IInjectTarget
 
         NativeMethods.ShowWindow(_hwnd, 5); // SW_SHOW
         NativeMethods.SetActiveWindow(_hwnd);
-        s_editHwnd = _editHwnd;
+
+        lock (EditGate)
+        {
+            EditControls[_hwnd] = _editHwnd;
+        }
+
         NativeMethods.SetFocus(_editHwnd);
 
         _ready.Set();
@@ -318,6 +317,11 @@ internal sealed class TestEditHost : IInjectTarget
 
         if (_hwnd != IntPtr.Zero)
         {
+            lock (EditGate)
+            {
+                EditControls.Remove(_hwnd);
+            }
+
             NativeMethods.DestroyWindow(_hwnd);
         }
     }
@@ -343,8 +347,17 @@ internal sealed class TestEditHost : IInjectTarget
 
     private delegate IntPtr WindowProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
-    /// <summary>当前宿主的编辑控件句柄（窗口过程要靠它设置焦点）。</summary>
-    private static IntPtr s_editHwnd;
+    /// <summary>
+    /// 顶层窗口 → 它的编辑控件。
+    ///
+    /// ⚠ 必须是**按窗口**记，不能用单个静态字段：窗口过程是静态委托，
+    /// 拿不到"我是哪个实例"。用单个静态字段的话，第二个宿主会把第一个的
+    /// 映射覆盖掉 —— 第一个窗口 WM_SETFOCUS 时把焦点设到**第二个**窗口的
+    /// 控件上，焦点就被另一个线程抢走了（实测：两个窗口时前台焦点怎么都切不回去）。
+    /// </summary>
+    private static readonly Dictionary<IntPtr, IntPtr> EditControls = new();
+
+    private static readonly object EditGate = new();
 
     private static readonly WindowProcDelegate WindowProc = (h, m, w, l) =>
     {
@@ -352,7 +365,14 @@ internal sealed class TestEditHost : IInjectTarget
         // 别让系统按 tab 顺序乱选（默认会选第一个 WS_TABSTOP 控件，但我们要确定就是它）。
         if (m == 0x0007)
         {
-            NativeMethods.SetFocus(s_editHwnd);
+            lock (EditGate)
+            {
+                if (EditControls.TryGetValue(h, out IntPtr edit))
+                {
+                    NativeMethods.SetFocus(edit);
+                }
+            }
+
             return IntPtr.Zero;
         }
 
@@ -361,7 +381,7 @@ internal sealed class TestEditHost : IInjectTarget
 }
 
 /// <summary>等修饰键松开（测试辅助）。</summary>
-internal static class ModifierWaiter
+public static class ModifierWaiter
 {
     /// <summary>
     /// 等到没有修饰键按着就返回 true。
@@ -387,7 +407,7 @@ internal static class ModifierWaiter
 }
 
 /// <summary>用 WM_GETTEXT 读窗口里的编辑控件内容。</summary>
-internal static class EditControlReader
+public static class EditControlReader
 {
     /// <summary>读第一个 Edit/RichEdit 控件的文本；找不到返回 null。</summary>
     public static string? Read(IntPtr mainHwnd)

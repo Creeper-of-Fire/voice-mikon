@@ -3,6 +3,7 @@ using System.Threading;
 using VmNext.Core.Interop;
 using VmNext.Core.Inject;
 using VmNext.Shell;
+using VmNext.TestSupport;
 using Xunit;
 
 namespace VmNext.Core.Tests;

@@ -23,7 +23,8 @@ Windows 全局语音输入法 + 小工具集合。
     (0.6B / 1.7B,GPU,音频不出本机,断网可用,模型常驻显存零等待)
   - `minimax` MiniMax 网络接口(不占显存,音频会上传;需 `MINIMAX_API_KEY`)
 - **界面形态四档**:`悬浮球 / 常驻 / 按需 / 无界面`(见配置)
-- 其它:热词(context biasing)、主题三档、剪贴板借还(绝不吞你刚复制的内容)、
+- 其它:热词(context biasing)、主题三档、剪贴板借还(绝不吞你刚复制的内容;
+  面板「归还」开关可关掉,让识别文本一直留在剪贴板里)、
   焦点保护(识别这 1 秒里切了窗口,文字仍贴回原窗口)
 
 ## 部署(写给帮用户部署的 AI 助手)
@@ -149,7 +150,7 @@ Rust 薄壳:让任务管理器和剪贴板管理器里显示 `VoiceMikon.exe` �
 | `show_preview` | `true` | 录音时显示实时预览文字条(任何后端都能预览) |
 | `save_recordings` | `true` | 每轮录音存 WAV 到 `data/recordings/`(调试用,留最近 20 个) |
 | `max_duration` | `120` | 单次录音上限(秒) |
-| `restore_clipboard` | `true` | 粘贴后恢复原剪贴板内容 |
+| `restore_clipboard` | `true` | 粘贴后恢复原剪贴板内容。面板「归还」开关是同一项:关掉则识别文本一直留在剪贴板里(有剪贴板管理器时更顺手) |
 | `trailing_space` | `true` | 末尾自动补空格 |
 
 环境变量:`VOICE_MIKON_HOME`(换数据目录) / `VOICE_MIKON_CONFIG`(指定配置路径) /

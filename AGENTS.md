@@ -31,6 +31,10 @@ portable 约定(数据只进 `data/`)见上级目录 `../AGENTS.md`。
   销毁时**连带清空剪贴板** —— 建在录音线程上会让"识别结果留在剪贴板"
   这个兜底直接失效,还会让后续 `OpenClipboard(死句柄)` 全线失败。
   进程退出前要 `release_ownership()`(把所有权转给 NULL,内容留住)。
+  **"归还原内容"是有开关的**(面板「归还」/ `config.restore_clipboard`):
+  关掉后识别文本一直留在剪贴板里,而且**不再有还原那一次写入** ——
+  那次写入带着我们的 owner 窗口,剪贴板管理器会把"原内容"这条记录的
+  来源标成我们,原本的来源(chrome/word…)就被冲掉了。
 - **真透明与裁形(2026-11-07 重定型)**:
   - 灰底的根因不在裁形:pywebview 建 hidden 窗口的透明 hack
     (`Opacity=0 → Show() → Hide() → Opacity=1`,winforms 后端的

@@ -245,6 +245,10 @@ class VoicePanel:
         """要不要显示实时预览文字条。"""
         self._call_js("setPreviewEnabled", bool(enabled))
 
+    def set_restore_clipboard_enabled(self, enabled: bool) -> None:
+        """要不要在粘贴后归还原剪贴板内容。"""
+        self._call_js("setRestoreClipboardEnabled", bool(enabled))
+
     def set_ui_mode(self, mode: str) -> None:
         """界面形态四档(悬浮球 / 常驻 / 按需 / 无界面)。"""
         self._call_js("setUiMode", str(mode or "orb"))

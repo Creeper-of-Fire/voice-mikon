@@ -99,6 +99,10 @@ class _PanelApi:
         """开关录音时的实时预览文字条。"""
         self._presenter.set_preview(bool(enabled))
 
+    def set_restore_clipboard(self, enabled: bool) -> None:
+        """开关"粘贴后归还原剪贴板内容"。"""
+        self._presenter.set_restore_clipboard(bool(enabled))
+
     def set_ui_mode(self, mode: str) -> None:
         """切换界面形态(悬浮球 / 常驻 / 按需;无界面档在前端是 disabled)。"""
         self._presenter.set_ui_mode(mode)
@@ -231,6 +235,8 @@ class PanelPresenter:
         self._push(panel, "set_preview_enabled", self._preview_enabled())
         self._push(panel, "set_ui_mode", self._ui_mode())
         self._push(panel, "set_hotkey", self._hotkey())
+        self._push(panel, "set_restore_clipboard_enabled",
+                   self._restore_clipboard())
 
     def _push(self, panel: Any, method: str, *args: Any) -> None:
         """推给前端(同名同值不重复推 —— 空推会白刷前端)。"""
@@ -333,6 +339,25 @@ class PanelPresenter:
                 log.debug("保存预览开关失败: %s", e)
         self.push_full_state()
 
+    def set_restore_clipboard(self, enabled: bool) -> None:
+        """开关"粘贴后归还原剪贴板内容"。
+
+        关掉之后:识别文本**一直留在剪贴板里**(随时能复制走),而且
+        不再有"还原那一次写入" —— 那次写入带着我们的 owner 窗口,
+        剪贴板管理器会把"原内容"这条记录的来源标成我们,原本的来源
+        就被冲掉了。有剪贴板管理器时,关掉才是顺手的方向。
+        """
+        with self._lock:
+            if self._closed:
+                return
+        if self._config is not None:
+            try:
+                self._config.restore_clipboard = bool(enabled)
+                self._config.save()
+            except Exception as e:
+                log.debug("保存剪贴板归还开关失败: %s", e)
+        self.push_full_state()
+
     def set_ui_mode(self, mode: str) -> None:
         """切换界面形态:存配置 → 推胶囊(当场生效)→ 推面板。
 
@@ -419,6 +444,10 @@ class PanelPresenter:
 
     def _preview_enabled(self) -> bool:
         return bool(getattr(self._config, "show_preview", True))
+
+    def _restore_clipboard(self) -> bool:
+        """要不要在粘贴后归还原剪贴板内容(读不到按"要"处理)。"""
+        return bool(getattr(self._config, "restore_clipboard", True))
 
     def _ui_mode(self) -> str:
         """当前界面形态(四档之一),读不到/不认识按 orb。"""

@@ -9,9 +9,10 @@
  * 桥接契约(方法名必须与 Python 侧 _PanelApi 逐字一致):
  *   Python → JS : window.__panel.setState / setHealth / setModel / setBackend
  *                 / setTheme / setPreviewEnabled / setUiMode
- *                 / setNotice / setHotkey
+ *                 / setNotice / setHotkey / setRestoreClipboardEnabled
  *   JS → Python : window.pywebview.api.ready / switch_model / switch_backend
  *                 / set_theme / set_preview / set_ui_mode
+ *                 / set_restore_clipboard
  *                 / close_panel / quit_app
  *                 / begin_drag / move_window / end_drag
  *
@@ -60,7 +61,8 @@
     theme: 'auto',          // 当前主题档位
     preview: true,          // 实时预览文字条是否显示
     uiMode: 'orb',          // 界面形态四档：悬浮球 / 常驻 / 按需 / 无界面
-    backend: 'local'        // 当前识别后端
+    backend: 'local',       // 当前识别后端
+    restoreClipboard: true  // 粘贴后要不要归还原剪贴板内容
   };
 
   var el = {};             // DOM 缓存
@@ -242,6 +244,20 @@
     ui.preview = !!enabled;
     if (el.previewToggle) {
       el.previewToggle.checked = ui.preview;
+    }
+  }
+
+  /* 剪贴板归还开关:开 = 粘贴完把原内容还回去(有归属守卫,绝不吞
+   * 用户刚复制的新内容);关 = 识别文本一直留在剪贴板里,随时能复制走。
+   *
+   * 关掉还有一层好处:不再有"还原那一次写入" —— 那次写入带着我们的
+   * owner 窗口,剪贴板管理器会把"原内容"这条记录的来源标成我们,
+   * 原本的来源就被冲掉了。 */
+  function applyRestoreClipboard(enabled) {
+    ensureDom();
+    ui.restoreClipboard = !!enabled;
+    if (el.restoreClipboardToggle) {
+      el.restoreClipboardToggle.checked = ui.restoreClipboard;
     }
   }
 
@@ -478,6 +494,15 @@
       });
     }
 
+    // 剪贴板归还开关
+    if (el.restoreClipboardToggle) {
+      el.restoreClipboardToggle.addEventListener('change', function () {
+        var on = !!el.restoreClipboardToggle.checked;
+        applyRestoreClipboard(on);   // 先本地生效，Python 随后会用 setRestoreClipboardEnabled 校正
+        callApi('set_restore_clipboard', on);
+      });
+    }
+
     // 界面形态四档（disabled 的「无界面」项不会派发 click）
     if (el.uiModeSeg) {
       el.uiModeSeg.addEventListener('click', function (e) {
@@ -535,6 +560,9 @@
     setPreviewEnabled: function (enabled) {
       applyPreview(enabled);
     },
+    setRestoreClipboardEnabled: function (enabled) {
+      applyRestoreClipboard(enabled);
+    },
     setUiMode: function (mode) {
       applyUiMode(mode);
     },
@@ -562,6 +590,7 @@
     el.netModelText = $('netModelText');
     el.themeSeg = $('themeSeg');
     el.previewToggle = $('previewToggle');
+    el.restoreClipboardToggle = $('restoreClipboardToggle');
     el.uiModeSeg = $('uiModeSeg');
     el.hotkey = $('hotkeyLabel');
     el.notice = $('notice');
@@ -585,6 +614,7 @@
     applyPreview(true);        // 同理:setPreviewEnabled 会推真实值
     applyUiMode('orb');        // 同理:setUiMode 会推真实档位
     applyBackend('local');     // 同理:setBackend 会推真实后端
+    applyRestoreClipboard(true); // 同理:setRestoreClipboardEnabled 会推真实值
 
     bindEvents();
 

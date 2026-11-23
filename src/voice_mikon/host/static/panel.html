@@ -90,6 +90,19 @@
         </label>
       </div>
 
+      <!-- 剪贴板借还:开着 = 粘贴完把原内容还回去(有归属守卫,
+           绝不吞你刚复制的新内容);关掉 = 识别文本一直留在剪贴板里,
+           随时能复制走 —— 有剪贴板管理器时这样更顺手,而且不会再有
+           "还原那一次写入"把原内容的来源标成我们。 -->
+      <div class="option-row" id="clipboardRow">
+        <span class="row-label">归还</span>
+        <label class="switch" id="restoreClipboardSwitch"
+               title="开着:粘贴完自动把你原来的剪贴板内容还回去。关掉:识别文本一直留在剪贴板里,方便复制(有剪贴板管理器时更顺手)">
+          <input type="checkbox" id="restoreClipboardToggle" checked>
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+
       <!-- 操作提示(切换后端的进展/拒绝/失败都走这里) -->
       <p class="notice" id="notice" role="status" aria-live="polite"></p>
 

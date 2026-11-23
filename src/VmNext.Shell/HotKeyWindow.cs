@@ -52,6 +52,14 @@ public sealed class HotKeyWindow : IDisposable
 
     private const string WindowClassName = "VmNextHotKeyWindow";
 
+    /// <summary>
+    /// 窗口句柄（0 = 建不出来）。
+    ///
+    /// 外部要往这个窗口投递 WM_HOTKEY 时用得上（测试里模拟一次按键；
+    /// 运行时是系统自己投递的）。
+    /// </summary>
+    public IntPtr Handle => _handle;
+
     /// <summary>注册全局热键。返回 false 表示该组合键已被别的程序占用。</summary>
     public bool Register(int id, uint modifiers, uint virtualKey)
     {

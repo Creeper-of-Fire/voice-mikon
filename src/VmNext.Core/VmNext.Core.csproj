@@ -14,6 +14,16 @@
       Core 里不出现任何 Avalonia 类型 —— 窗口层的类型不许渗进来。
     -->
     <ProjectReference Include="..\VmNext.Shell\VmNext.Shell.csproj" />
+
+    <!--
+      K3 追加：控制器要认识别后端（IAsrBackend）与流式引擎
+      （FullPassEngine / SentencePreviewEngine / VadFactory）。
+
+      VmNext.Engines **不引用** 任何本仓库项目 —— 它只吃 short[] + 采样率，
+      所以 Core → Engines 这条边不会成环。
+      （反过来 Engines → Core 才会成问题：Core 引用 Shell，而 Engines 目前是独立的。）
+    -->
+    <ProjectReference Include="..\VmNext.Engines\VmNext.Engines.csproj" />
   </ItemGroup>
 
 </Project>

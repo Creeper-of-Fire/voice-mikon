@@ -69,6 +69,18 @@ public sealed class NotificationHub
     }
 
     /// <summary>
+    /// 通知发出事件（level / kind / message 三元组是契约）。
+    ///
+    /// ⚠ **触发线程**：发通知的那条线程（识别线程 / 模型加载线程 / 调用方线程）。
+    /// UI 侧要自己 <c>Dispatcher.UIThread.Post</c>。
+    ///
+    /// 与 <see cref="Subscribe"/> 的区别：<c>Subscribe</c> 是**订阅即投递**的
+    /// 通道（回调在发布的那一刻同步跑）；这个事件只管"发出"这一下。
+    /// 两条路都在，是因为 UI 那边更像是"事件"而不是"回调"。
+    /// </summary>
+    public event EventHandler<Notification>? NotificationPosted;
+
+    /// <summary>
     /// 发布一条通知。
     ///
     /// 校验规则与 Python 版一致：level 必须是 error/warning/info 之一，
@@ -115,6 +127,15 @@ public sealed class NotificationHub
                 // 一个订阅者炸了不该影响其它订阅者（对齐 Python 版逐个 try）。
                 _log.Error($"通知订阅者回调异常(kind={note.Kind})", ex);
             }
+        }
+
+        try
+        {
+            NotificationPosted?.Invoke(this, note);
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"通知事件处理异常(kind={note.Kind})", ex);
         }
     }
 

@@ -342,6 +342,14 @@ public static class NativeMethods
     /// <summary>MOD_SHIFT：Shift 修饰键。</summary>
     public const uint MOD_SHIFT = 0x0004;
 
+    /// <summary>
+    /// MOD_WIN：Win 修饰键。
+    ///
+    /// K3 补的：热键字符串解析要认 win / super / cmd / meta（对齐 Python 的
+    /// <c>parse_hotkey</c>），而 Win32 的这个常量之前没落进 P/Invoke 源。
+    /// </summary>
+    public const uint MOD_WIN = 0x0008;
+
     /// <summary>MOD_NOREPEAT (0x4000)：长按不重复触发。</summary>
     public const uint MOD_NOREPEAT = 0x4000;
 

@@ -11,3 +11,6 @@ publish/
 ## 本地实验产物
 *.log
 TestResults/
+
+## IDE 配置
+.idea/

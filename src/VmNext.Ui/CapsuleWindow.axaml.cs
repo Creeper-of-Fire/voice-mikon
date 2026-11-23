@@ -10,8 +10,14 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
+using VmNext.Core.Interop;
 using VmNext.Core.Presentation;
 using VmNext.Shell;
+
+// 别名：避免与 System.Threading.Monitor / System.IO.Path 撞名。
+using IconPath = Avalonia.Controls.Shapes.Path;
+using MonitorScreen = VmNext.Core.Interop.Monitor;
 
 namespace VmNext.Ui;
 
@@ -81,14 +87,21 @@ public partial class CapsuleWindow : OverlayWindow
 {
     // ==================== 几何常量（全部来自 CSS / Python）====================
 
-    /// <summary>球的直径 = 胶囊高度。来源：capsule.css L303 <c>height: 40px</c> + placement.py <c>ORB_SIZE = 40</c>。</summary>
-    public const double OrbSize = 40;
+    /// <summary>
+    /// 球的直径 = 胶囊高度。来源：capsule.css L303 <c>height: 40px</c> + placement.py <c>ORB_SIZE = 40</c>。
+    /// （真相源在 <see cref="Placement"/> —— 摆位与几何是同一套数。）
+    /// </summary>
+    public const double OrbSize = Placement.OrbSize;
 
-    /// <summary>球的下边到窗口下边。来源：placement.py <c>ORB_INSET_Y = 10</c>（= CSS <c>.stack</c> 的 padding-bottom 10px）。</summary>
-    public const double OrbInsetY = 10;
+    /// <summary>
+    /// 球的下边到窗口下边。来源：placement.py <c>ORB_INSET_Y = 10</c>（= CSS <c>.stack</c> 的 padding-bottom 10px）。
+    /// </summary>
+    public const double OrbInsetY = Placement.OrbInsetY;
 
-    /// <summary>球与工作区边缘的最小留白。来源：placement.py <c>ORB_MARGIN = 16</c>。</summary>
-    public const double OrbMargin = 16;
+    /// <summary>
+    /// 球与工作区边缘的最小留白。来源：placement.py <c>ORB_MARGIN = 16</c>。
+    /// </summary>
+    public const double OrbMargin = Placement.OrbMargin;
 
     /// <summary>
     /// 窗口宽度（**固定**）。来源：voice-mikon 的 host/capsule.py <c>WIN_W = 512</c>。
@@ -233,6 +246,56 @@ public partial class CapsuleWindow : OverlayWindow
     /// <summary>用户点了菜单里的退出。</summary>
     public event EventHandler? QuitRequested;
 
+    /// <summary>用户点了菜单里的「设置」（面板是 K5，宿主负责回话）。</summary>
+    public event EventHandler? SettingsRequested;
+
+    /// <summary>
+    /// 读上次记住的球位置（<c>orb.geometry</c> + <c>orb.monitor</c>）。
+    /// 宿主注入；返回 null = 没拖过 → 走默认位置。
+    /// </summary>
+    public Func<OrbPlacementHint?>? PositionHintProvider { get; set; }
+
+    /// <summary>
+    /// 拖完记住球的位置。宿主注入（负责写配置）。
+    /// </summary>
+    public Action<OrbPlacementHint>? PositionSaver { get; set; }
+
+    /// <summary>
+    /// 当前是否处在拖拽中（按下 → 移动 → 松手）。
+    /// 暴露出来给宿主判断"这一下到底是点还是拖"。
+    /// </summary>
+    public bool IsDragging => _dragging;
+
+    // ==================== 拖拽状态 ====================
+
+    /// <summary>是否正在拖（按下之后、还没松手）。</summary>
+    private bool _dragging;
+
+    /// <summary>这一下拖动有没有真的挪过位置（区分"点球"与"拖球"）。</summary>
+    private bool _dragMoved;
+
+    /// <summary>按下时的窗口位置（物理像素）。</summary>
+    private PixelPoint _dragWindowStart;
+
+    /// <summary>按下时的鼠标屏幕坐标（物理像素）。</summary>
+    private PixelPoint _dragMouseStart;
+
+    /// <summary>按下时的渲染缩放（折算"逻辑位移"用）。</summary>
+    private double _dragScaleAtPress;
+
+    // ==================== 过渡时长（动效降级）====================
+
+    /// <summary>
+    /// 所有过渡的"默认时长"（动效降级时置 0，恢复时还原）。
+    /// </summary>
+    private readonly List<(Avalonia.Animation.ITransition Transition, TimeSpan Duration)> _transitionDurations = new();
+
+    /// <summary>
+    /// 动效降级（CSS 的 <c>@media (prefers-reduced-motion: reduce)</c>）。
+    /// true = 所有过渡时长归零。
+    /// </summary>
+    private bool _reducedMotion;
+
     /// <summary>创建窗口。</summary>
     public CapsuleWindow()
     {
@@ -251,8 +314,13 @@ public partial class CapsuleWindow : OverlayWindow
         Root.Width = WindowWidth;
 
         ConfigureTransitions();
+        CollectTransitionDurations();
         BuildWaveform();
         WireInteractions();
+
+        // 动效降级：CSS 的 `@media (prefers-reduced-motion: reduce)`（capsule.css L674-684）
+        // —— 系统关了"在显示中显示动画"时，所有过渡时长归零。
+        ApplyReducedMotion(!SystemAnimation.IsAnimationEnabled());
 
         // 主题：默认"跟随系统"。**这里定一次就够** —— 之后由 SetTheme（配置里的档位）
         // 或面板的切换来改；OnOpened 不再重置，否则配置里的 light/dark 会被抹掉。
@@ -279,7 +347,8 @@ public partial class CapsuleWindow : OverlayWindow
         WriteText(string.Empty, CapsuleTextKind.Normal);
 
         // 摆位：等布局落定（SizeToContent 的高度要算完）再摆。
-        Dispatcher.UIThread.Post(PlaceAtDefaultPosition, DispatcherPriority.Loaded);
+        // 摆哪儿由"上次记住的位置"决定；没记住就用默认位置（工作区右下角）。
+        Dispatcher.UIThread.Post(PlaceAtRememberedPosition, DispatcherPriority.Loaded);
     }
 
     /// <inheritdoc />
@@ -304,7 +373,7 @@ public partial class CapsuleWindow : OverlayWindow
         base.OnSizeChanged(e);
 
         // 尺寸变了 → 命中区要重算（球的矩形变了），位置也要重摆（保持球在原地）。
-        Dispatcher.UIThread.Post(UpdateHitRegion, DispatcherPriority.Loaded);
+        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
     }
 
     // ==================== 状态机入口（core-api.md §3 / §4）====================
@@ -645,27 +714,21 @@ public partial class CapsuleWindow : OverlayWindow
         _colorDelayMs = orb ? CollapsedColorDelayMs : 0;
 
         // 内容淡入淡出：展开 .1s / 收起 .12s（CSS L627-631 / L615-621）。
-        TimeSpan fade = TimeSpan.FromMilliseconds(orb ? FadeOutDurationMs : FadeInDurationMs);
-        foreach (var transitions in _contentOpacityTransitions)
-        {
-            foreach (var transition in transitions)
-            {
-                if (transition is DoubleTransition doubleTransition)
-                {
-                    doubleTransition.Duration = fade;
-                    doubleTransition.Delay = TimeSpan.Zero;
-                }
-            }
-        }
+        ApplyContentFadeDuration();
 
         // 球图标：收起时延迟 .76s 才淡入（CSS L564-570），展开时立刻淡出。
+        // 动效降级时延迟也归零（CSS 的 `transition: none` 连 delay 一起作废）。
         if (_orbOpacityTransition is not null)
         {
+            TimeSpan delay = _reducedMotion
+                ? TimeSpan.Zero
+                : (orb ? TimeSpan.FromMilliseconds(OrbFadeDelayMs) : TimeSpan.Zero);
+
             foreach (var transition in _orbOpacityTransition)
             {
                 if (transition is DoubleTransition doubleTransition)
                 {
-                    doubleTransition.Delay = orb ? TimeSpan.FromMilliseconds(OrbFadeDelayMs) : TimeSpan.Zero;
+                    doubleTransition.Delay = delay;
                 }
             }
         }
@@ -713,7 +776,7 @@ public partial class CapsuleWindow : OverlayWindow
         }
 
         RefreshDerivedColors();
-        Dispatcher.UIThread.Post(UpdateHitRegion, DispatcherPriority.Loaded);
+        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
     }
 
     /// <summary>
@@ -1186,13 +1249,25 @@ public partial class CapsuleWindow : OverlayWindow
 
     private void WireInteractions()
     {
-        // 点球 → 开始录音；右键球 → 通用功能菜单
-        // （CSS: 球形态下按住球 → 挪位置；按着没动 → 点球开始录音）。
-        // 这里只做"点"，拖拽是 K4b 的事。
+        // 点球 → 开始录音；右键球 → 通用功能菜单；按住球拖 → 挪位置。
+        // （CSS: 球形态下按住球 → 挪位置；按着没动 → 点球开始录音。）
         Pill.AddHandler(PointerPressedEvent, OnPillPointerPressed, RoutingStrategies.Tunnel);
 
-        // 菜单里的退出项。
+        // 拖拽：按下之后鼠标会移出控件，所以移动/松开挂在窗口上，
+        // 并在按下时捕获指针（否则拖到控件外就断了）。
+        AddHandler(PointerMovedEvent, OnWindowPointerMoved, RoutingStrategies.Tunnel);
+        AddHandler(PointerReleasedEvent, OnWindowPointerReleased, RoutingStrategies.Tunnel);
+
+        // 点菜单以外的地方（含左键点球）收菜单（capsule.js 的 onDocMouseDownForMenu）。
+        AddHandler(PointerPressedEvent, OnWindowPointerPressedForMenu, RoutingStrategies.Tunnel);
+
+        // 菜单里的设置 / 退出项。
+        SettingsMenuButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         QuitMenuButton.Click += (_, _) => QuitRequested?.Invoke(this, EventArgs.Empty);
+
+        // 菜单按钮的 hover 色（CSS: .orb-menu-btn:hover / .orb-menu-btn.orb-menu-quit:hover）。
+        WireMenuButtonHover(SettingsMenuButton, isQuit: false);
+        WireMenuButtonHover(QuitMenuButton, isQuit: true);
 
         // 结束钮（✓）→ 停止录音。
         StopButton.Click += (_, _) => StopRecordingRequested?.Invoke(this, EventArgs.Empty);
@@ -1207,6 +1282,70 @@ public partial class CapsuleWindow : OverlayWindow
         // 对应 capsule.py 的 focus_textbar。
         TextBodyScroll.PointerPressed += OnTextBarPointerPressed;
         TextBodyScroll.PointerReleased += (_, _) => RestoreTextBarFocus();
+    }
+
+    /// <summary>
+    /// 菜单按钮的 hover 色。
+    ///
+    /// <para>CSS L744-764：
+    /// <code>
+    /// .orb-menu-btn:hover { background: var(--cancel-btn); }
+    /// .orb-menu-btn.orb-menu-quit:hover { background: var(--err-bg); color: var(--err-fg); }
+    /// </code>
+    /// 退出是重操作：hover 给警示色，平时和设置长得一样（低调）。</para>
+    /// </summary>
+    private void WireMenuButtonHover(Button button, bool isQuit)
+    {
+        // 按钮里的图标是 Path（Stroke 写死了 DynamicResource），所以前景色要落到 Path 上。
+        IconPath? icon = button.GetVisualDescendants().OfType<IconPath>().FirstOrDefault();
+
+        button.PointerEntered += (_, _) =>
+        {
+            if (isQuit)
+            {
+                button.Background = FindBrush("Capsule.ErrBg.Brush");
+                if (icon is not null)
+                {
+                    icon.Stroke = FindBrush("Capsule.ErrFg.Brush");
+                }
+            }
+            else
+            {
+                button.Background = FindBrush("Capsule.CancelBtn.Brush");
+            }
+        };
+
+        button.PointerExited += (_, _) =>
+        {
+            button.Background = FindBrush("Capsule.StateBg.Brush");
+            if (isQuit && icon is not null)
+            {
+                icon.Stroke = FindBrush("Capsule.Fg.Brush");
+            }
+        };
+    }
+
+    /// <summary>按资源键取 brush（取不到就返回 null，调用方自己兜底）。</summary>
+    private IBrush? FindBrush(string key)
+        => this.TryFindResource(key, null, out object? resource) ? resource as IBrush : null;
+
+    /// <summary>
+    /// 点菜单以外的地方 → 收菜单（capsule.js 的 <c>onDocMouseDownForMenu</c>）。
+    /// 点菜单**内部**不算。
+    /// </summary>
+    private void OnWindowPointerPressedForMenu(object? sender, PointerPressedEventArgs e)
+    {
+        if (!OrbMenu.IsVisible)
+        {
+            return;
+        }
+
+        if (e.Source is Visual source && OrbMenu.IsVisualAncestorOf(source))
+        {
+            return;
+        }
+
+        CloseOrbMenu();
     }
 
     private void OnPillPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -1238,7 +1377,18 @@ public partial class CapsuleWindow : OverlayWindow
         }
 
         e.Handled = true;
-        StartRecordingRequested?.Invoke(this, EventArgs.Empty);
+
+        // 按下 = 可能是一次拖拽的开始（也可能只是一次点击）。
+        // 到底是"点"还是"拖"，等松手时看有没有真的挪过
+        // （与 Python 的 DragSession._moved 同款）。
+        _dragging = true;
+        _dragMoved = false;
+        _dragWindowStart = Position;
+        _dragMouseStart = this.PointToScreen(e.GetPosition(this));
+        _dragScaleAtPress = CurrentRenderScaling;
+
+        // 捕获指针：鼠标拖到控件外面也要继续收到移动/松开事件。
+        e.Pointer.Capture(Pill);
     }
 
     private void OnCancelClick()
@@ -1282,6 +1432,9 @@ public partial class CapsuleWindow : OverlayWindow
 
         // CSS: requestAnimationFrame 后加 is-open（淡入 .12s）。
         Dispatcher.UIThread.Post(() => OrbMenu.Opacity = 1, DispatcherPriority.Render);
+
+        // 布局变了 → 命中区跟着更新（菜单那块要算进来，不然看得见点不到）。
+        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
     }
 
     private void CloseOrbMenu()
@@ -1303,6 +1456,9 @@ public partial class CapsuleWindow : OverlayWindow
         {
             _menuFadeTimer!.Stop();
             OrbMenu.IsVisible = false;
+
+            // 菜单那块要还给底下的应用（capsule.js: 布局变了 → 命中区跟着收）。
+            Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
         };
         _menuFadeTimer.Start();
     }
@@ -1357,6 +1513,9 @@ public partial class CapsuleWindow : OverlayWindow
         {
             timer.Stop();
             OrbHint.IsVisible = false;
+
+            // 气泡那块要还给底下的应用。
+            Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
         };
         timer.Start();
     }
@@ -1379,8 +1538,8 @@ public partial class CapsuleWindow : OverlayWindow
             if (!IsVisible)
             {
                 Show();
-                Dispatcher.UIThread.Post(UpdateHitRegion, DispatcherPriority.Loaded);
-                Dispatcher.UIThread.Post(PlaceAtDefaultPosition, DispatcherPriority.Loaded);
+                Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+                Dispatcher.UIThread.Post(PlaceAtRememberedPosition, DispatcherPriority.Loaded);
             }
         }
         else if (IsVisible)
@@ -1389,99 +1548,410 @@ public partial class CapsuleWindow : OverlayWindow
         }
     }
 
-    // ==================== 命中区与摆位 ====================
+    // ==================== 命中区 ====================
 
     /// <summary>
-    /// 重算点击穿透区域：只裁"真正可见的那几块"的并集。
-    ///
-    /// 对齐 Python 的 <c>update_regions</c>：前端把可见元素的矩形报上来，
+    /// 命中区：**只裁"真正可见的那几块"**的并集。    ///
+    /// <para>对齐 Python 的 <c>update_regions</c>：前端把可见元素的矩形报上来，
     /// Python 侧 <c>SetWindowRgn</c> 裁成它们的并集 —— 窗口其余部分（大片空白）
-    /// 不归窗口管，点击直接穿透到下面的应用。
+    /// 不归窗口管，点击直接穿透到下面的应用。</para>
+    ///
+    /// <para><b>不搬"上报"这个动作</b>：Avalonia 下窗口就是控件树的根，
+    /// 每个元素的 <c>Bounds</c> 直接可读，这里自己算。
+    /// "量矩形"这一步抽成了纯函数 <see cref="HitRegionBuilder"/>（可单元测试）。</para>
+    ///
+    /// <para>⚠ 真机的规矩：浮层（菜单 / 气泡）**单独一块**，不能并进球的包围盒 ——
+    /// 并进去中间全是空白，空白在裁形里会露出底色。这里每个可见元素各报一块，
+    /// Shell 侧再 <c>CombineRgn</c> 取并集。</para>
     /// </summary>
-    private void UpdateHitRegion()
+    protected override IReadOnlyList<HitRegion> BuildHitRegions()
     {
-        var regions = new List<NativeMethods.RECT>();
+        var specs = new List<HitRegionSpec>(4);
 
         void Add(Control? control)
         {
-            if (control is null || !control.IsVisible || control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
+            if (control is null || !control.IsVisible)
+            {
+                return;
+            }
+
+            Rect bounds = control.Bounds;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
             {
                 return;
             }
 
             // 控件坐标 → 客户区坐标（逻辑像素）
             Point origin = control.TranslatePoint(new Point(0, 0), this) ?? default;
-            double scale = CurrentRenderScaling;
 
-            int left = OverlayGeometry.ToPixels(origin.X, scale);
-            int top = OverlayGeometry.ToPixels(origin.Y, scale);
-            int right = OverlayGeometry.ToPixels(origin.X + control.Bounds.Width, scale);
-            int bottom = OverlayGeometry.ToPixels(origin.Y + control.Bounds.Height, scale);
+            // 圆角：抄 CSS（文字条 14px / 浮层 12px / 气泡与胶囊 999px）。
+            // Border 的 CornerRadius 一眼就是布局用的那个值，直接读。
+            double radius = 0;
+            if (control is Border border)
+            {
+                CornerRadius corners = border.CornerRadius;
+                radius = Math.Max(
+                    Math.Max(corners.TopLeft, corners.TopRight),
+                    Math.Max(corners.BottomLeft, corners.BottomRight));
+            }
 
-            if (right <= left || bottom <= top)
+            specs.Add(new HitRegionSpec(
+                new Rect(origin.X, origin.Y, bounds.Width, bounds.Height),
+                radius));
+        }
+
+        Add(Pill);
+        Add(TextBar);
+        Add(OrbMenu);
+        Add(OrbHint);
+
+        return HitRegionBuilder.Build(specs, CurrentRenderScaling);
+    }
+
+    /// <summary>
+    /// 当前的命中区（客户区坐标，物理像素）。
+    ///
+    /// <para>给自检 / 测试用：真机上这块区域会被 <c>SetWindowRgn</c> 裁到窗口上，
+    /// 区域之外的点击直接穿透到下面的应用。</para>
+    /// </summary>
+    public IReadOnlyList<HitRegion> ComputeHitRegions() => BuildHitRegions();
+
+    /// <summary>
+    /// 重算点击穿透区域。
+    ///
+    /// 布局落定后（尺寸变了、菜单弹出/收起）才需要重算 —— 不是每帧都算。
+    /// </summary>
+    private void RefreshHitRegion()
+    {
+        ApplyRegion();
+    }
+
+    // ==================== 摆位与位置记忆 ====================
+
+    /// <summary>
+    /// 摆位：上次拖到哪就摆哪；没拖过就摆工作区**右下角**（默认位置）。
+    ///
+    /// <para>依据 placement.py：
+    /// <list type="bullet">
+    /// <item><c>ORB_MARGIN = 16</c> —— 球与工作区边缘的最小留白（逻辑像素）</item>
+    /// <item><c>ORB_SIZE = 40</c> —— 球的直径</item>
+    /// <item>球固定待在窗口**底边居中**，所以窗口左上角 = 目标球位置 − 球在窗口内的偏移</item>
+    /// </list></para>
+    ///
+    /// <para>记忆里存的是**球**的偏移（不是窗口的）：球是用户真正盯着的那一小块，
+    /// 记住它在哪，换屏之后它还在同一个相对位置。</para>
+    /// </summary>
+    private void PlaceAtRememberedPosition()
+    {
+        OrbPlacementHint? hint = PositionHintProvider?.Invoke();
+
+        // 上次在那块屏上 → 就摆回那块屏；那块屏没了（拔了显示器 / 换机器）→ 退回主屏。
+        MonitorScreen? monitor = null;
+        if (hint is not null && !string.IsNullOrEmpty(hint.Monitor))
+        {
+            monitor = Monitors.MonitorByDevice(hint.Monitor);
+        }
+
+        monitor ??= Monitors.PrimaryMonitor();
+        if (monitor is null)
+        {
+            return;
+        }
+
+        double scale = monitor.Scale;
+        (int winW, int winH) = WindowSizePhysical(scale);
+
+        (int X, int Y)? position = null;
+        if (hint is not null && !string.IsNullOrEmpty(hint.Geometry))
+        {
+            position = Placement.OrbPositionFromGeometry(
+                hint.Geometry, monitor.WorkArea, scale, winW, winH);
+        }
+
+        if (position is null)
+        {
+            // 还没拖过：给个合理的默认值（工作区右下角）。
+            (int orbX, int orbY) = Placement.DefaultOrbPosition(monitor.WorkArea, scale);
+            position = Placement.OrbWindowPosition(orbX, orbY, winW, winH, scale, monitor.WorkArea);
+        }
+
+        MoveToPhysicalPixels(position.Value.X, position.Value.Y);
+    }
+
+    /// <summary>
+    /// 窗口的**物理**尺寸（按目标显示器的缩放换算）。
+    ///
+    /// <para>Avalonia 的 <c>ClientSize</c> 是逻辑像素；Win32 的窗口坐标是物理像素。
+    /// 摆位算的是物理坐标，所以要过一遍目标显示器的缩放 ——
+    /// 摆到缩放不同的屏上时，窗口会被框架按新 DPI 重新缩放，位置也必须按新缩放算。</para>
+    /// </summary>
+    private (int Width, int Height) WindowSizePhysical(double scale)
+    {
+        double logicalWidth = ClientSize.Width > 0 ? ClientSize.Width : Width;
+        double logicalHeight = ClientSize.Height > 0
+            ? ClientSize.Height
+            : (Placement.OrbInsetY * 2 + Placement.OrbSize);
+
+        return (
+            (int)Math.Round(logicalWidth * scale, MidpointRounding.ToEven),
+            (int)Math.Round(logicalHeight * scale, MidpointRounding.ToEven));
+    }
+
+    // ==================== 拖拽 ====================
+
+    /// <summary>
+    /// 拖动中：窗口跟手。
+    ///
+    /// <para>位移的换算见 <see cref="DragGeometry.WindowPosition"/>：
+    /// 鼠标的物理位移 → 逻辑位移（按按下时的缩放）→ 物理位移（按当前缩放）。
+    /// 单屏上就是 1:1 跟手。</para>
+    ///
+    /// <para>拖动全程不抢焦点：<c>MoveToPhysicalPixels</c> 用的是
+    /// <c>SetWindowPos + SWP_NOACTIVATE</c>，而且窗口本身带 <c>WS_EX_NOACTIVATE</c>。</para>
+    /// </summary>
+    private void OnWindowPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_dragging)
+        {
+            return;
+        }
+
+        var point = e.GetCurrentPoint(this);
+        if (!point.Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        PixelPoint mouseScreen = this.PointToScreen(e.GetPosition(this));
+        double dx = mouseScreen.X - _dragMouseStart.X;
+        double dy = mouseScreen.Y - _dragMouseStart.Y;
+        PixelPoint target = DragGeometry.WindowPosition(
+            _dragWindowStart, dx, dy, _dragScaleAtPress, CurrentRenderScaling);
+
+        target = ClampDragTarget(target);
+        MoveToPhysicalPixels(target.X, target.Y);
+
+        _dragMoved = DragGeometry.HasMoved(_dragWindowStart, Position);
+    }
+
+    /// <summary>
+    /// 松手：没动过 = 点球（开始录音）；动过 = 拖完了（记住位置）。
+    ///
+    /// <para>点球与拖球走的是同一套按下/松手流程，靠"有没有真的动过"区分
+    /// （对齐 Python 的 <c>DragSession._moved</c>）。</para>
+    /// </summary>
+    private void OnWindowPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        // 文字条选文本：松手后切回"不激活"。
+        //
+        // ⚠ 这一步要挂在**窗口**上而不是只挂在文字条上：选区可以拖到文字条外面，
+        // 那时的 PointerReleased 不经过文字条 —— 只挂在文字条上，窗口会一直"可激活"，
+        // 用户正在打的字就被抢走了（K4a 疑问 #4 的遗留）。
+        RestoreTextBarFocus();
+
+        if (!_dragging)
+        {
+            return;
+        }
+
+        _dragging = false;
+        e.Pointer.Capture(null);
+
+        if (!_dragMoved)
+        {
+            // 点球（想开始录音）。
+            StartRecordingRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        SaveOrbPosition();
+    }
+
+    /// <summary>
+    /// 把拖动中的窗口夹回"允许待着"的范围内。
+    ///
+    /// <para>按**球**的位置夹（不是窗口）：球的横向按球宽夹、纵向还要给展开后的胶囊留位
+    /// （<see cref="Placement.ClampOrbPosition"/>）。</para>
+    /// </summary>
+    private PixelPoint ClampDragTarget(PixelPoint target)
+    {
+        double scale = CurrentRenderScaling;
+        (int winW, int winH) = WindowSizePhysical(scale);
+        if (winW <= 0 || winH <= 0)
+        {
+            return target;
+        }
+
+        // 按**目标点**所在的显示器算 —— 按窗口当前所在那块屏夹的话，
+        // 拖到边界就会被原屏的边缘挡住，跨屏拖不过去。
+        MonitorScreen? monitor = Monitors.MonitorAtPoint(target.X + (winW / 2), target.Y + (winH / 2));
+        NativeMethods.RECT? area = monitor?.WorkArea;
+        if (area is null)
+        {
+            MonitorScreen? primary = Monitors.PrimaryMonitor();
+            if (primary is null)
+            {
+                return target;
+            }
+
+            area = primary.WorkArea;
+        }
+
+        (int orbX, int orbY) = Placement.OrbScreenPosition(target.X, target.Y, winW, winH, scale);
+        (int cx, int cy) = Placement.ClampOrbPosition(orbX, orbY, winW, winH, scale, area.Value);
+        (int wx, int wy) = Placement.OrbWindowPosition(cx, cy, winW, winH, scale, area.Value);
+        return new PixelPoint(wx, wy);
+    }
+
+    /// <summary>
+    /// 记住球的位置（相对所在工作区的逻辑偏移 + 显示器设备名）。
+    ///
+    /// <para>存的是**球**的偏移，不是窗口的；存相对量而不是绝对坐标 ——
+    /// 换缩放率、换显示器都不飞。格式与 Python 版一致（<c>"dx,dy"</c>），
+    /// 用户拿旧的 <c>config.json</c> 能直接用。</para>
+    /// </summary>
+    private void SaveOrbPosition()
+    {
+        if (PositionSaver is null)
+        {
+            return;
+        }
+
+        double scale = CurrentRenderScaling;
+        (int winW, int winH) = WindowSizePhysical(scale);
+        if (winW <= 0 || winH <= 0)
+        {
+            return;
+        }
+
+        (int orbX, int orbY) = Placement.OrbScreenPosition(Position.X, Position.Y, winW, winH, scale);
+
+        int orbCenterX = orbX + (int)Math.Round(Placement.OrbSize * scale / 2.0, MidpointRounding.ToEven);
+        int orbCenterY = orbY + (int)Math.Round(Placement.OrbSize * scale / 2.0, MidpointRounding.ToEven);
+        MonitorScreen? monitor = Monitors.MonitorAtPoint(orbCenterX, orbCenterY);
+
+        NativeMethods.RECT? area = monitor?.WorkArea;
+        if (area is null)
+        {
+            MonitorScreen? primary = Monitors.PrimaryMonitor();
+            if (primary is null)
             {
                 return;
             }
 
-            regions.Add(new NativeMethods.RECT { Left = left, Top = top, Right = right, Bottom = bottom });
+            area = primary.WorkArea;
+            monitor = primary;
         }
 
-        Add(Pill);
-        if (TextBar.IsVisible)
+        string geometry = Placement.EncodeOffset(orbX, orbY, area.Value, scale);
+        PositionSaver(new OrbPlacementHint(geometry, monitor?.Device ?? string.Empty));
+    }
+
+    // ==================== 动效降级 ====================
+
+    /// <summary>
+    /// 动效降级：CSS 的 <c>@media (prefers-reduced-motion: reduce)</c>
+    /// （capsule.css L674-684）。
+    ///
+    /// <para>系统关了"在显示中显示动画"（<c>SPI_GETCLIENTAREAANIMATION</c>）时，
+    /// 所有 <c>Transitions</c> 的 <c>Duration</c> 归零 —— 过渡变成"立刻到位"，
+    /// 视觉上就是"没有动画"。</para>
+    /// </summary>
+    /// <param name="disabled">true = 关掉动画。</param>
+    public void ApplyReducedMotion(bool disabled)
+    {
+        _reducedMotion = disabled;
+
+        foreach ((Avalonia.Animation.ITransition transition, TimeSpan duration) in _transitionDurations)
         {
-            Add(TextBar);
+            SetTransitionDuration(transition, disabled ? TimeSpan.Zero : duration);
         }
 
-        if (OrbHint.IsVisible)
+        if (!disabled)
         {
-            Add(OrbHint);
+            // 内容淡入淡出的时长是**跟着形态变**的（展开 .1s / 收起 .12s），
+            // 恢复时按当前形态重新落一次。
+            ApplyContentFadeDuration();
         }
-
-        if (OrbMenu.IsVisible)
-        {
-            Add(OrbMenu);
-        }
-
-        HitRegions = regions;
-        ApplyRegion();
     }
 
     /// <summary>
-    /// 默认摆位：球贴工作区右下角。
+    /// 内容淡入淡出的时长：展开 .1s / 收起 .12s（CSS L627-631 / L615-621）。
     ///
-    /// 依据 placement.py：
-    /// · <c>ORB_MARGIN = 16</c> —— 球与工作区边缘的最小留白（逻辑像素）
-    /// · <c>ORB_SIZE = 40</c> —— 球的直径
-    /// · 球固定待在窗口**底边居中**（placement.py 的模块说明），
-    ///   所以窗口左上角 = 目标球位置 − 球在窗口内的偏移。
+    /// <para>动效降级（<c>prefers-reduced-motion</c>）时归零 —— CSS 那边是
+    /// <c>transition: none !important</c>，效果就是"立刻到位"。</para>
     /// </summary>
-    private void PlaceAtDefaultPosition()
+    private void ApplyContentFadeDuration()
     {
-        var screen = Screens.Primary;
-        double scale = CurrentRenderScaling;
-        Rect workingArea = screen is null
-            ? new Rect(0, 0, 1920, 1080)
-            : new Rect(
-                screen.WorkingArea.X / scale,
-                screen.WorkingArea.Y / scale,
-                screen.WorkingArea.Width / scale,
-                screen.WorkingArea.Height / scale);
+        TimeSpan fade = TimeSpan.FromMilliseconds(
+            _form == CapsuleForm.OrbIdle ? FadeOutDurationMs : FadeInDurationMs);
 
-        // 球的目标位置（逻辑像素）：工作区右下角，留白 ORB_MARGIN。
-        double orbLeft = workingArea.Right - OrbMargin - OrbSize;
-        double orbTop = workingArea.Bottom - OrbMargin - OrbSize;
+        if (_reducedMotion)
+        {
+            fade = TimeSpan.Zero;
+        }
 
-        // 球在窗口内的偏移：水平居中；垂直 = 窗口底 − (ORB_INSET_Y + ORB_SIZE)。
-        double clientWidth = ClientSize.Width > 0 ? ClientSize.Width : Width;
-        double clientHeight = ClientSize.Height > 0 ? ClientSize.Height : (OrbInsetY + OrbSize);
-        double offsetX = (clientWidth - OrbSize) / 2.0;
-        double offsetY = clientHeight - (OrbInsetY + OrbSize);
+        foreach (var transitions in _contentOpacityTransitions)
+        {
+            foreach (var transition in transitions)
+            {
+                if (transition is DoubleTransition doubleTransition)
+                {
+                    doubleTransition.Duration = fade;
+                    doubleTransition.Delay = TimeSpan.Zero;
+                }
+            }
+        }
+    }
 
-        double left = orbLeft - offsetX;
-        double top = orbTop - offsetY;
+    /// <summary>把各个过渡的默认时长记下来（动效降级时置 0，恢复时还原）。</summary>
+    private void CollectTransitionDurations()
+    {
+        _transitionDurations.Clear();
 
-        Position = new PixelPoint(
-            OverlayGeometry.ToPixels(left, scale),
-            OverlayGeometry.ToPixels(top, scale));
+        foreach (Control control in new Control[]
+                 {
+                     Pill, TextBar, OrbHost, CancelButton, BarContent, StopButton, StateIcon, CopyButton,
+                 })
+        {
+            Avalonia.Animation.Transitions? transitions = control.Transitions;
+            if (transitions is null)
+            {
+                continue;
+            }
+
+            foreach (Avalonia.Animation.ITransition transition in transitions)
+            {
+                _transitionDurations.Add((transition, GetTransitionDuration(transition)));
+            }
+        }
+    }
+
+    /// <summary>
+    /// 取过渡的时长。
+    ///
+    /// <para>Avalonia 11 的 <c>ITransition</c> 接口**不暴露** <c>Duration</c>
+    /// （它在泛型基类 <c>Transition&lt;T&gt;</c> 上），所以按具体类型取。</para>
+    /// </summary>
+    private static TimeSpan GetTransitionDuration(Avalonia.Animation.ITransition transition) => transition switch
+    {
+        DoubleTransition d => d.Duration,
+        CornerRadiusTransition c => c.Duration,
+        _ => TimeSpan.Zero,
+    };
+
+    /// <summary>设置过渡的时长（理由同 <see cref="GetTransitionDuration"/>）。</summary>
+    private static void SetTransitionDuration(Avalonia.Animation.ITransition transition, TimeSpan duration)
+    {
+        switch (transition)
+        {
+            case DoubleTransition d:
+                d.Duration = duration;
+                break;
+
+            case CornerRadiusTransition c:
+                c.Duration = duration;
+                break;
+        }
     }
 }

@@ -184,9 +184,9 @@ public class OverlayWindow : Window
     /// 鼠标点击会"穿透"到下层窗口 —— 这就是覆盖层要的点击穿透。
     /// 区域按客户区实际尺寸算，所以内容多大裁多大，不需要几何常量。
     ///
-    /// <para>默认裁整个客户区（一个圆角矩形）。如果 UI 层把"真正可见的那几块"
-    /// 的矩形填进了 <see cref="HitRegions"/>，就改成裁**那几块的并集** ——
-    /// 真机（voice-mikon）就是这么做的：Python 侧由前端上报
+    /// <para>默认裁整个客户区（一个圆角矩形）。UI 层如果重写了
+    /// <see cref="BuildHitRegions"/>（返回"真正可见的那几块"），就改成裁
+    /// **那几块的并集** —— 真机（voice-mikon）就是这么做的：Python 侧由前端上报
     /// 文字条 / 胶囊 / 浮层的矩形，再 <c>SetWindowRgn</c> 裁成它们的并集，
     /// 窗口其余部分（大片空白）不归窗口管，点击直接穿透到下面的应用。</para>
     /// </summary>
@@ -225,29 +225,33 @@ public class OverlayWindow : Window
     /// <summary>
     /// 命中区（客户区坐标，**物理像素**）。
     ///
-    /// 空 = 用整个客户区（默认行为）；非空 = 只裁这些矩形的并集。
-    /// UI 层在布局落定后把"真正可见的元素"的矩形填进来。
+    /// <para>默认返回空 = 用整个客户区（默认行为）；重写它 = 只裁这几块的并集。
+    /// UI 层在布局落定后按"真正可见的元素"算出来 —— 真机是前端上报
+    /// （<c>capsule.js</c> 的 <c>update_regions</c>），Avalonia 下没有"上报"这一步：
+    /// 控件树的 Bounds 直接可读，UI 层自己算完重写这个方法即可。</para>
+    ///
+    /// <para>⚠ 这个方法在**每次** <see cref="ApplyRegion"/> 时被调用，形变动画期间
+    /// 会每帧调用 —— 所以实现要便宜（别在里面做布局或分配大量对象）。</para>
     /// </summary>
-    public IReadOnlyList<NativeMethods.RECT> HitRegions { get; set; } = Array.Empty<NativeMethods.RECT>();
+    protected virtual IReadOnlyList<HitRegion> BuildHitRegions() => Array.Empty<HitRegion>();
 
     /// <summary>
-    /// 按 <see cref="HitRegions"/> 造区域；没填就退回"整个客户区 + 圆角"。
+    /// 按 <see cref="BuildHitRegions"/> 造区域；没填就退回"整个客户区 + 圆角"。
     /// </summary>
     private IntPtr BuildRegion(int clientWidth, int clientHeight)
     {
-        if (HitRegions.Count > 0)
+        IReadOnlyList<HitRegion> regions = BuildHitRegions();
+        if (regions.Count > 0)
         {
             IntPtr? merged = null;
-            foreach (NativeMethods.RECT r in HitRegions)
+            foreach (HitRegion r in regions)
             {
-                int width = r.Right - r.Left;
-                int height = r.Bottom - r.Top;
-                if (width <= 0 || height <= 0)
+                if (r.IsEmpty)
                 {
                     continue;
                 }
 
-                IntPtr piece = NativeMethods.CreateRectRgn(r.Left, r.Top, r.Right, r.Bottom);
+                IntPtr piece = CreatePiece(r);
                 if (piece == IntPtr.Zero)
                 {
                     continue;
@@ -276,6 +280,27 @@ public class OverlayWindow : Window
 
         var (ellipseW, ellipseH) = OverlayGeometry.CornerEllipse(RegionShape, clientWidth, clientHeight);
         return NativeMethods.CreateRoundRectRgn(0, 0, clientWidth, clientHeight, ellipseW, ellipseH);
+    }
+
+    /// <summary>
+    /// 造一块区域：有圆角就用圆角矩形，没有就用直角矩形。
+    /// </summary>
+    private static IntPtr CreatePiece(HitRegion region)
+    {
+        int radius = region.ClampedRadius;
+        if (radius <= 0)
+        {
+            return NativeMethods.CreateRectRgn(region.Left, region.Top, region.Right, region.Bottom);
+        }
+
+        // Win32 的圆角矩形参数是"圆角椭圆的宽高"，直径 = 2 × 半径。
+        return NativeMethods.CreateRoundRectRgn(
+            region.Left,
+            region.Top,
+            region.Right,
+            region.Bottom,
+            radius * 2,
+            radius * 2);
     }
 
     /// <summary>
@@ -314,4 +339,32 @@ public class OverlayWindow : Window
 
     /// <summary>取当前渲染缩放（DPI / 96）。</summary>
     public double CurrentRenderScaling => RenderScaling > 0 ? RenderScaling : 1.0;
+
+    /// <summary>
+    /// 把窗口移到指定的**物理像素**位置（絕對位置）。
+    ///
+    /// <para>用 SetWindowPos + SWP_NOACTIVATE：移动过程中不会抢用户焦点。
+    /// 同时同步 Avalonia 侧的 <see cref="Window.Position"/>，避免后续布局把窗口"弹"回旧位置。</para>
+    /// </summary>
+    /// <param name="x">目标 X（物理像素，虚拟桌面坐标）。</param>
+    /// <param name="y">目标 Y（物理像素，虚拟桌面坐标）。</param>
+    public void MoveToPhysicalPixels(int x, int y)
+    {
+        if (_handle == IntPtr.Zero)
+        {
+            Position = new PixelPoint(x, y);
+            return;
+        }
+
+        NativeMethods.SetWindowPos(
+            _handle,
+            IntPtr.Zero,
+            x,
+            y,
+            0,
+            0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+
+        Position = new PixelPoint(x, y);
+    }
 }

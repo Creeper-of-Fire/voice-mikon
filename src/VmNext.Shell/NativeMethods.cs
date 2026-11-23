@@ -780,6 +780,13 @@ public static class NativeMethods
     /// <summary>WM_QUIT (0x0012)：结束线程消息循环。</summary>
     public const uint WM_QUIT = 0x0012;
 
+    /// <summary>WM_NULL (0x0000)：空消息（菜单弹出后用来让菜单正确收起）。</summary>
+    public const uint WM_NULL = 0x0000;
+
+    /// <summary>结束当前线程的消息循环（投递 WM_QUIT）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostQuitMessage(int nExitCode);
+
     /// <summary>查看消息队列里有没有消息（轮询式消息循环用）。</summary>
     [DllImport("user32.dll")]
     public static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
@@ -877,6 +884,248 @@ public static class NativeMethods
     /// <summary>声明进程 System DPI 感知（仅 Vista+ 的老接口）。</summary>
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
+
+    #endregion
+
+    #region 托盘图标（Shell_NotifyIcon）
+
+    /// <summary>WM_RBUTTONUP (0x0205)：鼠标右键在托盘图标上抬起。</summary>
+    public const uint WM_RBUTTONUP = 0x0205;
+
+    /// <summary>WM_LBUTTONDBLCLK (0x0203)：鼠标左键在托盘图标上双击。</summary>
+    public const uint WM_LBUTTONDBLCLK = 0x0203;
+
+    /// <summary>WM_CONTEXTMENU (0x007B)：弹出上下文菜单（v4 约定下由它触发托盘右键）。</summary>
+    public const uint WM_CONTEXTMENU = 0x007B;
+
+    /// <summary>WM_APP (0x8000)：应用自定义消息的起点。</summary>
+    public const uint WM_APP = 0x8000;
+
+    /// <summary>NIM_ADD (0)：把图标加进托盘。</summary>
+    public const int NIM_ADD = 0;
+
+    /// <summary>NIM_MODIFY (1)：改托盘图标（换图标 / 换提示文字）。</summary>
+    public const int NIM_MODIFY = 1;
+
+    /// <summary>NIM_DELETE (2)：把图标从托盘里删掉。**退出前必须调**，否则留死图标。</summary>
+    public const int NIM_DELETE = 2;
+
+    /// <summary>NIM_SETVERSION (4)：告诉 shell 用哪一版回调约定（v4 = WM_CONTEXTMENU）。</summary>
+    public const int NIM_SETVERSION = 4;
+
+    /// <summary>NIF_MESSAGE (0x1)：<c>uCallbackMessage</c> 有效。</summary>
+    public const int NIF_MESSAGE = 0x00000001;
+
+    /// <summary>NIF_ICON (0x2)：<c>hIcon</c> 有效。</summary>
+    public const int NIF_ICON = 0x00000002;
+
+    /// <summary>NIF_TIP (0x4)：<c>szTip</c> 有效。</summary>
+    public const int NIF_TIP = 0x00000004;
+
+    /// <summary>NOTIFYICONDATAW：托盘图标的完整描述。</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct NOTIFYICONDATAW
+    {
+        /// <summary>结构体大小（= sizeof(NOTIFYICONDATAW)）。</summary>
+        public int cbSize;
+
+        /// <summary>接收托盘回调消息的窗口句柄。</summary>
+        public IntPtr hWnd;
+
+        /// <summary>图标 id（同一个窗口里可以有多枚图标，用它区分）。</summary>
+        public uint uID;
+
+        /// <summary>哪些字段有效（NIF_* 的按位或）。</summary>
+        public uint uFlags;
+
+        /// <summary>用户操作图标时投递的消息（一般是 WM_RBUTTONUP / WM_LBUTTONDBLCLK）。</summary>
+        public uint uCallbackMessage;
+
+        /// <summary>图标句柄。</summary>
+        public IntPtr hIcon;
+
+        /// <summary>鼠标悬停时的提示文字。</summary>
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string szTip;
+
+        /// <summary>图标状态（NIS_*）。</summary>
+        public uint dwState;
+
+        /// <summary>状态掩码（哪些状态位由本图标控制）。</summary>
+        public uint dwStateMask;
+
+        /// <summary>气泡提示正文。</summary>
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string szInfo;
+
+        /// <summary>气泡超时（毫秒）或版本号（配合 NIM_SETVERSION）。</summary>
+        public uint uTimeoutOrVersion;
+
+        /// <summary>气泡标题。</summary>
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+        public string szInfoTitle;
+
+        /// <summary>气泡标志（NIIF_*）。</summary>
+        public uint dwInfoFlags;
+
+        /// <summary>图标 guid（v4+ 用；不用就填零）。</summary>
+        public Guid guidItem;
+
+        /// <summary>气泡里用的小图标。</summary>
+        public IntPtr hBalloonIcon;
+    }
+
+    /// <summary>
+    /// 增删改托盘图标。
+    /// 失败返回 false（用 <c>Marshal.GetLastWin32Error</c> 判错）。
+    /// </summary>
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);
+
+    #endregion
+
+    #region 弹出菜单（托盘右键菜单）
+
+    /// <summary>MF_STRING (0x0000)：普通菜单项（文字）。</summary>
+    public const uint MF_STRING = 0x00000000;
+
+    /// <summary>MF_SEPARATOR (0x0800)：分隔线。</summary>
+    public const uint MF_SEPARATOR = 0x00000800;
+
+    /// <summary>TPM_RIGHTBUTTON (0x0002)：右键也能选中菜单项（不区分左右键）。</summary>
+    public const uint TPM_RIGHTBUTTON = 0x0002;
+
+    /// <summary>TPM_RETURNCMD (0x0100)：<c>TrackPopupMenu</c> 直接返回被选中的命令 id（不发 WM_COMMAND）。</summary>
+    public const uint TPM_RETURNCMD = 0x0100;
+
+    /// <summary>创建一个弹出菜单（还没显示）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreatePopupMenu();
+
+    /// <summary>往菜单里加一项。文本用 <paramref name="lpNewItem"/>。</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool AppendMenuW(IntPtr hMenu, uint uFlags, IntPtr uIDNewItem, string lpNewItem);
+
+    /// <summary>
+    /// 显示弹出菜单并等用户选择。
+    /// 返回被选中的命令 id（<c>TPM_RETURNCMD</c>）；用户取消返回 0。
+    /// </summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint TrackPopupMenu(
+        IntPtr hMenu,
+        uint uFlags,
+        int x,
+        int y,
+        int nReserved,
+        IntPtr hWnd,
+        IntPtr lpRect);
+
+    /// <summary>销毁菜单。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool DestroyMenu(IntPtr hMenu);
+
+    /// <summary>取鼠标在屏幕上的位置（物理像素）—— 弹出菜单要贴着鼠标。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
+    #endregion
+
+    #region 图标绘制（GDI）
+
+    /// <summary>NULL_BRUSH (4)：不填充（画空心图形）。</summary>
+    public const int NULL_BRUSH = 4;
+
+    /// <summary>TRANSPARENT (1)：背景不擦除（画线时用）。</summary>
+    public const int TRANSPARENT = 1;
+
+    /// <summary>PS_SOLID (0)：实线画笔。</summary>
+    public const int PS_SOLID = 0;
+
+    /// <summary>创建实心画刷（填充用）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CreateSolidBrush(uint color);
+
+    /// <summary>创建画笔（描边用）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CreatePen(int style, int width, uint color);
+
+    /// <summary>取系统预置对象（NULL_BRUSH 等）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr GetStockObject(int i);
+
+    /// <summary>设置背景模式（TRANSPARENT = 画线时不擦掉底下的东西）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern int SetBkMode(IntPtr hdc, int mode);
+
+    /// <summary>画椭圆（用当前画刷填充、当前画笔描边）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern bool Ellipse(IntPtr hdc, int left, int top, int right, int bottom);
+
+    /// <summary>画圆角矩形（用当前画刷填充、当前画笔描边）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern bool RoundRect(IntPtr hdc, int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+
+    /// <summary>
+    /// 画一组三次 Bezier 曲线（点数必须是 4 的倍数）。
+    /// 比 <c>Arc</c> 好在**方向完全由控制点决定**，不用跟 GDI 的角度约定较劲。
+    /// </summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern bool PolyBezier(IntPtr hdc, POINT[] points, int count);
+
+    /// <summary>把画笔移到某个点（不画线）。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern bool MoveToEx(IntPtr hdc, int x, int y, IntPtr lpPoint);
+
+    /// <summary>从当前位置画一条直线到给定点。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern bool LineTo(IntPtr hdc, int x, int y);
+
+    /// <summary>创建与指定 DC 兼容的位图。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+
+    /// <summary>ICONINFO：图标的两张位图（单色掩码 + 彩色图）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ICONINFO
+    {
+        /// <summary>TRUE = 图标，FALSE = 光标。</summary>
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fIcon;
+
+        /// <summary>热点的 X（光标用）。</summary>
+        public int xHotspot;
+
+        /// <summary>热点的 Y（光标用）。</summary>
+        public int yHotspot;
+
+        /// <summary>单色掩码位图。</summary>
+        public IntPtr hbmMask;
+
+        /// <summary>彩色位图。</summary>
+        public IntPtr hbmColor;
+    }
+
+    /// <summary>由两张位图造出一个图标。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreateIconIndirect(ref ICONINFO piconinfo);
+
+    /// <summary>销毁图标（<c>CreateIconIndirect</c> 造出来的必须销毁）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    #endregion
+
+    #region 系统动画开关（prefers-reduced-motion）
+
+    /// <summary>
+    /// SPI_GETCLIENTAREAANIMATION (0x1042)：取"客户区动画"开关（"在显示中显示动画"）。
+    /// 用户在"轻松使用 → 动画效果"里关掉时返回 FALSE。
+    /// </summary>
+    public const uint SPI_GETCLIENTAREAANIMATION = 0x1042;
+
+    /// <summary>取布尔型系统参数（<c>pvParam</c> 当作 BOOL 用）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfoBool(uint uiAction, uint uiParam, ref bool pvParam, uint fWinIni);
 
     #endregion
 }

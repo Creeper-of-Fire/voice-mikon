@@ -54,11 +54,15 @@ public sealed class UiBinder : IDisposable
         _window.CancelRecordingRequested += OnCancelRecording;
         _window.DismissRequested += OnDismiss;
         _window.CopyRequested += OnCopy;
+        _window.SettingsRequested += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         _window.QuitRequested += (_, _) => QuitRequested?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>用户点了菜单里的退出（由宿主接去走退出顺序）。</summary>
     public event EventHandler? QuitRequested;
+
+    /// <summary>用户点了菜单里的「设置」（面板是 K5，宿主负责回话）。</summary>
+    public event EventHandler? SettingsRequested;
 
     /// <summary>窗口（不创建 UI 时也能拿到状态机之外的引用）。</summary>
     public CapsuleWindow Window => _window;

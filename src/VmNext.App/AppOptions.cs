@@ -36,6 +36,14 @@ public sealed class AppOptions
     public bool Mock { get; set; }
 
     /// <summary>
+    /// 原始命令行参数（逐字保留）。
+    ///
+    /// <para>托盘「重启」要"带着同样的参数再起一个" —— 解析过的开关再拼回去
+    /// 容易漏，所以这里留一份原样。</para>
+    /// </summary>
+    public string[] RawArgs { get; set; } = Array.Empty<string>();
+
+    /// <summary>
     /// 解析命令行。
     ///
     /// 两种写法都认：<c>--timeout 30</c>（空格分隔，任务书里的写法）与
@@ -48,6 +56,9 @@ public sealed class AppOptions
     {
         var options = new AppOptions();
         string[] source = args ?? Array.Empty<string>();
+
+        // 原样留一份（重启时"带着同样的参数再起一个"）。
+        options.RawArgs = source;
 
         for (int i = 0; i < source.Length; i++)
         {

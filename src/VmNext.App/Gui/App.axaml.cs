@@ -55,10 +55,16 @@ public partial class App : Application
             _host = host;
 
             // 进程退出（关窗口 / 未捕获异常）也要走同一条收尾路径。
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => host.Shutdown();
+            // ⚠ 顺序：**先删托盘图标**（否则托盘里留一枚点不动的死图标），
+            //    再注销热键（热键是全局资源，占着不放会挡住"马上重启"）。
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                _gui?.Dispose();
+                host.Shutdown();
+            };
 
-            // ---- 7) 胶囊窗口 + 绑定层 ----
-            var gui = GuiHost.Create(host, desktop, StartupConfig);
+            // ---- 7) 胶囊窗口 + 绑定层 + 托盘 ----
+            var gui = GuiHost.Create(host, desktop, StartupConfig, StartupOptions.RawArgs);
             _gui = gui;
 
             // ---- 8) 热键 + 9) 引擎启动（后台加载模型，主流程不阻塞）----
@@ -66,13 +72,10 @@ public partial class App : Application
 
             desktop.MainWindow = gui.Window;
 
-            // 退出：菜单里的「退出」→ 走 AppHost 的收尾顺序 → 关掉 Avalonia 生命周期。
-            gui.QuitRequested += () =>
-            {
-                host.RequestQuit();
-                host.Shutdown();
-                desktop.Shutdown();
-            };
+            // 退出：三条退出路（托盘菜单 / 球菜单 / 面板按钮）都汇到 GuiHost.RequestQuit，
+            // 那里已经按 core-api.md §1 的顺序收完尾了（停推送 → 销毁窗口 → 删托盘图标 → 注销热键），
+            // 这里只负责关掉 Avalonia 生命周期。
+            gui.QuitRequested += () => desktop.Shutdown();
         }
 
         base.OnFrameworkInitializationCompleted();

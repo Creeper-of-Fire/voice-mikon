@@ -27,7 +27,7 @@ public class CapsuleWindowTests
     /// 开一个窗口并等颜色补间走完（补间是 180ms 的动画，capsule.css 的
     /// <c>background-color .18s ease-out</c>）。
     /// </summary>
-    private static async Task<CapsuleWindow> OpenAsync()
+    public static async Task<CapsuleWindow> OpenWindowAsync()
     {
         var window = new CapsuleWindow();
 
@@ -47,7 +47,7 @@ public class CapsuleWindowTests
     /// 颜色补间 180ms（<c>background-color .18s</c>）—— 只等颜色的话
     /// MaxWidth 还在补间中间，断言会读到 459.8 这种半截值。
     /// </summary>
-    private static async Task SettleAsync()
+    public static async Task SettleAsync()
     {
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed.TotalMilliseconds < MorphDurationMs + ColorSettleMs)
@@ -79,7 +79,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task orb_球形态_宽40_底色录音红_文字条隐藏()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Orb, DisplayPayload.Empty);
@@ -113,7 +113,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task recording_展开_宽480_底色深色_波形与计时可见_状态图标隐藏()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Recording, DisplayPayload.Empty);
@@ -143,7 +143,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task processing_转圈图标可见_状态文字是识别中()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Processing, new DisplayPayload(Message: "识别中…"));
@@ -170,7 +170,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task result_对勾可见_正文是识别文字()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Result, new DisplayPayload(Message: "已输入", Text: "识别出来的文字"));
@@ -197,7 +197,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task error_无原文_胶囊与文字条都是错误红_复制钮不出现()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Error, new DisplayPayload(Message: "没听清，请再说一遍。"));
@@ -230,7 +230,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task error_带原文_胶囊与文字条都是警告琥珀_复制钮可见_状态图标让位()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Error, new DisplayPayload(
@@ -270,7 +270,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task cancelled_文字条中性灰()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Cancelled, new DisplayPayload(Message: "已取消"));
@@ -294,7 +294,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task 空态_正文是占位文案_颜色是dim()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Recording, DisplayPayload.Empty);
@@ -318,7 +318,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task rejected_球上方冒提示()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Rejected, new DisplayPayload(Message: "模型加载中…"));
@@ -340,7 +340,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task 预览文字_整段替换()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Recording, DisplayPayload.Empty);
@@ -362,7 +362,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task 主题_切浅色_派生色跟着换()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetMode(DisplayModes.Recording, DisplayPayload.Empty);
@@ -392,7 +392,7 @@ public class CapsuleWindowTests
     [AvaloniaFact]
     public async Task resident_没有球形态_胶囊保持展开()
     {
-        var window = await OpenAsync();
+        var window = await OpenWindowAsync();
         try
         {
             window.SetUiMode("resident");

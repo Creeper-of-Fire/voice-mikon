@@ -25,20 +25,6 @@ public sealed partial class CoreController
     private LevelPump? _levelPump;
     private Timer? _maxDurationTimer;
 
-    /// <summary>
-    /// 录音**开始时**的前台窗口（焦点保护）。
-    ///
-    /// ⚠ 与 Python 版的一处**有意差异**（详见 docs/k3-controller.md 疑问 #2）：
-    /// Python 在**注入前**才取前台窗口（<c>core/controller.py</c> 的 <c>_process</c>），
-    /// 那意味着"录音期间切走了窗口"的话，文字会贴到新窗口去。
-    /// 这里改成**开始录音时**就记下来，注入时贴回那一个 —— 用户按下热键时
-    /// 心里想的就是"说给这个窗口听"，中途切走（去看别的消息）不该把话送错地方。
-    ///
-    /// 焦点归还靠 <see cref="Injector"/> 里的 <c>RestoreForeground</c>
-    /// （AttachThreadInput + SetForegroundWindow）。
-    /// </summary>
-    private IntPtr _focusAtStart = IntPtr.Zero;
-
     // 会话代号：每开始一轮录音 +1。
     // 识别线程（阻塞推理，停不下来）靠它判断"我还是当前这一轮吗" ——
     // 取消或开了新一轮都会让它过期，过期线程醒来后直接丢弃结果，
@@ -127,9 +113,6 @@ public sealed partial class CoreController
         // 上一轮遗留的识别线程（如果还在跑）会因此过期，自动丢弃结果。
         _session++;
         _cancelled = false;
-
-        // 焦点保护：记住**开始录音时**的前台窗口（见字段注释）。
-        _focusAtStart = NativeMethods.GetForegroundWindow();
 
         SetState(ControllerState.Recording);
 
@@ -696,8 +679,17 @@ public sealed partial class CoreController
             return;
         }
 
-        // 注入目标：录音**开始时**的前台窗口（焦点保护）。
-        IntPtr hwnd = ResolveInjectTarget();
+        // 注入目标：**识别完成后、注入之前**取当前前台窗口（与 Python 版一致，
+        // `core/controller.py` 的 `hwnd = get_foreground_window()`）。
+        //
+        // 为什么不是"开始录音时"记下的那个：说一两分钟、中途干别的事，
+        // 用户早就忘了开始时在哪个窗口 —— 结束录音那一刻看着的窗口才是意图所在。
+        //
+        // 这一步保护的是"取前台 → 粘贴落地"这几百毫秒：这段里焦点又变了，
+        // `Injector` 会把它还回去（`RestoreForeground` → AttachThreadInput +
+        // SetForegroundWindow）。**识别那 1 秒里用户切了窗口，那个窗口就是落点** ——
+        // 那正是用户的意思。
+        IntPtr hwnd = NativeMethods.GetForegroundWindow();
 
         // 最后一道作废检查：上面 text.Trim() 到这里只有几毫秒，
         // 但用户的取消就落在这个窗口里的话，文字一样不该出门
@@ -732,29 +724,6 @@ public sealed partial class CoreController
 
         // 最终结果到了，预览文字就没用了（最终结果始终来自整段识别，不是预览）
         UpdateState(s => s with { PreviewText = string.Empty });
-    }
-
-    /// <summary>
-    /// 取注入目标窗口：录音开始时记下的那个（焦点保护）。
-    ///
-    /// 那个窗口要是已经没了（用户把它关了），就退回当前前台窗口 ——
-    /// 宁可贴到"当前看得见的窗口"，也不能把文字丢进虚空。
-    /// </summary>
-    private IntPtr ResolveInjectTarget()
-    {
-        IntPtr captured = _focusAtStart;
-        if (captured == IntPtr.Zero)
-        {
-            return NativeMethods.GetForegroundWindow();
-        }
-
-        if (!NativeMethods.IsWindow(captured))
-        {
-            _log.Warning("录音开始时的目标窗口已经没了,改用当前前台窗口");
-            return NativeMethods.GetForegroundWindow();
-        }
-
-        return captured;
     }
 
     /// <summary>把一条现成的通知发出去（失败不许拖垮调用方）。</summary>

@@ -194,7 +194,7 @@
 
 | # | Python | C# | 为什么 |
 |---|---|---|---|
-| 1 | `core/controller.py` 的 `_process` 在**注入前**取前台窗口（`hwnd = get_foreground_window()`） | **开始录音时**记下前台窗口，注入时贴回那一个 | 任务书明确要求"焦点保护"（录音期间切窗口，注入仍贴回开始时的那个 HWND），并有对应的端到端测试 |
+| 1 | `core/controller.py` 的 `_process` 在**注入前**取前台窗口（`hwnd = get_foreground_window()`） | **已修正 —— 与 Python 一致**：识别完成后、注入之前取当前前台窗口（`CoreController.Process` 里的 `NativeMethods.GetForegroundWindow()`） | K3 当时按任务书做成了"开始录音时记下前台窗口，注入时贴回那一个"，现已改回 Python 语义：说一两分钟、中途干别的事，用户早忘了开始时在哪个窗口 —— 结束录音那一刻看着的窗口才是意图所在 |
 | 2 | `config.max_duration` 是**死配置**（只有校验，没有任何地方用） | 每轮录音起一个定时器，到点自动 `StopRecording()`（发 `recording_timeout` 通知） | 任务书要求"`max_duration` 超时自动 stop"；Python 那边是漏实现 |
 | 3 | controller 直接用 `Recorder`（鸭子类型） | Core 只认 `IRecorder` / `IDrainableRecorder` 窄接口，`VmNext.Audio.RecorderAdapter` 适配 | `VmNext.Audio` 引用 `VmNext.Core`（电平泵在 Core），反向引用会成环 |
 | 4 | 胶囊自己管剪贴板（复制按钮在 host 层） | presenter 上多一个 `TryCopyResult()` | UI 阶段只跟 core / presenter 打交道，不该让 UI 直接摸剪贴板 |
@@ -282,7 +282,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 | 设备原生采样率 | **48000 Hz**（NAudio 自动挑的 USB 麦克风） |
 | 录 1.5 秒 → 实际时长 | 约 1.4 s |
 | 注入读回内容 | **"测试文本"**（逐字相等，`trailing_space=false`） |
-| 焦点保护 | 切到第二个窗口后，文字仍落在第一个；第二个窗口读回空串 |
+| 焦点保护（**K3 当时的行为，现已改**） | 切到第二个窗口后，文字仍落在第一个；第二个窗口读回空串 |
 | 识别耗时 | FakeBackend 秒回；真实后端见 K2 |
 
 ---
@@ -293,7 +293,8 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #1（最重要）：焦点保护的语义被改了
 
-- **状态**：**仍然成立（有意的行为差异）**。`CoreController._focusAtStart` 仍在开始录音时记下前台窗口，注入时贴回那一个。
+- **状态**：**已修正 —— 与 Python 一致，识别完成后取前台**。
+  `CoreController._focusAtStart` 这个字段和"目标窗口没了就退回当前前台"的兜底都已删掉。
 - **原文**：`core/controller.py` 的 `_process()`：
   ```python
   # 粘贴前捕获焦点窗口 —— 转写这 1 秒用户可能切窗口
@@ -302,16 +303,18 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
   —— 是在**注入前**才取前台窗口。也就是说：录音期间切走窗口，文字会贴到**新**窗口去。
   （`inject.py` 的 `restore_foreground(hwnd)` 是为"注入期间焦点又变了"准备的，
   不是为"录音期间切窗口"准备的。）
-- **我的处理**：**开始录音时**就记下前台窗口（`CoreController._focusAtStart`），
-  注入时贴回那一个；`Injector.AttemptInject` 里原有的"焦点变了就还回去"逻辑照旧
+- **K3 当时（已弃用）**：按任务书做成了"**开始录音时**记下前台窗口
+  （`CoreController._focusAtStart`），注入时贴回那一个"，并配了一条端到端测试验它
+  （那条测试连同 `VmNext.App.Tests` 一起删了 —— 碰桌面）。
+- **现在的处理**：`CoreController.Process()` 在识别完成、调用 `Injector` **之前**
+  取一次当前前台窗口（`NativeMethods.GetForegroundWindow()`）传下去；
+  `Injector.AttemptInject` 里原有的"焦点变了就还回去"逻辑照旧
   （`RestoreForeground` → `AttachThreadInput` + `SetForegroundWindow`）。
-  目标窗口要是已经被关掉了（`IsWindow` 为假），退回当前前台窗口 ——
-  宁可贴到"当前看得见的窗口"，也不能把文字丢进虚空。
-- **为什么**：任务书明确要求"录音期间用户切窗口，注入仍贴回开始时的那个 HWND"，
-  并且要求有一条端到端测试验它。用户按下热键时心里想的就是"说给这个窗口听"，
-  中途切走（去看别的消息）不该把话送错地方。
-  **代价**：Python 版是"注入时贴当前窗口"，这版是"贴开始时那个窗口" ——
-  这是**有意的行为差异**，不是笔误。
+- **为什么改**：说一两分钟、中途干别的事，用户早就忘了开始时在哪个窗口 ——
+  **结束录音那一刻看着的窗口才是意图所在**。按"开始时那个窗口"贴，
+  长录音 + 多任务场景下恰恰会把话送错地方。
+  **焦点保护保护的是"取前台 → 粘贴落地"那几百毫秒**（这段里焦点又变了就还回去），
+  **不是识别那 1 秒** —— 识别期间用户切过去的窗口**会**成为落点，那正是用户的意思。
 
 ### 疑问 #2：`max_duration` 在 Python 里是死配置
 

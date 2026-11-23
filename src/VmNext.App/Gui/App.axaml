@@ -15,6 +15,10 @@
              （与 demos/Capsule.Demo 引的是同一份，样式不会走偏；
               值由 tests/VmNext.TokenCheck 对着 capsule.css 核对）。 -->
         <ResourceInclude Source="avares://VmNext.Ui/CapsuleTheme.axaml" />
+        <!-- 面板的 palette 与控件模板在 VmNext.Ui/PanelTheme.axaml
+             （面板是**另一套** token —— panel.css 自己有一套，
+              跟胶囊不共用；只有"主题档位"是同一个）。 -->
+        <ResourceInclude Source="avares://VmNext.Ui/PanelTheme.axaml" />
       </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
   </Application.Resources>

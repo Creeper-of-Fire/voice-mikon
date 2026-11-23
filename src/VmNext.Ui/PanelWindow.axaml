@@ -1,0 +1,436 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="VmNext.Ui.PanelWindow"
+        Title="语音输入"
+        Width="320"
+        Height="340"
+        CanResize="False"
+        ShowInTaskbar="False"
+        SystemDecorations="None"
+        Background="{DynamicResource Panel.Bg.Brush}"
+        FontFamily="Segoe UI, Microsoft YaHei"
+        FontSize="13">
+
+  <!-- ==================== 样式 ====================
+       数值全部来自 voice-mikon/src/voice_mikon/host/static/panel.css，
+       每条规则后面都注了行号。 -->
+
+  <Window.Styles>
+
+    <!-- ==================== 分段控件的每一项（.seg-item）====================
+         CSS L315-342：
+           .seg-item { min-height:26px; padding:0 12px; border:0; border-radius:9px;
+                       background:transparent; color:var(css.text2);
+                       font-family:var(css.font-mono); font-size:12px; font-weight:500; }
+           .seg-item:hover        { background:var(css.hover); color:var(css.text); }
+           .seg-item.is-active   { background:var(css.card); color:var(css.text);
+                                   font-weight:600; box-shadow:var(css.shadow); }
+         阴影在代码里给（BoxShadows 不是 brush，补间不了）—— 见 PanelWindow.RefreshShadows。 -->
+    <Style Selector="RadioButton.seg-item">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{DynamicResource Panel.Text2.Brush}" />
+      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="MinHeight" Value="26" />
+      <Setter Property="Padding" Value="12,0" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template" Value="{DynamicResource Panel.SegItemTemplate}" />
+    </Style>
+
+    <!-- 中文文案的那一段（主题、界面形态）不用等宽字体：
+         CSS L344-349 `.seg.is-text .seg-item { font-family: var(css.font); }` -->
+    <Style Selector="RadioButton.seg-item.is-text">
+      <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei" />
+    </Style>
+
+    <!-- hover：CSS L332-335 -->
+    <Style Selector="RadioButton.seg-item:pointerover:not(:checked) /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Panel.Hover.Brush}" />
+    </Style>
+    <Style Selector="RadioButton.seg-item:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Panel.Text.Brush}" />
+    </Style>
+
+    <!-- 选中：CSS L337-342 -->
+    <Style Selector="RadioButton.seg-item:checked /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Panel.Card.Brush}" />
+    </Style>
+    <Style Selector="RadioButton.seg-item:checked">
+      <Setter Property="Foreground" Value="{DynamicResource Panel.Text.Brush}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <!-- ==================== 开关（.switch）====================
+         CSS L445-495：38x22 的轨道（nav 底 + line 描边，999px 圆角）
+         + 16px 的圆钮（card 底），选中后轨道变 accent、圆钮右移 16px。 -->
+    <Style Selector="ToggleSwitch.panel-switch">
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template" Value="{DynamicResource Panel.SwitchTemplate}" />
+    </Style>
+    <Style Selector="ToggleSwitch.panel-switch:checked /template/ Border#PART_Track">
+      <Setter Property="Background" Value="{DynamicResource Panel.Accent.Brush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Panel.Accent.Brush}" />
+    </Style>
+
+    <!-- ==================== 文字按钮（.icon-btn / .link-btn）====================
+         CSS L249-269（关闭钮）、L541-555（退出钮）：无框、无底色，hover 才出底色 / 变色。 -->
+    <Style Selector="Button.text-btn">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{DynamicResource Panel.Text2.Brush}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template" Value="{DynamicResource Panel.TextButtonTemplate}" />
+    </Style>
+    <Style Selector="Button.text-btn:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource Panel.Text.Brush}" />
+    </Style>
+    <!-- 关闭钮 hover 才出圆形底色：CSS L266-269 -->
+    <Style Selector="Button#CloseButton:pointerover /template/ Border#PART_Root">
+      <Setter Property="Background" Value="{DynamicResource Panel.Hover.Brush}" />
+    </Style>
+
+  </Window.Styles>
+
+  <!-- ==================== .panel（L170-180）====================
+       面板本体 = 一张卡片：外圈留白是窗口底色（css.bg），
+       卡片自己带圆角 + 描边 + 阴影。margin 6px。 -->
+  <Border Name="CardFrame"
+          Margin="6"
+          CornerRadius="16"
+          Background="{DynamicResource Panel.Card.Brush}"
+          BorderBrush="{DynamicResource Panel.Line.Brush}"
+          BorderThickness="1">
+    <Grid RowDefinitions="Auto,*">
+
+      <!-- ==================== .titlebar（L184-195）====================
+           标题栏 = 状态点 + 标题 + 关闭钮。高度 32px，
+           padding 0 8px 0 14px，底部一条 1px 分隔线。 -->
+      <Border Name="TitleBar"
+              Grid.Row="0"
+              Height="32"
+              Padding="14,0,8,0"
+              BorderBrush="{DynamicResource Panel.Line.Brush}"
+              BorderThickness="0,0,0,1">
+        <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+
+          <!-- 状态点（CSS L198-228）：实心点 + 一圈 soft 色光晕。
+               光晕用一圈更大的圆底衬出来（8+3+3=14），和 box-shadow 的 3px 描边等价。 -->
+          <Border Name="StateDotHalo"
+                  Grid.Column="0"
+                  Width="14" Height="14"
+                  CornerRadius="7"
+                  VerticalAlignment="Center"
+                  Background="{DynamicResource Panel.HaloOk.Brush}">
+            <Border Name="StateDot"
+                    Width="8" Height="8"
+                    CornerRadius="4"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.AskB.Brush}" />
+          </Border>
+
+          <!-- 标题（CSS L242-246）：14px / 700 / letter-spacing -0.2px -->
+          <TextBlock Grid.Column="1"
+                     Margin="8,0,0,0"
+                     VerticalAlignment="Center"
+                     Text="语音输入"
+                     FontSize="14"
+                     FontWeight="Bold"
+                     LetterSpacing="-0.2"
+                     Foreground="{DynamicResource Panel.Text.Brush}" />
+
+          <!-- 关闭按钮（CSS L249-269）：只是关掉面板，不退出程序 -->
+          <Button Name="CloseButton"
+                  Grid.Column="3"
+                  Classes="text-btn"
+                  Width="26" Height="26"
+                  Padding="0"
+                  CornerRadius="9"
+                  VerticalAlignment="Center"
+                  Content="✕"
+                  ToolTip.Tip="隐藏面板" />
+        </Grid>
+      </Border>
+
+      <!-- ==================== .content（L273-281）====================
+           padding 8px 14px 10px；状态区 + 配置行 + 提示语在上，页脚在下。 -->
+      <Grid Grid.Row="1" Margin="8,8,14,10">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="8" VerticalAlignment="Top">
+
+          <!-- ==================== .status-row（L376-386）====================
+               状态文字 + 后端健康徽章。徽章右对齐（CSS 的 margin-left:auto）。 -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="状态"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <TextBlock Name="StateText"
+                       Grid.Column="1"
+                       Margin="8,0,0,0"
+                       Text="待机"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Text.Brush}"
+                       VerticalAlignment="Center" />
+            <Border Name="HealthBadge"
+                    Grid.Column="2"
+                    Padding="8,2"
+                    CornerRadius="999"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Nav.Brush}">
+              <TextBlock Name="HealthBadgeText"
+                         Text="加载中"
+                         FontSize="11"
+                         LineHeight="16.5"
+                         Foreground="{DynamicResource Panel.Text2.Brush}" />
+            </Border>
+          </Grid>
+
+          <!-- 失败原因（CSS L413-424）：常驻显示，不自动消失 -->
+          <TextBlock Name="HealthReason"
+                     IsVisible="False"
+                     TextWrapping="Wrap"
+                     FontSize="11"
+                     LineHeight="15.95"
+                     Foreground="{DynamicResource Panel.Danger.Brush}" />
+
+          <!-- ==================== 后端（local / minimax）==================== -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="后端"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <Border Name="BackendSeg"
+                    Grid.Column="2"
+                    Padding="3"
+                    CornerRadius="11"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Nav.Brush}">
+              <StackPanel Name="BackendSegItems" Orientation="Horizontal" Spacing="2">
+                <RadioButton Name="BackendLocalItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-backend"
+                             Content="本地"
+                             ToolTip.Tip="本地 Qwen3-ASR 模型：离线、零等待，模型常驻显存" />
+                <RadioButton Name="BackendMinimaxItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-backend"
+                             Content="MiniMax"
+                             ToolTip.Tip="MiniMax 网络接口：音频出本机，有网络延迟；暂不支持热词" />
+              </StackPanel>
+            </Border>
+          </Grid>
+
+          <!-- ==================== 模型 ====================
+               本地后端下是 0.6B / 1.7B 的切换档（ModelRow），
+               网络后端下是**远端模型名**（只读，NetModelText）。
+               同一行显示不同的东西 —— 后端决定了这一行是什么。 -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="模型"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <Border Name="ModelRow"
+                    Grid.Column="2"
+                    Padding="3"
+                    CornerRadius="11"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Nav.Brush}">
+              <StackPanel Name="ModelSeg" Orientation="Horizontal" Spacing="2">
+                <RadioButton Name="Model06Item"
+                             Classes="seg-item"
+                             GroupName="panel-model"
+                             Content="0.6B" />
+                <RadioButton Name="Model17Item"
+                             Classes="seg-item"
+                             GroupName="panel-model"
+                             Content="1.7B" />
+              </StackPanel>
+            </Border>
+            <TextBlock Name="NetModelText"
+                       Grid.Column="2"
+                       HorizontalAlignment="Right"
+                       VerticalAlignment="Center"
+                       IsVisible="False"
+                       FontFamily="Cascadia Mono, Consolas"
+                       FontSize="12"
+                       FontWeight="Medium"
+                       Foreground="{DynamicResource Panel.Text2.Brush}" />
+          </Grid>
+
+          <!-- ==================== 主题（自动 / 白天 / 黑夜）==================== -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="主题"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <Border Name="ThemeSeg"
+                    Grid.Column="2"
+                    Padding="3"
+                    CornerRadius="11"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Nav.Brush}">
+              <StackPanel Name="ThemeSegItems" Orientation="Horizontal" Spacing="2">
+                <RadioButton Name="ThemeAutoItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-theme"
+                             Content="自动"
+                             ToolTip.Tip="跟随 Windows 的应用主题" />
+                <RadioButton Name="ThemeLightItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-theme"
+                             Content="白天"
+                             ToolTip.Tip="强制浅色" />
+                <RadioButton Name="ThemeDarkItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-theme"
+                             Content="黑夜"
+                             ToolTip.Tip="强制深色" />
+              </StackPanel>
+            </Border>
+          </Grid>
+
+          <!-- ==================== 界面形态（四档单选）====================
+               「无界面」是开发者选项，只能改 config 手动开启（重启生效）——
+               面板上 disabled（Python 版也是 disabled，行为照搬）。 -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="界面"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <Border Name="UiModeSeg"
+                    Grid.Column="2"
+                    Padding="3"
+                    CornerRadius="11"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Nav.Brush}"
+                    ToolTip.Tip="「无界面」是开发者选项：在 data/config.json 里把 ui_mode 设为 headless 并重启(不建任何窗口,只有托盘和热键)">
+              <StackPanel Name="UiModeSegItems" Orientation="Horizontal" Spacing="2">
+                <RadioButton Name="UiModeOrbItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-uimode"
+                             Content="悬浮球"
+                             ToolTip.Tip="屏幕上常驻一颗悬浮球：点它开始录音，拖它挪位置" />
+                <RadioButton Name="UiModeResidentItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-uimode"
+                             Content="常驻"
+                             ToolTip.Tip="无悬浮球：按热键弹胶囊，终态停留后窗口隐藏" />
+                <RadioButton Name="UiModeOnDemandItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-uimode"
+                             Content="按需"
+                             ToolTip.Tip="暂未实现，当前行为等同「常驻」：选择会被保存，实现后自动生效" />
+                <RadioButton Name="UiModeHeadlessItem"
+                             Classes="seg-item,is-text"
+                             GroupName="panel-uimode"
+                             Content="无界面"
+                             IsEnabled="False"
+                             ToolTip.Tip="开发者选项：在 data/config.json 里手动开启(重启生效)" />
+              </StackPanel>
+            </Border>
+          </Grid>
+
+          <!-- ==================== 预览开关 ====================
+               关掉之后胶囊只剩波形 + 计时 + 按钮，不挡屏幕。
+               这是预览的**唯一**决定者 —— 跟后端无关。 -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="预览"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <ToggleSwitch Name="PreviewSwitch"
+                          Grid.Column="2"
+                          Classes="panel-switch"
+                          HorizontalAlignment="Right"
+                          VerticalAlignment="Center"
+                          IsChecked="True"
+                          ToolTip.Tip="录音时显示实时预览文字" />
+          </Grid>
+
+          <!-- ==================== 剪贴板借还 ====================
+               开着 = 粘贴完把原内容还回去；关掉 = 识别文本一直留在剪贴板里。 -->
+          <Grid ColumnDefinitions="Auto,Auto,*">
+            <TextBlock Grid.Column="0"
+                       Text="归还"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <ToggleSwitch Name="RestoreClipboardSwitch"
+                          Grid.Column="2"
+                          Classes="panel-switch"
+                          HorizontalAlignment="Right"
+                          VerticalAlignment="Center"
+                          IsChecked="True"
+                          ToolTip.Tip="开着：粘贴完自动把你原来的剪贴板内容还回去。关掉：识别文本一直留在剪贴板里，方便复制(有剪贴板管理器时更顺手)" />
+          </Grid>
+
+          <!-- ==================== 操作提示（CSS L430-440）====================
+               切后端 / 切模型的进展、拒绝、失败都走这里。空的时候不占位置。 -->
+          <TextBlock Name="Notice"
+                     IsVisible="False"
+                     Text=""
+                     TextWrapping="Wrap"
+                     FontSize="11"
+                     LineHeight="15.4"
+                     Foreground="{DynamicResource Panel.Text2.Brush}" />
+
+        </StackPanel>
+
+        <!-- ==================== .footer（L504-538）====================
+             热键提示（左）+ 退出（右）。 -->
+        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,8,0,0">
+          <StackPanel Grid.Column="0"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      VerticalAlignment="Center">
+            <TextBlock Text="热键"
+                       FontSize="12"
+                       Foreground="{DynamicResource Panel.Muted.Brush}"
+                       VerticalAlignment="Center" />
+            <!-- 热键本体 = OpenType 的 kbd：描边 + 底部一条同色投影 + 圆角 7px -->
+            <Border Name="HotkeyBox"
+                    Padding="8,3"
+                    CornerRadius="7"
+                    VerticalAlignment="Center"
+                    Background="{DynamicResource Panel.Card.Brush}"
+                    BorderBrush="{DynamicResource Panel.Line.Brush}"
+                    BorderThickness="1">
+              <TextBlock Name="HotkeyLabel"
+                         Text="Ctrl+Alt+Space"
+                         FontSize="12"
+                         FontWeight="Medium"
+                         Foreground="{DynamicResource Panel.Text2.Brush}" />
+            </Border>
+          </StackPanel>
+
+          <Button Name="QuitButton"
+                  Grid.Column="1"
+                  Classes="text-btn"
+                  Padding="0,4"
+                  VerticalAlignment="Center"
+                  Content="退出"
+                  ToolTip.Tip="退出程序" />
+        </Grid>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>

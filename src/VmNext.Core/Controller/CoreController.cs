@@ -4,6 +4,7 @@ using System.Threading;
 using VmNext.Core.Inject;
 using VmNext.Core.Interop;
 using VmNext.Core.Levels;
+using VmNext.Core.Presentation;
 using VmNext.Engines;
 using VmNext.Engines.Streaming;
 using VmNext.Engines.Vad;
@@ -70,7 +71,7 @@ public enum ControllerState
 /// 切换在后台线程里做；录音 / 识别中**拒绝切换** ——
 /// 这一轮的最终位引擎持有旧后端的引用，中途换掉会出错或丢结果。
 /// </summary>
-public sealed partial class CoreController
+public sealed partial class CoreController : IPanelCore
 {
     // ---------- 命令被拒的原因码（presenter 只看 ok，原因码给日志和将来可能的 UI 用） ----------
 

@@ -1,0 +1,135 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ==================== 令牌（浅色基准）====================
+       值逐字来自 voice-mikon/src/voice_mikon/host/static/panel.css 的 :root 块（L40-82）。
+       ⚠ 与 capsule.css 不同：panel.css 的 **:root 是浅色**，深色在
+         :root[data-theme="dark"]（L120-140）和 @media(prefers-color-scheme:dark) 两处，
+         那两处的 token 值必须一致（CSS 注释明确要求）。
+       所以这里的初始值 = 浅色基准；切深色由 PanelTheme 补间（见 PanelTheme.cs）。
+
+       注：注释里的 css.xxx 指的是 panel.css 的 CSS 变量（双连字符前缀）——
+           XML 注释里不允许出现连续两个连字符，所以这里写成 css. 形式。 -->
+
+  <!-- css.bg: #fff  窗口底色（卡片外的留白） -->
+  <SolidColorBrush x:Key="Panel.Bg.Brush" Color="#FFFFFFFF" />
+  <!-- css.card: #fff  卡片底色（面板本体） -->
+  <SolidColorBrush x:Key="Panel.Card.Brush" Color="#FFFFFFFF" />
+  <!-- css.nav: #f4f4f5  分段控件轨道 / 健康徽章底 -->
+  <SolidColorBrush x:Key="Panel.Nav.Brush" Color="#FFF4F4F5" />
+  <!-- css.hover: #ececee  hover 底色 -->
+  <SolidColorBrush x:Key="Panel.Hover.Brush" Color="#FFECECEE" />
+  <!-- css.text: #111113  正文色 -->
+  <SolidColorBrush x:Key="Panel.Text.Brush" Color="#FF111113" />
+  <!-- css.text2: #3f3f46  次级文字色 -->
+  <SolidColorBrush x:Key="Panel.Text2.Brush" Color="#FF3F3F46" />
+  <!-- css.muted: #8b8b93  标签 / 热键提示色 -->
+  <SolidColorBrush x:Key="Panel.Muted.Brush" Color="#FF8B8B93" />
+  <!-- css.line: #ececee  描边 -->
+  <SolidColorBrush x:Key="Panel.Line.Brush" Color="#FFECECEE" />
+  <!-- css.accent: #111113  强调色（开关选中后的轨道色） -->
+  <SolidColorBrush x:Key="Panel.Accent.Brush" Color="#FF111113" />
+  <!-- css.danger: #e5484d  危险色（失败 / 错误提示） -->
+  <SolidColorBrush x:Key="Panel.Danger.Brush" Color="#FFE5484D" />
+  <!-- css.danger-soft: #fdeeee  危险色浅底 -->
+  <SolidColorBrush x:Key="Panel.DangerSoft.Brush" Color="#FFFDEEEE" />
+  <!-- css.warn: #b7791f  警告色 -->
+  <SolidColorBrush x:Key="Panel.Warn.Brush" Color="#FFB7791F" />
+  <!-- css.warn-soft: #fdf5e6  警告色浅底 -->
+  <SolidColorBrush x:Key="Panel.WarnSoft.Brush" Color="#FFFDF5E6" />
+  <!-- css.k-ask: #e8f7ee  "就绪"徽章底 -->
+  <SolidColorBrush x:Key="Panel.Ask.Brush" Color="#FFE8F7EE" />
+  <!-- css.k-ask-b: #1d7a45  "就绪"徽章字色 / 状态点底色 -->
+  <SolidColorBrush x:Key="Panel.AskB.Brush" Color="#FF1D7A45" />
+  <!-- css.k-trans: #eaf0ff  "识别中"状态点光晕底 -->
+  <SolidColorBrush x:Key="Panel.Trans.Brush" Color="#FFEAF0FF" />
+  <!-- css.k-trans-b: #2b4fbf  "识别中"状态点底色 -->
+  <SolidColorBrush x:Key="Panel.TransB.Brush" Color="#FF2B4FBF" />
+
+  <!-- ==================== 状态点的光晕底色 ====================
+       CSS 里这四个是 var() 引用（L70-73）：光晕底色直接引用上面的 soft 系 token，
+       深色主题换了 token，这里自动跟着换。值逐字照抄 soft 系 token。 -->
+
+  <!-- css.halo-ok: var(css.k-ask) -->
+  <SolidColorBrush x:Key="Panel.HaloOk.Brush" Color="#FFE8F7EE" />
+  <!-- css.halo-warn: var(css.warn-soft) -->
+  <SolidColorBrush x:Key="Panel.HaloWarn.Brush" Color="#FFFDF5E6" />
+  <!-- css.halo-rec: var(css.danger-soft) -->
+  <SolidColorBrush x:Key="Panel.HaloRec.Brush" Color="#FFFDEEEE" />
+  <!-- css.halo-processing: var(css.k-trans) -->
+  <SolidColorBrush x:Key="Panel.HaloProcessing.Brush" Color="#FFEAF0FF" />
+
+  <!-- ==================== 控件模板 ====================
+       分段控件的每一项 / 开关 / 文字按钮。
+       模板本身只管"骨架"（圆角、内边距、层次），
+       颜色一律走 Panel.* 资源（DynamicResource），
+       切主题时资源就地改色，模板不用重建。 -->
+
+  <!-- 分段控件的一项（CSS: .seg-item，L315-342）。
+       RadioButton 自带的对勾去掉：模板里只留一个 ContentPresenter。 -->
+  <ControlTemplate x:Key="Panel.SegItemTemplate" TargetType="RadioButton">
+    <Border Name="PART_Root"
+            Background="Transparent"
+            CornerRadius="9"
+            Padding="12,0">
+      <ContentPresenter Name="PART_Content"
+                        Content="{TemplateBinding Content}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+    </Border>
+  </ControlTemplate>
+
+  <!-- 开关（CSS: .switch L445-495）：38x22 的轨道 + 16px 的圆钮。
+       选中态（轨道变 accent、圆钮右移）由 PanelWindow.axaml 的样式规则给。
+
+       ⚠ ToggleSwitch 有两个**必需**的模板部件（Avalonia 的 ToggleSwitch.cs）：
+         PART_MovingKnobs（Panel，被它用 Canvas.Left 挪动）
+         PART_SwitchKnob （Panel，挪动距离 = 它的宽度）
+       所以圆钮的位移交给 Avalonia：它挪 16px —— 正好是 CSS 的 translateX(16px)。
+       轨道与圆钮之间那 2px 间隙用圆钮自己的 Margin 补（CSS 的 left:2px）。 -->
+  <ControlTemplate x:Key="Panel.SwitchTemplate" TargetType="ToggleSwitch">
+    <Border Name="PART_Track"
+            Width="38"
+            Height="22"
+            CornerRadius="999"
+            Background="{DynamicResource Panel.Nav.Brush}"
+            BorderBrush="{DynamicResource Panel.Line.Brush}"
+            BorderThickness="1">
+      <Canvas Background="Transparent">
+        <Panel Name="PART_MovingKnobs">
+          <Panel Name="PART_SwitchKnob" Width="16" Height="16">
+            <!-- 圆钮：CSS L474-485 `.switch-thumb { width:16px; height:16px; border-radius:50%;
+                 background:var(css.card); box-shadow:var(css.shadow); }`
+                 用 Border 承载（BoxShadow 只有 Border 有；16x16 + 8px 圆角 = 正圆）。
+                 Margin 2,2 = CSS 里 left:2px 与垂直居中的那 2px。 -->
+            <Border Name="PART_Thumb"
+                    Width="16"
+                    Height="16"
+                    CornerRadius="8"
+                    Margin="2,2,0,0"
+                    Background="{DynamicResource Panel.Card.Brush}" />
+          </Panel>
+        </Panel>
+      </Canvas>
+    </Border>
+  </ControlTemplate>
+
+  <!-- 无框文字按钮（CSS: .icon-btn L249-269 与 .link-btn L541-555）。
+       两者都是"无描边、无底色、hover 才出底色 / 变色"。 -->
+  <ControlTemplate x:Key="Panel.TextButtonTemplate" TargetType="Button">
+    <Border Name="PART_Root"
+            Background="{TemplateBinding Background}"
+            CornerRadius="{TemplateBinding CornerRadius}"
+            BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}"
+            Padding="{TemplateBinding Padding}">
+      <ContentPresenter Name="PART_Content"
+                        Content="{TemplateBinding Content}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Foreground="{TemplateBinding Foreground}"
+                        FontSize="{TemplateBinding FontSize}" />
+    </Border>
+  </ControlTemplate>
+
+</ResourceDictionary>

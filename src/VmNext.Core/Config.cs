@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using VmNext.Core.Presentation;
 
 namespace VmNext.Core;
 
@@ -40,7 +41,7 @@ public sealed class OrbConfig
 /// 曾经允许配置日志文件，结果 config.save() 把当时的绝对路径烧进配置文件，
 /// 项目目录一改名日志就写到旧位置去了。
 /// </summary>
-public sealed class Config
+public sealed class Config : IPanelConfig
 {
     // ---- 主题档位
     // auto  跟随系统（Windows 的"应用模式"）
@@ -380,6 +381,15 @@ public sealed class Config
 
         writer.WriteEndObject();
     }
+
+    /// <summary>
+    /// <see cref="IPanelConfig.Save"/>：面板 presenter 写完配置后要落盘。
+    ///
+    /// <para>显式实现：<see cref="Save(string?)"/> 带一个可选参数，
+    /// 签名上**不**满足无参的接口方法（可选参数不算重载），
+    /// 所以这里显式转一下 —— 面板那条路永远用默认路径（data/config.json）。</para>
+    /// </summary>
+    void IPanelConfig.Save() => Save();
 
     /// <summary>
     /// 加载配置。

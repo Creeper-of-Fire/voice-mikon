@@ -21,8 +21,10 @@ namespace VmNext.App.Gui;
 /// <item>造 <see cref="TrayIcon"/>：托盘图标 + 右键菜单（灰/黄/红三色跟状态走）。</item>
 /// <item>按 <c>config.ui_mode</c> 决定球的显隐（orb 常驻球 / resident 无球 / on_demand 同 resident）。</item>
 /// <item>球的位置记忆：拖完写 <c>config.orb</c>，启动时读回来。</item>
+/// <item>设置面板（K5）：按需创建、关闭即销毁；面板的主题 / 界面形态改动要推给胶囊。</item>
 /// </list>
-/// 不归这层的事：面板（K5）。</para>
+/// 面板的翻译层（<c>PanelPresenter</c>）在 core 里，窗口在 VmNext.Ui；
+/// 这层只负责把两头接上。</para>
 ///
 /// <para><b>退出顺序</b>（core-api.md §1 + 任务书）：
 /// <code>
@@ -40,6 +42,12 @@ public sealed class GuiHost : IDisposable
     private readonly Config _config;
     private readonly TrayIcon _tray;
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
+
+    /// <summary>面板的翻译层（core 快照 / 通知 → 面板快照）。</summary>
+    private readonly PanelPresenter _panelPresenter;
+
+    /// <summary>当前的面板窗口（按需创建，关闭即销毁）。</summary>
+    private PanelWindow? _panel;
 
     private bool _disposed;
     private bool _quitStarted;
@@ -59,6 +67,12 @@ public sealed class GuiHost : IDisposable
         _binder = binder;
         _config = config;
         _tray = tray;
+
+        // 面板的翻译层（K5）：core 快照 / 通知 → 面板快照。
+        // 它**不认识窗口**：面板窗口按需创建、关闭即销毁，presenter 常驻
+        // （core / 通知的订阅只订一次）。
+        _panelPresenter = new PanelPresenter(host.Controller, config, host.Notifier);
+        _panelPresenter.Install();
     }
 
     /// <summary>胶囊窗口。</summary>
@@ -92,6 +106,32 @@ public sealed class GuiHost : IDisposable
 
         var gui = new GuiHost(host, window, binder, config, tray, desktop);
         gui._restartArgs = restartArgs ?? Array.Empty<string>();
+
+        // ---- 面板的翻译层（K5）----
+        var panelPresenter = gui._panelPresenter;
+
+        // 面板改了主题 → 胶囊跟着换（Python 版：theme_broadcaster=capsule.set_theme）。
+        // 面板自己的配色也换（面板与胶囊是**两套** token，但档位是同一个）。
+        panelPresenter.ThemeChanged += (_, mode) => Dispatcher.UIThread.Post(() =>
+        {
+            gui.Window.SetTheme(mode);
+            PanelTheme.Apply(PanelTheme.ParseMode(mode));
+        });
+
+        // 面板改了界面形态 → 胶囊当场收球 / 露球
+        // （Python 版：ui_mode_broadcaster=presenter.apply_ui_mode）。
+        panelPresenter.UiModeChanged += (_, mode) => Dispatcher.UIThread.Post(() =>
+            host.Presenter.ApplyUiMode(mode));
+
+        // 面板的「退出」走与托盘**同一条**收尾路径（K4b 留的回调位）。
+        panelPresenter.QuitRequested += (_, _) => Dispatcher.UIThread.Post(() => gui.RequestQuit());
+
+        // 面板的关闭钮：关掉面板（**不是**退出程序）。
+        panelPresenter.CloseRequested += (_, _) => Dispatcher.UIThread.Post(() => gui.ClosePanel());
+
+        // 面板的配色跟着配置里的主题档位走（档位与胶囊共用，配色各一套）。
+        // 放在启动时落一次 —— 面板是按需打开的，开之前 palette 就该是对的。
+        PanelTheme.Apply(PanelTheme.ParseMode(config.Theme));
 
         // 界面形态（orb / resident / on_demand）→ 球的显隐。
         // presenter 的构造函数已经读过 config.UiMode，这里再落一次到窗口上。
@@ -265,12 +305,98 @@ public sealed class GuiHost : IDisposable
     }
 
     /// <summary>
-    /// 「设置」：面板是 K5，还没做 —— 发一条通知 + 球上冒一句提示。
+    /// 「设置」：打开设置面板。
+    ///
+    /// <para>面板是**按需创建、关闭即销毁**的（Python 版必须常驻只是隐藏，
+    /// 因为 pywebview 的 <c>start()</c> 之后不能建窗 —— 那个限制不搬）。
+    /// 已经开着就把它激活到前面，不重复建。</para>
     /// </summary>
-    private void OnSettingsRequested()
+    private void OnSettingsRequested() => OpenPanel();
+
+    // ==================== 面板 ====================
+
+    /// <summary>打开设置面板（托盘「设置」与球菜单「设置」都走这里）。</summary>
+    public void OpenPanel()
     {
-        _host.Notifier.Publish("info", "panel_not_implemented", "面板尚未实现");
-        Window.ShowOrbHint("面板尚未实现");
+        if (_panel is not null)
+        {
+            // 已经开着：激活到前面就行，别重复建。
+            _panel.Activate();
+            return;
+        }
+
+        var window = new PanelWindow();
+        _panel = window;
+
+        // ---- 位置记忆（UI 层不直接碰 Config）----
+        window.GeometryProvider = () => _config.PanelGeometry ?? string.Empty;
+        window.GeometrySaver = geometry =>
+        {
+            _config.PanelGeometry = geometry;
+            try
+            {
+                _config.Save();
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"保存面板位置失败: {ex.Message}");
+            }
+        };
+
+        // ---- presenter → 面板 ----
+        // 快照在**触发它的那条线程**上发出来（core-api.md §3），要切回 UI 线程。
+        void OnSnapshot(object? sender, PanelSnapshot snapshot)
+            => Dispatcher.UIThread.Post(() =>
+            {
+                if (_panel == window)
+                {
+                    window.ApplySnapshot(snapshot);
+                }
+            });
+
+        _panelPresenter.SnapshotChanged += OnSnapshot;
+        window.Closed += (_, _) =>
+        {
+            _panelPresenter.SnapshotChanged -= OnSnapshot;
+            if (_panel == window)
+            {
+                _panel = null;
+            }
+        };
+
+        // ---- 面板 → presenter ----
+        window.BackendChanged += (_, kind) => _panelPresenter.SwitchBackend(kind);
+        window.ModelChanged += (_, tag) => _panelPresenter.SwitchModel(tag);
+        window.ThemeChanged += (_, mode) => _panelPresenter.SetTheme(mode);
+        window.UiModeChanged += (_, mode) => _panelPresenter.SetUiMode(mode);
+        window.PreviewChanged += (_, enabled) => _panelPresenter.SetPreview(enabled);
+        window.RestoreClipboardChanged += (_, enabled) => _panelPresenter.SetRestoreClipboard(enabled);
+
+        // 面板的关闭钮 / 退出钮：走 presenter 的同名动作（翻译层收口）。
+        window.CloseRequested += (_, _) => _panelPresenter.ClosePanel();
+        window.QuitRequested += (_, _) => _panelPresenter.QuitApp();
+
+        // 提示语 8 秒后自己淡掉 —— 事实也归零，免得下一条快照把它顶回来。
+        window.NoticeExpired += (_, _) => _panelPresenter.ClearNotice();
+
+        // 首屏：把当前快照铺上去（订阅即投递，此刻 presenter 已经有快照了）。
+        window.ApplySnapshot(_panelPresenter.Snapshot);
+
+        // 面板本来就要拿焦点做交互（与胶囊相反）—— ShowActivated 是默认值。
+        window.Show();
+    }
+
+    /// <summary>关掉面板（**不是**退出程序）。</summary>
+    public void ClosePanel()
+    {
+        PanelWindow? panel = _panel;
+        if (panel is null)
+        {
+            return;
+        }
+
+        _panel = null;
+        panel.Close();
     }
 
     // ==================== 退出 / 重启 ====================
@@ -308,6 +434,16 @@ public sealed class GuiHost : IDisposable
         catch (Exception ex)
         {
             _log.Debug($"窗口收尾异常: {ex.Message}");
+        }
+
+        // 2b) 销毁面板窗口（开着就关掉 —— 程序要退了，面板不能留着）。
+        try
+        {
+            ClosePanel();
+        }
+        catch (Exception ex)
+        {
+            _log.Debug($"面板收尾异常: {ex.Message}");
         }
 
         // 3) 删托盘图标 —— **不做的话托盘里会留一枚死图标**（进程没了，图标还在）。
@@ -401,6 +537,16 @@ public sealed class GuiHost : IDisposable
 
         _disposed = true;
         _binder.Dispose();
+
+        // 面板的翻译层：停掉"往界面推东西"（推给一个没人看的界面没有意义）。
+        try
+        {
+            _panelPresenter.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            _log.Debug($"面板 presenter 收尾异常: {ex.Message}");
+        }
 
         // 托盘图标一定要删 —— 进程退出后图标还在 = 托盘里留一枚点不动的死图标。
         // （RequestQuit 里已经删过一次，这里是"意外退出"的兜底；Dispose 是幂等的。）

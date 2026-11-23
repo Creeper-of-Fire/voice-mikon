@@ -7,6 +7,8 @@
       <ResourceDictionary.MergedDictionaries>
         <!-- 胶囊的 palette 与派生色：与正式版、demo 引同一份。 -->
         <ResourceInclude Source="avares://VmNext.Ui/CapsuleTheme.axaml" />
+        <!-- 面板的 palette 与控件模板：与正式版引同一份。 -->
+        <ResourceInclude Source="avares://VmNext.Ui/PanelTheme.axaml" />
       </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
   </Application.Resources>

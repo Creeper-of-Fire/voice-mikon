@@ -1,4 +1,4 @@
-# voice-mikon-next
+# voice-mikon-csharp
 
 [voice-mikon](../voice-mikon/)（Windows 全局语音输入，Python + pywebview）的
 **C# / Avalonia 11 / .NET 10 重写**。
@@ -26,12 +26,12 @@
 ## 目录结构
 
 ```
-src/VmNext.Shell/       窗口层：Avalonia 窗口子类（透明/不激活/置顶/穿透/DPI）+ 全部 Win32 P/Invoke
-src/VmNext.Core/        状态机 / 两个 presenter / 注入 / 剪贴板 / 配置 / 路径 / 通知中心
-src/VmNext.Audio/       录音（NAudio WASAPI）/ 设备挑选 / 底噪估计 / 录音留存
-src/VmNext.Engines/     识别引擎：本地（Python 子进程 IPC）/ MiniMax 网络 / VAD / DSP
-src/VmNext.Ui/          胶囊窗口 + 面板窗口 + 拖拽 / 摆位 / 命中区
-src/VmNext.App/         GUI 入口 + 托盘装配 + `--headless` 自检 + `--mock` 假后端
+src/VoiceMikonCSharp.Shell/       窗口层：Avalonia 窗口子类（透明/不激活/置顶/穿透/DPI）+ 全部 Win32 P/Invoke
+src/VoiceMikonCSharp.Core/        状态机 / 两个 presenter / 注入 / 剪贴板 / 配置 / 路径 / 通知中心
+src/VoiceMikonCSharp.Audio/       录音（NAudio WASAPI）/ 设备挑选 / 底噪估计 / 录音留存
+src/VoiceMikonCSharp.Engines/     识别引擎：本地（Python 子进程 IPC）/ MiniMax 网络 / VAD / DSP
+src/VoiceMikonCSharp.Ui/          胶囊窗口 + 面板窗口 + 拖拽 / 摆位 / 命中区
+src/VoiceMikonCSharp.App/         GUI 入口 + 托盘装配 + `--headless` 自检 + `--mock` 假后端
 src/demos/Capsule.Demo/ 离线视觉预览（不连 core，热键直接推 mode、波形用模拟电平）
 python/asr_server/      本地推理子进程（named pipe IPC，协议定稿见其 README）
 companions/QrScanner/   二维码扫描（附属工具：独立进程，WinForms + ZXing.Net；见其 README）
@@ -49,15 +49,15 @@ data/                   运行时数据：配置 / 日志 / 录音留存（porta
 ## 运行方式
 
 ```
-# GUI（双击 src/VmNext.App/bin/Release/net10.0/VmNext.App.exe 也一样）
-dotnet run --project src/VmNext.App
+# GUI（双击 src/VoiceMikonCSharp.App/bin/Release/net10.0/VoiceMikonCSharp.App.exe 也一样）
+dotnet run --project src/VoiceMikonCSharp.App
 
 # 无头自检：装配 core，等引擎就绪后干净退出
-dotnet run --project src/VmNext.App -- --headless --mock --timeout 60
+dotnet run --project src/VoiceMikonCSharp.App -- --headless --mock --timeout 60
 
 # 覆盖后端 / 配置文件（一次性覆盖，不写回 config.json）
-dotnet run --project src/VmNext.App -- --backend minimax
-dotnet run --project src/VmNext.App -- --config D:\path\to\config.json
+dotnet run --project src/VoiceMikonCSharp.App -- --backend minimax
+dotnet run --project src/VoiceMikonCSharp.App -- --config D:\path\to\config.json
 ```
 
 | 参数 | 说明 |
@@ -130,10 +130,10 @@ NAudio 没有"全局设备索引"这个概念，硬凑一张映射表反而更�
 - 子进程脚本：`python/asr_server/asr_server.py`（**自包含**，不 import `voice_mikon` 包）。
 - **依赖**：系统 python + `torch` + `qwen-asr`（官方包，内含 `Qwen3ASRModel`）+ `numpy`。
   - ⚠ **不要用 `voice-mikon` 的 venv 跑** —— 那是另一个工程的依赖环境。
-  - C# 侧默认用 `python`，可用环境变量 `VMNEXT_PYTHON` 覆盖。
+  - C# 侧默认用 `python`，可用环境变量 `VOICE_MIKON_CSHARP_PYTHON` 覆盖。
 - **权重**：`<model_root>/Qwen3-ASR-<tag>`。**只认本地目录，绝不联网下载**；
   缺了就明确报错指路（下载命令，或把后端切成 `minimax`）。
-- **IPC**：Windows 命名管道 `\\.\pipe\vmnext-asr-{进程ID}-{8 位随机}`，
+- **IPC**：Windows 命名管道 `\\.\pipe\voice-mikon-csharp-asr-{进程ID}-{8 位随机}`，
   控制消息是一行 UTF-8 JSON，音频是紧随其后的 int16 小端裸帧。
   **协议定稿见 [`python/asr_server/README.md`](python/asr_server/README.md)**。
 
@@ -143,12 +143,12 @@ NAudio 没有"全局设备索引"这个概念，硬凑一张映射表反而更�
 
 | 项目 | 内容 | 怎么跑 |
 |---|---|---|
-| `tests/VmNext.Core.Tests` | 配置读写 / 电平映射 / 面板 presenter | `cd tests/VmNext.Core.Tests; dotnet test` |
-| `tests/VmNext.Audio.Tests` | 底噪估计 / WAV 落盘 | `cd tests/VmNext.Audio.Tests; dotnet test` |
-| `tests/VmNext.Engines.Tests` | 重采样 / VAD / 分句状态机 / IPC 协议 / 网络后端 | `cd tests/VmNext.Engines.Tests; dotnet test` |
-| `tests/VmNext.Ui.Tests` | 胶囊与面板的显示状态 / 摆位 / 拖拽几何 / 命中区 / 动效降级 | `cd tests/VmNext.Ui.Tests; dotnet test` |
-| `tests/VmNext.Companions.Tests` | 附属工具（二维码扫描）的解码 / 框选几何 | `cd tests/VmNext.Companions.Tests; dotnet test` |
-| `tests/VmNext.TokenCheck` | `capsule.css` 的色值与 palette 逐个核对（不是测试项目，是个小程序；不一致时退出码非 0） | `dotnet run --project tests/VmNext.TokenCheck` |
+| `tests/VoiceMikonCSharp.Core.Tests` | 配置读写 / 电平映射 / 面板 presenter | `cd tests/VoiceMikonCSharp.Core.Tests; dotnet test` |
+| `tests/VoiceMikonCSharp.Audio.Tests` | 底噪估计 / WAV 落盘 | `cd tests/VoiceMikonCSharp.Audio.Tests; dotnet test` |
+| `tests/VoiceMikonCSharp.Engines.Tests` | 重采样 / VAD / 分句状态机 / IPC 协议 / 网络后端 | `cd tests/VoiceMikonCSharp.Engines.Tests; dotnet test` |
+| `tests/VoiceMikonCSharp.Ui.Tests` | 胶囊与面板的显示状态 / 摆位 / 拖拽几何 / 命中区 / 动效降级 | `cd tests/VoiceMikonCSharp.Ui.Tests; dotnet test` |
+| `tests/VoiceMikonCSharp.Companions.Tests` | 附属工具（二维码扫描）的解码 / 框选几何 | `cd tests/VoiceMikonCSharp.Companions.Tests; dotnet test` |
+| `tests/VoiceMikonCSharp.TokenCheck` | `capsule.css` 的色值与 palette 逐个核对（不是测试项目，是个小程序；不一致时退出码非 0） | `dotnet run --project tests/VoiceMikonCSharp.TokenCheck` |
 
 > ⚠ **必须进项目目录跑**：MTP（Microsoft.Testing.Platform）项目在 .NET 10 SDK 上
 > 不能走 VSTest target，官方 opt-in 是在**项目目录**放 `global.json`
@@ -206,8 +206,8 @@ NAudio 没有"全局设备索引"这个概念，硬凑一张映射表反而更�
 ## 构建
 
 ```
-dotnet build VmNext.sln -c Release
-dotnet publish src/VmNext.App -c Release -r win-x64
+dotnet build VoiceMikonCSharp.sln -c Release
+dotnet publish src/VoiceMikonCSharp.App -c Release -r win-x64
 ```
 
 > **关于 NativeAOT**：csproj 里已经打开了 AOT 友好的编译期绑定

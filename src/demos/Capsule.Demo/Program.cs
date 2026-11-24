@@ -4,9 +4,9 @@ using System.IO;
 using System.Text;
 using Avalonia;
 using Avalonia.Threading;
-using VmNext.Core.Presentation;
-using VmNext.Shell;
-using VmNext.Ui;
+using VoiceMikonCSharp.Core.Presentation;
+using VoiceMikonCSharp.Shell;
+using VoiceMikonCSharp.Ui;
 
 namespace Capsule.Demo;
 
@@ -30,7 +30,7 @@ internal static class Program
 
         // ⚠ DPI 感知必须在**任何窗口创建之前**声明（voice-mikon 的 win32/dpi.py 同款规矩）。
         // 不声明的话 Avalonia 建窗时拿到的缩放不对，窗口尺寸与内容渲染会对不上。
-        string dpiMode = VmNext.Core.Interop.Dpi.SetDpiAwareness();
+        string dpiMode = VoiceMikonCSharp.Core.Interop.Dpi.SetDpiAwareness();
         Console.WriteLine($"DPI 感知: {dpiMode}");
 
         PrintBanner();

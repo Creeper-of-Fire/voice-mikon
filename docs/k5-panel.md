@@ -13,17 +13,17 @@
 
 | 项 | 结果 |
 |---|---|
-| 新增 `src/VmNext.Core/Presentation/PanelPresenter.cs` | `PanelSnapshot` 记录 + `PanelPresenter`（core 快照 / 通知 → 面板快照；动作方法调 core / config 并 `Save`） |
-| 新增 `src/VmNext.Core/Presentation/PanelContracts.cs` | `IPanelCore` / `IPanelConfig` 两个**窄接口**（让 presenter 能被假实现驱动） |
-| 修改 `src/VmNext.Core/Config.cs` | 实现 `IPanelConfig`（**显式** `Save()`，因为 `Save(string?)` 带可选参数，签名上不满足无参接口） |
-| 修改 `src/VmNext.Core/Controller/CoreController.cs` | 实现 `IPanelCore`（四个成员本来就有，只是补个接口名，**行为不变**） |
-| 新增 `src/VmNext.Ui/PanelWindow.axaml(.cs)` | 面板窗口：无边框 + 自定义标题栏 + 原生拖动 + 位置记忆；控件树照搬 `panel.html` |
-| 新增 `src/VmNext.Ui/PanelTheme.axaml` / `PanelTheme.cs` | 面板的 palette（21 个 token，两张表）+ 三个控件模板 |
-| 新增 `src/VmNext.Ui/PanelGeometry.cs` | 位置记忆的编解码（**纯函数**，格式与 Python 版逐字兼容） |
-| 修改 `src/VmNext.App/Gui/GuiHost.cs` | 托盘 / 球菜单的「设置」→ 打开面板；面板的主题 / 界面形态推给胶囊；面板的退出走 K4b 的 `RequestQuit` |
-| 修改 `src/VmNext.App/Gui/App.axaml`、`tests/VmNext.Ui.Tests/TestApp.axaml` | 引入 `PanelTheme.axaml` |
-| 新增 `tests/VmNext.Core.Tests/PanelPresenterTests.cs` | presenter 单元测试 **19 条** |
-| 新增 `tests/VmNext.Ui.Tests/PanelWindowTests.cs` / `PanelGeometryTests.cs` | 面板显示状态 **15 条** + 位置记忆 **12 条** |
+| 新增 `src/VoiceMikonCSharp.Core/Presentation/PanelPresenter.cs` | `PanelSnapshot` 记录 + `PanelPresenter`（core 快照 / 通知 → 面板快照；动作方法调 core / config 并 `Save`） |
+| 新增 `src/VoiceMikonCSharp.Core/Presentation/PanelContracts.cs` | `IPanelCore` / `IPanelConfig` 两个**窄接口**（让 presenter 能被假实现驱动） |
+| 修改 `src/VoiceMikonCSharp.Core/Config.cs` | 实现 `IPanelConfig`（**显式** `Save()`，因为 `Save(string?)` 带可选参数，签名上不满足无参接口） |
+| 修改 `src/VoiceMikonCSharp.Core/Controller/CoreController.cs` | 实现 `IPanelCore`（四个成员本来就有，只是补个接口名，**行为不变**） |
+| 新增 `src/VoiceMikonCSharp.Ui/PanelWindow.axaml(.cs)` | 面板窗口：无边框 + 自定义标题栏 + 原生拖动 + 位置记忆；控件树照搬 `panel.html` |
+| 新增 `src/VoiceMikonCSharp.Ui/PanelTheme.axaml` / `PanelTheme.cs` | 面板的 palette（21 个 token，两张表）+ 三个控件模板 |
+| 新增 `src/VoiceMikonCSharp.Ui/PanelGeometry.cs` | 位置记忆的编解码（**纯函数**，格式与 Python 版逐字兼容） |
+| 修改 `src/VoiceMikonCSharp.App/Gui/GuiHost.cs` | 托盘 / 球菜单的「设置」→ 打开面板；面板的主题 / 界面形态推给胶囊；面板的退出走 K4b 的 `RequestQuit` |
+| 修改 `src/VoiceMikonCSharp.App/Gui/App.axaml`、`tests/VoiceMikonCSharp.Ui.Tests/TestApp.axaml` | 引入 `PanelTheme.axaml` |
+| 新增 `tests/VoiceMikonCSharp.Core.Tests/PanelPresenterTests.cs` | presenter 单元测试 **19 条** |
+| 新增 `tests/VoiceMikonCSharp.Ui.Tests/PanelWindowTests.cs` / `PanelGeometryTests.cs` | 面板显示状态 **15 条** + 位置记忆 **12 条** |
 
 ---
 
@@ -67,7 +67,7 @@
 
 ### 测试结果
 
-`PanelPresenterTests` **19 条全过**（`tests/VmNext.Core.Tests/`）：
+`PanelPresenterTests` **19 条全过**（`tests/VoiceMikonCSharp.Core.Tests/`）：
 
 - 装配：安装即收到当前快照（订阅即投递）；同值不重复推；收尾后不再推。
 - 动作：`SwitchBackend` / `SwitchModel` 调到了 core 的正确下游；
@@ -145,7 +145,7 @@
 
 ### 测试结果
 
-`PanelWindowTests` **15 条全过**（`tests/VmNext.Ui.Tests/`，`Avalonia.Headless`）：
+`PanelWindowTests` **15 条全过**（`tests/VoiceMikonCSharp.Ui.Tests/`，`Avalonia.Headless`）：
 
 - 后端分段：本地 → 选中"本地"；网络 → 选中"MiniMax"。
 - 模型行：本地 → 显示 0.6B/1.7B 档位、藏起远端模型名；网络 → 反过来，远端模型名 = `asr-1.0`。
@@ -206,7 +206,7 @@
   **21 个 token 逐个一致**（只有 `--font` / `--font-mono` / `--shadow` 三个非颜色项不在 palette 里）。
   阴影的 alpha 也按 CSS 规则换算核对过：`0.04 → 0x0A`、`0.06 → 0x0F`、
   `0.4 → 0x66`、`0.3 → 0x4D`。
-- ⚠ **但这个核对没有变成自动化测试**：`tests/VmNext.TokenCheck` 只核对 `capsule.css`
+- ⚠ **但这个核对没有变成自动化测试**：`tests/VoiceMikonCSharp.TokenCheck` 只核对 `capsule.css`
   的三块 token。面板的 CSS 结构不同（`:root` 是浅色、深色在 `[data-theme]` 与媒体查询两处），
   要复用得先把 TokenCheck 改成"多一份 CSS + 多一张表"的通用形态。
   这是本版的一个**已知缺口**，见 §7 疑问 #3。
@@ -236,7 +236,7 @@
 
 ---
 
-## 5. 接线（`VmNext.App/Gui/GuiHost.cs`）
+## 5. 接线（`VoiceMikonCSharp.App/Gui/GuiHost.cs`）
 
 ```
 托盘「设置」 / 球菜单「设置」
@@ -314,12 +314,12 @@
 
 ### 疑问 #3：面板的配色没有自动核对
 
-- **状态**：**仍未解决（已知缺口）**。`tests/VmNext.TokenCheck` 仍只核对 `capsule.css`；面板的 21 个 token 只在 K5 手工核对过一遍，没有自动化测试守着。
+- **状态**：**仍未解决（已知缺口）**。`tests/VoiceMikonCSharp.TokenCheck` 仍只核对 `capsule.css`；面板的 21 个 token 只在 K5 手工核对过一遍，没有自动化测试守着。
 - **目的**：`panel.css` 的 21 个 token 抄进 `PanelTheme`，但**没有自动化测试守着**。
 - **我的处理**：本版**手工核对过一遍**（把 CSS 两块解析出来、解析 `var()` 引用与 3 位缩写，
   与两张 palette 逐个比对，21 个 token 全一致；阴影 alpha 也按 CSS 规则换算核对过）。
   但核对是**一次性**的，没有变成测试。
-- **为什么**：`tests/VmNext.TokenCheck` 是**胶囊专用**的（它硬编码了 `capsule.css` 的
+- **为什么**：`tests/VoiceMikonCSharp.TokenCheck` 是**胶囊专用**的（它硬编码了 `capsule.css` 的
   三块选择器与两张 palette 的键集合）。面板的 CSS 结构不同（`:root` 是浅色、
   深色在 `[data-theme]` 与媒体查询两处），要复用得先把 TokenCheck 改成
   "多一份 CSS + 多张表"的通用形态 —— 那是 K5 之外的工作量。
@@ -357,13 +357,13 @@
 
 | 测试 | 结果 | 说明 |
 |---|---|---|
-| `VmNext.Ui.Tests` | **80 / 80 通过** | 原有 53 条（K4b）**全过** + 本轮新增 27 条（面板显示状态 15 + 位置记忆 12） |
-| `VmNext.Core.Tests` | **33 / 33 通过** | 原有 14 条**全过** + 本轮新增 19 条（面板 presenter） |
-| `VmNext.Audio.Tests` | 8 / 8 通过 | 未动 |
-| `VmNext.Engines.Tests` | 78 通过 / 2 跳过 | 未动；跳过 2 条是环境限制（没有 `MINIMAX_API_KEY`） |
-| `VmNext.TokenCheck` | ✓ 全部一致 | 未动（只核对 `capsule.css`） |
+| `VoiceMikonCSharp.Ui.Tests` | **80 / 80 通过** | 原有 53 条（K4b）**全过** + 本轮新增 27 条（面板显示状态 15 + 位置记忆 12） |
+| `VoiceMikonCSharp.Core.Tests` | **33 / 33 通过** | 原有 14 条**全过** + 本轮新增 19 条（面板 presenter） |
+| `VoiceMikonCSharp.Audio.Tests` | 8 / 8 通过 | 未动 |
+| `VoiceMikonCSharp.Engines.Tests` | 78 通过 / 2 跳过 | 未动；跳过 2 条是环境限制（没有 `MINIMAX_API_KEY`） |
+| `VoiceMikonCSharp.TokenCheck` | ✓ 全部一致 | 未动（只核对 `capsule.css`） |
 | `--headless --mock --timeout 60` | 退出码 **0** | 「[无头] 引擎就绪」 |
-| `dotnet build VmNext.sln` | 0 警告 / 0 错误 | |
+| `dotnet build VoiceMikonCSharp.sln` | 0 警告 / 0 错误 | |
 
 > **不碰桌面**：本轮的测试没有调用 `SendInput` / `SetForegroundWindow` / `OpenClipboard` /
 > `RegisterHotKey` / `Shell_NotifyIcon` / `WasapiCapture`，也没有启动 GUI 子进程。

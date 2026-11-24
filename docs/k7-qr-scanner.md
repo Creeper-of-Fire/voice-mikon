@@ -16,15 +16,15 @@
 | 项 | 结果 |
 |---|---|
 | 新增 `companions/QrScanner/` | 独立 WinForms 项目（net10.0-windows / WinExe / ZXing.Net）：截屏 → 框选 → 解码 → 结果窗（在 sln 的 `companions` solution folder 里） |
-| 新增 `src/VmNext.Core/Companions.cs` | 附属工具的**路径定位**（纯函数：给 base dir 返回路径 / 文件不存在返回 null） |
-| 修改 `src/VmNext.Ui/CapsuleWindow.axaml(.cs)` | 球菜单加回「二维码扫描」按钮（图标取自 capsule.html 的 `#menuQr`）+ `QrScanRequested` 事件 |
-| 修改 `src/VmNext.Ui/UiBinder.cs` | 转发 `QrScanRequested` |
-| 修改 `src/VmNext.App/Gui/GuiHost.cs` | `LaunchQrScanner()`：`Process.Start` 拉起**独立进程**（不等、不看输出、异常只记日志 + 发通知） |
-| 修改 `src/VmNext.App/VmNext.App.csproj` | TFM `net10.0` → `net10.0-windows`；build-only `ProjectReference`（`ReferenceOutputAssembly=false`）+ `CopyCompanionQrScanner` 目标（产物复制到输出目录 / publish 目录的 `companions/QrScanner/`） |
-| 修改 `VmNext.sln` | 新增 `companions` solution folder（装 `QrScanner`）+ `tests` folder 里加 `VmNext.Companions.Tests` |
-| 新增 `tests/VmNext.Companions.Tests/` | 解码 4 条 + 框选几何 5 条（**共 9 条**） |
-| 新增 `tests/VmNext.Core.Tests/CompanionsTests.cs` | 路径定位 4 条 |
-| 新增 `tests/VmNext.Ui.Tests/OrbMenuTests.cs` | 球菜单三项齐全且顺序一致 + 二维码图标几何落在视框内 + 点二维码按钮发出请求（**3 条**） |
+| 新增 `src/VoiceMikonCSharp.Core/Companions.cs` | 附属工具的**路径定位**（纯函数：给 base dir 返回路径 / 文件不存在返回 null） |
+| 修改 `src/VoiceMikonCSharp.Ui/CapsuleWindow.axaml(.cs)` | 球菜单加回「二维码扫描」按钮（图标取自 capsule.html 的 `#menuQr`）+ `QrScanRequested` 事件 |
+| 修改 `src/VoiceMikonCSharp.Ui/UiBinder.cs` | 转发 `QrScanRequested` |
+| 修改 `src/VoiceMikonCSharp.App/Gui/GuiHost.cs` | `LaunchQrScanner()`：`Process.Start` 拉起**独立进程**（不等、不看输出、异常只记日志 + 发通知） |
+| 修改 `src/VoiceMikonCSharp.App/VoiceMikonCSharp.App.csproj` | TFM `net10.0` → `net10.0-windows`；build-only `ProjectReference`（`ReferenceOutputAssembly=false`）+ `CopyCompanionQrScanner` 目标（产物复制到输出目录 / publish 目录的 `companions/QrScanner/`） |
+| 修改 `VoiceMikonCSharp.sln` | 新增 `companions` solution folder（装 `QrScanner`）+ `tests` folder 里加 `VoiceMikonCSharp.Companions.Tests` |
+| 新增 `tests/VoiceMikonCSharp.Companions.Tests/` | 解码 4 条 + 框选几何 5 条（**共 9 条**） |
+| 新增 `tests/VoiceMikonCSharp.Core.Tests/CompanionsTests.cs` | 路径定位 4 条 |
+| 新增 `tests/VoiceMikonCSharp.Ui.Tests/OrbMenuTests.cs` | 球菜单三项齐全且顺序一致 + 二维码图标几何落在视框内 + 点二维码按钮发出请求（**3 条**） |
 
 ---
 
@@ -57,25 +57,25 @@
 
 ### sln 归属与构建接线
 
-任务书给了两个选项：**(a) 不进根 `VmNext.sln`**；**(b) 进 sln 但放在 `companions`
-solution folder，且不与任何 `VmNext.*` 项目建立 `ProjectReference`**。
+任务书给了两个选项：**(a) 不进根 `VoiceMikonCSharp.sln`**；**(b) 进 sln 但放在 `companions`
+solution folder，且不与任何 `VoiceMikonCSharp.*` 项目建立 `ProjectReference`**。
 
 实测下来，两条都有坑：
 
 | 试过的做法 | 结果 |
 |---|---|
-| (a) 不进 sln | sln 构建**拿不到配置映射** → `dotnet build VmNext.sln -c Release` 把工具按 **Debug** 构建，Release 目录不存在 → 复制被跳过 → **发布产物里没有工具** |
+| (a) 不进 sln | sln 构建**拿不到配置映射** → `dotnet build VoiceMikonCSharp.sln -c Release` 把工具按 **Debug** 构建，Release 目录不存在 → 复制被跳过 → **发布产物里没有工具** |
 | `SkipGetTargetFrameworkProperties="true"`（绕开 TFM 检查） | 这个开关会让 MSBuild **跳过引用项目的构建** —— 顺序没了，复制拿不到当次产物 |
 | (b) 进 sln + build-only `ProjectReference` | ✅ 配置正确（sln 的映射生效）、顺序正确（引用关系保证工具先构建）、**产物被复制到输出目录与 publish 目录** |
 
-**最终做法**：工具进 sln 的 `companions` solution folder；`VmNext.App` 用
+**最终做法**：工具进 sln 的 `companions` solution folder；`VoiceMikonCSharp.App` 用
 `ReferenceOutputAssembly="false"` 的 `ProjectReference`（**只定构建顺序，不引用程序集**）。
 零 import 的**实质**仍然满足 —— 工具的类型不参与主程序的编译，工具的依赖
 （ZXing.Net）也不进主程序的依赖图；"复制"不是"引用"。
 
 顺带的两个连带改动：
 
-- **`VmNext.App` 的 TFM `net10.0` → `net10.0-windows`**：本程序本来就是 Windows-only
+- **`VoiceMikonCSharp.App` 的 TFM `net10.0` → `net10.0-windows`**：本程序本来就是 Windows-only
   （Win32 P/Invoke / 托盘 / 剪贴板 / Avalonia 桌面）；带上 `-windows` 之后，
   `net10.0-windows` 的工具可以被正常 `ProjectReference`，不用绕 TFM 检查。
   被它引用的 `Core / Audio / Engines / Shell / Ui` 仍是 `net10.0`（**没动**）。

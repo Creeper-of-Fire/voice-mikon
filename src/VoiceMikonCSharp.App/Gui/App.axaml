@@ -1,0 +1,26 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="VoiceMikonCSharp.App.Gui.App">
+
+  <Application.Styles>
+    <!-- Fluent 只提供控件的默认骨架（字体、FocusAdorner 等），
+         配色一律走下面自己的令牌，不依赖 Fluent 的主题色。 -->
+    <FluentTheme />
+  </Application.Styles>
+
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <!-- 胶囊的 palette 与派生色在 VoiceMikonCSharp.Ui/CapsuleTheme.axaml
+             （与 demos/Capsule.Demo 引的是同一份，样式不会走偏；
+              值由 tests/VoiceMikonCSharp.TokenCheck 对着 capsule.css 核对）。 -->
+        <ResourceInclude Source="avares://VoiceMikonCSharp.Ui/CapsuleTheme.axaml" />
+        <!-- 面板的 palette 与控件模板在 VoiceMikonCSharp.Ui/PanelTheme.axaml
+             （面板是**另一套** token —— panel.css 自己有一套，
+              跟胶囊不共用；只有"主题档位"是同一个）。 -->
+        <ResourceInclude Source="avares://VoiceMikonCSharp.Ui/PanelTheme.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+</Application>

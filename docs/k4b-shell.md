@@ -14,21 +14,21 @@
 
 | 项 | 结果 |
 |---|---|
-| 新增 `src/VmNext.Ui/Placement.cs` | `placement.py` 的 C# 翻译（**纯函数**）：常量 / 夹取 / 偏移编解码 / 摆位 |
-| 新增 `src/VmNext.Ui/DragGeometry.cs` | 拖拽几何（**纯函数**）：鼠标位移 → 窗口位移；"动过没有"的判定 |
-| 新增 `src/VmNext.Ui/HitRegionBuilder.cs` | 命中区计算（**纯函数**）：可见元素 → 命中区矩形列表 |
-| 新增 `src/VmNext.Ui/OrbPlacementHint.cs` | 位置记忆的载体（`geometry` + `monitor`），UI 层不直接碰 `Config` |
-| 新增 `src/VmNext.Shell/TrayIcon.cs` | 托盘图标 + 右键菜单（Win32 `Shell_NotifyIcon` + `TrackPopupMenu`） |
-| 新增 `src/VmNext.Shell/HitRegion.cs` | 命中区的数据结构（物理像素 + 圆角） |
-| 新增 `src/VmNext.Shell/SystemAnimation.cs` | 系统动画开关（`prefers-reduced-motion` 的 Windows 对应物），**可注入** |
-| 修改 `src/VmNext.Shell/NativeMethods.cs` | 补托盘 / 菜单 / GDI 绘图 / 图标 / 动画开关的 P/Invoke |
-| 修改 `src/VmNext.Shell/OverlayWindow.cs` | `HitRegions`（外部填矩形）→ `BuildHitRegions()`（子类算）；加 `MoveToPhysicalPixels` |
-| 修改 `src/VmNext.Ui/CapsuleWindow.axaml(.cs)` | 拖拽 / 摆位 / 位置记忆 / 命中区 / 动效降级 / 球菜单（删二维码） |
-| 修改 `src/VmNext.Ui/UiBinder.cs` | 转发 `SettingsRequested` |
-| 修改 `src/VmNext.App/Gui/GuiHost.cs` | 托盘装配 + 菜单动作 + **退出 / 重启** + 位置记忆接线 |
-| 修改 `src/VmNext.App/Gui/App.axaml.cs` | 接线；进程退出时补删托盘图标 |
-| 修改 `src/VmNext.App/AppOptions.cs` | 加 `RawArgs`（重启时"带着同样的参数再起一个"） |
-| 新增 `tests/VmNext.Ui.Tests/` 4 个测试文件 | 摆位 24 条 / 拖拽 6 条 / 命中区 8 条 / 降级 3 条（**共 41 条**） |
+| 新增 `src/VoiceMikonCSharp.Ui/Placement.cs` | `placement.py` 的 C# 翻译（**纯函数**）：常量 / 夹取 / 偏移编解码 / 摆位 |
+| 新增 `src/VoiceMikonCSharp.Ui/DragGeometry.cs` | 拖拽几何（**纯函数**）：鼠标位移 → 窗口位移；"动过没有"的判定 |
+| 新增 `src/VoiceMikonCSharp.Ui/HitRegionBuilder.cs` | 命中区计算（**纯函数**）：可见元素 → 命中区矩形列表 |
+| 新增 `src/VoiceMikonCSharp.Ui/OrbPlacementHint.cs` | 位置记忆的载体（`geometry` + `monitor`），UI 层不直接碰 `Config` |
+| 新增 `src/VoiceMikonCSharp.Shell/TrayIcon.cs` | 托盘图标 + 右键菜单（Win32 `Shell_NotifyIcon` + `TrackPopupMenu`） |
+| 新增 `src/VoiceMikonCSharp.Shell/HitRegion.cs` | 命中区的数据结构（物理像素 + 圆角） |
+| 新增 `src/VoiceMikonCSharp.Shell/SystemAnimation.cs` | 系统动画开关（`prefers-reduced-motion` 的 Windows 对应物），**可注入** |
+| 修改 `src/VoiceMikonCSharp.Shell/NativeMethods.cs` | 补托盘 / 菜单 / GDI 绘图 / 图标 / 动画开关的 P/Invoke |
+| 修改 `src/VoiceMikonCSharp.Shell/OverlayWindow.cs` | `HitRegions`（外部填矩形）→ `BuildHitRegions()`（子类算）；加 `MoveToPhysicalPixels` |
+| 修改 `src/VoiceMikonCSharp.Ui/CapsuleWindow.axaml(.cs)` | 拖拽 / 摆位 / 位置记忆 / 命中区 / 动效降级 / 球菜单（删二维码） |
+| 修改 `src/VoiceMikonCSharp.Ui/UiBinder.cs` | 转发 `SettingsRequested` |
+| 修改 `src/VoiceMikonCSharp.App/Gui/GuiHost.cs` | 托盘装配 + 菜单动作 + **退出 / 重启** + 位置记忆接线 |
+| 修改 `src/VoiceMikonCSharp.App/Gui/App.axaml.cs` | 接线；进程退出时补删托盘图标 |
+| 修改 `src/VoiceMikonCSharp.App/AppOptions.cs` | 加 `RawArgs`（重启时"带着同样的参数再起一个"） |
+| 新增 `tests/VoiceMikonCSharp.Ui.Tests/` 4 个测试文件 | 摆位 24 条 / 拖拽 6 条 / 命中区 8 条 / 降级 3 条（**共 41 条**） |
 
 ---
 
@@ -98,7 +98,7 @@
 |---|---|---|
 | `orb_window_position` 里"从球位置反推 512×260 窗口左上角"的那一步 | Python 的窗口高固定 260；我们的高度**跟着内容**走 | 反推照做，但用**实际**窗口尺寸（`winW` / `winH` 是参数，不是常量） |
 | `orb.follow` / `orb.pinned` / `orb.custom` 三档位置模式 | **Python 版已经退役了**：`config.py` L31-32 明确写"胶囊位置三档、悬浮球位置三档(follow/pinned/custom)…均已退役"；`capsule.css` L663-668 的 `.orb-follow` 只是遗留样式 | 只做两档：**默认右下角** + **用户拖动记忆**（见 §8 疑问 #1） |
-| `Monitors`（Python `win32/monitors.py`） | 那是 Win32 互操作 | 复用 **Core 已有的** `VmNext.Core.Interop.Monitors`（K1 就有：`ListMonitors` / `MonitorAtPoint` / `MonitorByDevice` / `PrimaryMonitor`），不重复造 |
+| `Monitors`（Python `win32/monitors.py`） | 那是 Win32 互操作 | 复用 **Core 已有的** `VoiceMikonCSharp.Core.Interop.Monitors`（K1 就有：`ListMonitors` / `MonitorAtPoint` / `MonitorByDevice` / `PrimaryMonitor`），不重复造 |
 
 ### 测试结果
 
@@ -432,15 +432,15 @@
 
 | 项目 | 总数 | 通过 | 失败 | 跳过 | 说明 |
 |---|---|---|---|---|---|
-| `VmNext.Ui.Tests`（K4a 的 12 + 本轮新增 33） | **53** | **53** | 0 | 0 | 新增：摆位 15 / 拖拽 6 / 命中区 9 / 动效降级 3 |
-| `VmNext.TokenCheck` | — | ✓ 全部一致 | — | — | 两张 palette 与 `capsule.css` 完全对得上（本轮没动 palette） |
-| `VmNext.Core.Tests` | 14 | 14 | 0 | 0 | 未动 |
-| `VmNext.Audio.Tests` | 8 | 8 | 0 | 0 | 未动 |
-| `VmNext.Engines.Tests` | 80 | 78 | 0 | 2 | 未动；2 条跳过是环境限制 |
-| `dotnet build src/VmNext.App` | — | ✓ 0 警告 0 错误 | — | — | |
+| `VoiceMikonCSharp.Ui.Tests`（K4a 的 12 + 本轮新增 33） | **53** | **53** | 0 | 0 | 新增：摆位 15 / 拖拽 6 / 命中区 9 / 动效降级 3 |
+| `VoiceMikonCSharp.TokenCheck` | — | ✓ 全部一致 | — | — | 两张 palette 与 `capsule.css` 完全对得上（本轮没动 palette） |
+| `VoiceMikonCSharp.Core.Tests` | 14 | 14 | 0 | 0 | 未动 |
+| `VoiceMikonCSharp.Audio.Tests` | 8 | 8 | 0 | 0 | 未动 |
+| `VoiceMikonCSharp.Engines.Tests` | 80 | 78 | 0 | 2 | 未动；2 条跳过是环境限制 |
+| `dotnet build src/VoiceMikonCSharp.App` | — | ✓ 0 警告 0 错误 | — | — | |
 | `--headless --mock --timeout 60` | — | ✓ 引擎就绪，退出码 0 | — | — | K3 的自检路径仍通 |
 
-**故意没跑的**：`tests/VmNext.App.Tests`（含"起 GUI 子进程 + `PrintWindow`"那条 ——
+**故意没跑的**：`tests/VoiceMikonCSharp.App.Tests`（含"起 GUI 子进程 + `PrintWindow`"那条 ——
 会往用户屏幕上弹窗口；该项目**现已删除**）；以及一切涉及 Win32 桌面行为的自动化
 （托盘 / 退出顺序 / 重启 / 拖拽真机行为），按任务书由用户真机验证。
 

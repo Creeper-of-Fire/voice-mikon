@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VoiceMikonCSharp.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      只为拿 NativeMethods（唯一 P/Invoke 源）。
+      Core 里不出现任何 Avalonia 类型 —— 窗口层的类型不许渗进来。
+    -->
+    <ProjectReference Include="..\VoiceMikonCSharp.Shell\VoiceMikonCSharp.Shell.csproj" />
+
+    <!--
+      K3 追加：控制器要认识别后端（IAsrBackend）与流式引擎
+      （FullPassEngine / SentencePreviewEngine / VadFactory）。
+
+      VoiceMikonCSharp.Engines **不引用** 任何本仓库项目 —— 它只吃 short[] + 采样率，
+      所以 Core → Engines 这条边不会成环。
+      （反过来 Engines → Core 才会成问题：Core 引用 Shell，而 Engines 目前是独立的。）
+    -->
+    <ProjectReference Include="..\VoiceMikonCSharp.Engines\VoiceMikonCSharp.Engines.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -16,7 +16,7 @@
 
   <ItemGroup>
     <!--
-      版本用 11.* 浮动（与 src/VmNext.Shell 保持一致）。
+      版本用 11.* 浮动（与 src/VoiceMikonCSharp.Shell 保持一致）。
       首次 restore 后实际解析到 11.3.23（见 docs/capsule-translation.md 的"环境"一节）。
       浮动版本会随 NuGet 漂移，正式发布前应锁定具体版本（archive 意外发现 #9）。
     -->
@@ -26,8 +26,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\VmNext.Shell\VmNext.Shell.csproj" />
-    <ProjectReference Include="..\..\VmNext.Ui\VmNext.Ui.csproj" />
+    <ProjectReference Include="..\..\VoiceMikonCSharp.Shell\VoiceMikonCSharp.Shell.csproj" />
+    <ProjectReference Include="..\..\VoiceMikonCSharp.Ui\VoiceMikonCSharp.Ui.csproj" />
   </ItemGroup>
 
 </Project>

@@ -14,14 +14,14 @@
 
 | 项 | 结果 |
 |---|---|
-| 新增 `src/VmNext.Ui/` | classlib（引用 `VmNext.Core` + `VmNext.Shell`）：`CapsuleWindow`、`CapsuleTheme`、`CapsuleTheme.axaml`、`WaveformData`、`UiBinder` |
-| `src/demos/Capsule.Demo/` | 改成引用 `VmNext.Ui`，保留为**离线视觉预览**（热键直接推 mode，波形用模拟电平） |
-| `src/VmNext.App/` | 改成 **WinExe**：默认起 GUI；`--headless` 走 K3 的控制台路径 |
-| `src/VmNext.App/Gui/` | `App.axaml(.cs)`（Avalonia 应用 + palette）、`GuiHost.cs`（窗口 + 绑定层 + 界面形态） |
-| `src/VmNext.Shell/` | **只补不改**：`OverlayWindow.HitRegions`（自定义命中区）、`NativeMethods.CombineRgn`、`NativeMethods.SetForegroundWindow` |
-| `tests/VmNext.Ui.Tests/` | 新增（`Avalonia.Headless.XUnit`）：12 条 mode → 视觉状态断言 |
-| `tests/VmNext.App.Tests/` | K3 的 10 条全过 + 新增 1 条 GUI 子进程渲染测试（**该项目现已删除**） |
-| `tests/VmNext.TokenCheck/` | 改引用 `VmNext.Ui`（palette 搬家），仍通过 |
+| 新增 `src/VoiceMikonCSharp.Ui/` | classlib（引用 `VoiceMikonCSharp.Core` + `VoiceMikonCSharp.Shell`）：`CapsuleWindow`、`CapsuleTheme`、`CapsuleTheme.axaml`、`WaveformData`、`UiBinder` |
+| `src/demos/Capsule.Demo/` | 改成引用 `VoiceMikonCSharp.Ui`，保留为**离线视觉预览**（热键直接推 mode，波形用模拟电平） |
+| `src/VoiceMikonCSharp.App/` | 改成 **WinExe**：默认起 GUI；`--headless` 走 K3 的控制台路径 |
+| `src/VoiceMikonCSharp.App/Gui/` | `App.axaml(.cs)`（Avalonia 应用 + palette）、`GuiHost.cs`（窗口 + 绑定层 + 界面形态） |
+| `src/VoiceMikonCSharp.Shell/` | **只补不改**：`OverlayWindow.HitRegions`（自定义命中区）、`NativeMethods.CombineRgn`、`NativeMethods.SetForegroundWindow` |
+| `tests/VoiceMikonCSharp.Ui.Tests/` | 新增（`Avalonia.Headless.XUnit`）：12 条 mode → 视觉状态断言 |
+| `tests/VoiceMikonCSharp.App.Tests/` | K3 的 10 条全过 + 新增 1 条 GUI 子进程渲染测试（**该项目现已删除**） |
+| `tests/VoiceMikonCSharp.TokenCheck/` | 改引用 `VoiceMikonCSharp.Ui`（palette 搬家），仍通过 |
 
 ---
 
@@ -95,10 +95,10 @@ Avalonia 的 `Padding="10,8"` 是"**左 10、上 8、右 10、下 8**"（顺序�
 
 ## 3. 结构
 
-### 3.1 `src/VmNext.Ui/` 的职责
+### 3.1 `src/VoiceMikonCSharp.Ui/` 的职责
 
 ```
-VmNext.Ui/
+VoiceMikonCSharp.Ui/
 ├── CapsuleWindow.axaml(.cs)   胶囊窗口（继承 Shell 的 OverlayWindow）
 ├── CapsuleTheme.cs            主题档位 + 两张 palette（色值唯一真相在 CSS）
 ├── CapsuleTheme.axaml         palette 的 ResourceDictionary（正式版 / demo / 测试引同一份）
@@ -191,18 +191,18 @@ mode 取自 `core-api.md` §4.1；class 组合取自 `capsule.js` 的 `applyMode
 
 | 项目 | 总数 | 通过 | 失败 | 跳过 |
 |---|---|---|---|---|
-| `VmNext.Ui.Tests`（**新增**） | 12 | **12** | 0 | 0 |
-| `VmNext.App.Tests`（K3 + 新增 1 条 GUI；现已删除） | 11 | **10** | 0 | **1** |
-| `VmNext.Core.Tests`（未动） | 23 | 22 | 0 | 1 |
-| `VmNext.Audio.Tests`（未动） | 10 | 10 | 0 | 0 |
-| `VmNext.Engines.Tests`（未动） | 80 | 78 | 0 | 2 |
-| `VmNext.TokenCheck`（改引用） | — | ✓ 全部一致 | — | — |
+| `VoiceMikonCSharp.Ui.Tests`（**新增**） | 12 | **12** | 0 | 0 |
+| `VoiceMikonCSharp.App.Tests`（K3 + 新增 1 条 GUI；现已删除） | 11 | **10** | 0 | **1** |
+| `VoiceMikonCSharp.Core.Tests`（未动） | 23 | 22 | 0 | 1 |
+| `VoiceMikonCSharp.Audio.Tests`（未动） | 10 | 10 | 0 | 0 |
+| `VoiceMikonCSharp.Engines.Tests`（未动） | 80 | 78 | 0 | 2 |
+| `VoiceMikonCSharp.TokenCheck`（改引用） | — | ✓ 全部一致 | — | — |
 
 跳过的 3 条与 K3 时一样，都是环境限制（剪贴板 1418 / `MINIMAX_API_KEY` 不存在）。
 
 ### 6.1 新增的两条关键测试
 
-**`tests/VmNext.Ui.Tests`**（无头）：按 capsule.css 的状态表逐个推 mode，断言元素属性，
+**`tests/VoiceMikonCSharp.Ui.Tests`**（无头）：按 capsule.css 的状态表逐个推 mode，断言元素属性，
 每条断言旁注 CSS 行号。例如：
 
 ```csharp
@@ -211,13 +211,13 @@ Assert.Equal(40, window.Pill.MaxWidth);
 Assert.Equal(CapsuleTheme.DarkPalette["--wave"], BackgroundOf(window.Pill.Background));
 ```
 
-**`tests/VmNext.App.Tests/GuiWindowTests`**（真子进程，**该项目现已删除**）：起 GUI → 等窗口 →
+**`tests/VoiceMikonCSharp.App.Tests/GuiWindowTests`**（真子进程，**该项目现已删除**）：起 GUI → 等窗口 →
 `PrintWindow` 统计非透明像素（> 500）与录音红像素（> 200）→ `WM_CLOSE` → 正常退出（退出码 0）。
 
 ### 6.2 命令行实测
 
 ```
-dotnet run --project src/VmNext.App -- --headless --mock --timeout 60
+dotnet run --project src/VoiceMikonCSharp.App -- --headless --mock --timeout 60
   → [无头] 引擎就绪
   → 退出码 0
 ```
@@ -340,11 +340,11 @@ GUI 形态：进程起来后窗口在右下角（`(3329,1959)-(4225,2065)`，客
 
 ## 9. 给主代理的两条提示
 
-1. **根 `VmNext.sln` 本次没动**（里面的 `Capsule.Demo` / `VmNext.TokenCheck` 是上一版加的）：
-   需要再补 `src/VmNext.Ui/VmNext.Ui.csproj` 与 `tests/VmNext.Ui.Tests/VmNext.Ui.Tests.csproj`
-   两个项目。不加也能编（`ProjectReference` 按路径解析），只是 `dotnet build VmNext.sln`
+1. **根 `VoiceMikonCSharp.sln` 本次没动**（里面的 `Capsule.Demo` / `VoiceMikonCSharp.TokenCheck` 是上一版加的）：
+   需要再补 `src/VoiceMikonCSharp.Ui/VoiceMikonCSharp.Ui.csproj` 与 `tests/VoiceMikonCSharp.Ui.Tests/VoiceMikonCSharp.Ui.Tests.csproj`
+   两个项目。不加也能编（`ProjectReference` 按路径解析），只是 `dotnet build VoiceMikonCSharp.sln`
    不会覆盖到它们。
-2. **`src/VmNext.App` 改成 WinExe 之后**，`dotnet run --project src/VmNext.App -- --headless --mock`
+2. **`src/VoiceMikonCSharp.App` 改成 WinExe 之后**，`dotnet run --project src/VoiceMikonCSharp.App -- --headless --mock`
    仍然可用（输出照旧、退出码 0）；从 PowerShell 用 `&` 直接跑 WinExe 时
    **PowerShell 不会等它**（GUI 子系统的老规矩），要等退出码请用
    `Start-Process -Wait -PassThru` 或直接看 K3 那两条子进程测试。

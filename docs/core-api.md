@@ -1,11 +1,11 @@
 # core-api —— UI 阶段的唯一接口依据
 
 > **这份文档是 UI 翻译的契约。** 下一阶段的 worker 只看这份文档绑事件，
-> 不要去翻 `src/VmNext.Core/` 的实现（那是"怎么实现"，不是"怎么用"）。
+> 不要去翻 `src/VoiceMikonCSharp.Core/` 的实现（那是"怎么实现"，不是"怎么用"）。
 >
 > 翻译源：`voice-mikon/src/voice_mikon/apps/voicebar/presenter.py` +
 > `apps/voicebar/protocol.py` + `core/controller.py` + `core/state.py`。
-> C# 侧实现见 `src/VmNext.Core/Controller/` 与 `src/VmNext.Core/Presentation/`。
+> C# 侧实现见 `src/VoiceMikonCSharp.Core/Controller/` 与 `src/VoiceMikonCSharp.Core/Presentation/`。
 
 ---
 
@@ -42,7 +42,7 @@
 | 8 | **热键**（`HotkeyBinding`） | 独立线程；注册失败只发 warning，不影响程序 |
 | 9 | **引擎启动**（`controller.Start()`） | 后台加载模型，主流程不阻塞 |
 
-参考实现：`src/VmNext.App/AppHost.cs`（控制台版装配链）。
+参考实现：`src/VoiceMikonCSharp.App/AppHost.cs`（控制台版装配链）。
 
 ### 退出顺序（同样不能换）
 
@@ -80,15 +80,15 @@ clipboard.ReleaseOwnership()  ← 退出前把剪贴板所有权还给系统，�
 
 | 事件 | 在哪 | 触发线程 | UI 要不要 `Dispatcher.UIThread.Post` | 载荷 |
 |---|---|---|---|---|
-| `CoreController.StateChanged` | `src/VmNext.Core/Controller/CoreController.cs` | **谁改的状态就在谁的线程**（模型加载线程 / 识别线程 / 调用方线程） | **要** | `AppState`（`State` / `Backend` / `BackendHealth` / `Model` / `PreviewText`） |
+| `CoreController.StateChanged` | `src/VoiceMikonCSharp.Core/Controller/CoreController.cs` | **谁改的状态就在谁的线程**（模型加载线程 / 识别线程 / 调用方线程） | **要** | `AppState`（`State` / `Backend` / `BackendHealth` / `Model` / `PreviewText`） |
 | `CoreController.BackendHealthChanged` | 同上 | 同上 | **要** | `BackendHealth`（`Status` = loading/ready/failed，`Reason`） |
-| `VoiceBarPresenter.DisplayModeChanged` | `src/VmNext.Core/Presentation/VoiceBarPresenter.cs` | 同上（状态变化那条线程 / 通知那条线程） | **要** | `DisplayModeChangedEventArgs`：`Mode`（字符串）+ `Payload`（见 §4） |
+| `VoiceBarPresenter.DisplayModeChanged` | `src/VoiceMikonCSharp.Core/Presentation/VoiceBarPresenter.cs` | 同上（状态变化那条线程 / 通知那条线程） | **要** | `DisplayModeChangedEventArgs`：`Mode`（字符串）+ `Payload`（见 §4） |
 | `VoiceBarPresenter.PreviewTextChanged` | 同上 | 同上 | **要** | `PreviewTextChangedEventArgs.Text`（**整段替换**，不是追加） |
 | `VoiceBarPresenter.LevelsChanged` | 同上 | 电平泵线程（30fps） | **要** | `LevelsChangedEventArgs`：`Levels`（已映射 0..1）+ `Elapsed`（本轮秒数） |
 | `VoiceBarPresenter.ThemeChanged` | 同上 | `Start()` 调用那条线程 | **要** | `string`（auto/light/dark） |
 | `VoiceBarPresenter.PreviewEnabledChanged` | 同上 | 同上 | **要** | `bool` |
 | `VoiceBarPresenter.OrbVisibilityChanged` | 同上 | 同上 / `ApplyUiMode` | **要** | `bool`（false = 收球） |
-| `NotificationHub.NotificationPosted` | `src/VmNext.Core/Notifier.cs` | 发通知那条线程 | **要** | `Notification`（`Level` / `Kind` / `Message` / `Fields` / `Timestamp`） |
+| `NotificationHub.NotificationPosted` | `src/VoiceMikonCSharp.Core/Notifier.cs` | 发通知那条线程 | **要** | `Notification`（`Level` / `Kind` / `Message` / `Fields` / `Timestamp`） |
 | `CoreController.SubscribeLevels(...)` | `CoreController` | 电平泵线程（30fps） | **要** | `LevelFrame`（`Levels` + `Elapsed`）—— 电平的**正规入口**（见下面的说明） |
 
 > **电平为什么有两个入口**：`LevelPump` 实例由控制器**每轮录音现造**

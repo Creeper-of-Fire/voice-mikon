@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      net10.0-windows：本程序是 Windows-only（Win32 P/Invoke / 托盘 / 剪贴板 / Avalonia 桌面）。
+      带 -windows 也让"附属工具（WinForms，net10.0-windows）"能被正常 ProjectReference。
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VoiceMikonCSharp.App</RootNamespace>
+    <!--
+      WinExe（GUI 子系统）：双击运行时**不弹控制台窗口**，程序安静地在后台跑。
+      headless 开关走控制台路径：从 cmd / PowerShell 启动时子进程继承父控制台，
+      输出照常可见；双击时没有父控制台 → 静默（见 Program.TryAttachParentConsole）。
+    -->
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>VoiceMikonCSharp.App</AssemblyName>
+    <!-- AOT 友好：默认编译期绑定，避免运行时反射查控件 -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.*" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.*" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VoiceMikonCSharp.Core\VoiceMikonCSharp.Core.csproj" />
+    <ProjectReference Include="..\VoiceMikonCSharp.Audio\VoiceMikonCSharp.Audio.csproj" />
+    <ProjectReference Include="..\VoiceMikonCSharp.Engines\VoiceMikonCSharp.Engines.csproj" />
+    <ProjectReference Include="..\VoiceMikonCSharp.Shell\VoiceMikonCSharp.Shell.csproj" />
+    <ProjectReference Include="..\VoiceMikonCSharp.Ui\VoiceMikonCSharp.Ui.csproj" />
+  </ItemGroup>
+
+  <!--
+    附属工具（二维码扫描）：**只建立构建期依赖**，不引用它的程序集。
+
+    ReferenceOutputAssembly=false → 不产生任何代码引用（与工具"零 import"）：
+    工具的类型不参与本程序的编译，工具的依赖也不进本程序的依赖图。
+    AdditionalProperties → 显式把配置传过去（sln 外的项目引用拿不到配置映射时，
+    会**静默按 Debug 构建** —— 那会让 Release 的复制拿不到当次产物）。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\companions\QrScanner\QrScanner.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false"
+                      AdditionalProperties="Configuration=$(Configuration)"
+                      UndefineProperties="RuntimeIdentifier" />
+  </ItemGroup>
+
+  <!--
+    把附属工具的构建产物复制到本程序输出目录的 companions\QrScanner\ 下。
+    主程序按 AppContext.BaseDirectory\companions\QrScanner\QrScanner.exe 找它。
+    （复制**不是引用**：程序集不参与编译，也不进本程序的依赖图。）
+  -->
+  <PropertyGroup>
+    <!--
+      工具的构建产物目录。TFM 与 QrScanner.csproj 里的 net10.0-windows 一致；
+      工具不跟 RID（UndefineProperties=RuntimeIdentifier）→ 目录名固定，这里写死即可。
+    -->
+    <QrScannerOutputDir>$(MSBuildThisFileDirectory)..\..\companions\QrScanner\bin\$(Configuration)\net10.0-windows\</QrScannerOutputDir>
+  </PropertyGroup>
+
+  <Target Name="CopyCompanionQrScanner" AfterTargets="Build;Publish" Condition="Exists('$(QrScannerOutputDir)')">
+    <ItemGroup>
+      <CompanionQrScannerFiles Include="$(QrScannerOutputDir)**\*" Exclude="$(QrScannerOutputDir)ref\**" />
+    </ItemGroup>
+    <!-- 开发 / 直接跑 exe：输出目录（$(OutDir)） -->
+    <Copy SourceFiles="@(CompanionQrScannerFiles)"
+          DestinationFolder="$(OutDir)companions\QrScanner\%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+    <!-- 发布产物：publish 目录（发布时 PublishDir 才有值） -->
+    <Copy SourceFiles="@(CompanionQrScannerFiles)"
+          DestinationFolder="$(PublishDir)companions\QrScanner\%(RecursiveDir)"
+          SkipUnchangedFiles="true"
+          Condition="'$(PublishDir)' != ''" />
+  </Target>
+
+</Project>

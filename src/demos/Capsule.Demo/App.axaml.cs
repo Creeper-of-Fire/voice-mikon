@@ -6,8 +6,8 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
-using VmNext.Core.Presentation;
-using VmNext.Ui;
+using VoiceMikonCSharp.Core.Presentation;
+using VoiceMikonCSharp.Ui;
 
 namespace Capsule.Demo;
 
@@ -15,10 +15,10 @@ namespace Capsule.Demo;
 /// Demo 的 Avalonia 应用。
 ///
 /// <para>这是**离线视觉预览**：不接 controller、不录音，用热键直接推 mode，
-/// 波形用模拟电平喂。正式版（src/VmNext.App）走的是同一条
+/// 波形用模拟电平喂。正式版（src/VoiceMikonCSharp.App）走的是同一条
 /// <see cref="CapsuleWindow.SetMode"/> 入口 —— 这里只是把 mode 换成人手点的。</para>
 ///
-/// <para>palette 资源来自 VmNext.Ui（<c>CapsuleTheme.axaml</c>），
+/// <para>palette 资源来自 VoiceMikonCSharp.Ui（<c>CapsuleTheme.axaml</c>），
 /// 正式版与 demo 引的是同一份，样式不会走偏。</para>
 /// </summary>
 public partial class App : Application

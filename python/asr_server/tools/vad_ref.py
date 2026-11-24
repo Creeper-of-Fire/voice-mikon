@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Silero VAD 参考实现（Python）—— 给 C# 侧的逐帧概率对比用。
 
-C# 的 ``VmNext.Engines.Vad.SileroVadDetector`` 跑的是同一个 onnx 图、
+C# 的 ``VoiceMikonCSharp.Engines.Vad.SileroVadDetector`` 跑的是同一个 onnx 图、
 同一套调用协议（抽稀 → 拼 context → run → 收 state/context）。
 本脚本用 Python 的 onnxruntime 跑一遍同样的流程，把**逐窗概率**吐成 JSON，
 C# 侧拿它当参考值比对（预期偏差 < 1e-5）。

@@ -12,9 +12,9 @@
   <Application.Resources>
     <ResourceDictionary>
       <ResourceDictionary.MergedDictionaries>
-        <!-- 胶囊的 palette 与派生色在 VmNext.Ui/CapsuleTheme.axaml（两处引用同一份，
-             值由 tests/VmNext.TokenCheck 对着 capsule.css 核对）。 -->
-        <ResourceInclude Source="avares://VmNext.Ui/CapsuleTheme.axaml" />
+        <!-- 胶囊的 palette 与派生色在 VoiceMikonCSharp.Ui/CapsuleTheme.axaml（两处引用同一份，
+             值由 tests/VoiceMikonCSharp.TokenCheck 对着 capsule.css 核对）。 -->
+        <ResourceInclude Source="avares://VoiceMikonCSharp.Ui/CapsuleTheme.axaml" />
       </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
   </Application.Resources>

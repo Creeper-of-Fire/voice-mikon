@@ -4,7 +4,7 @@
 
 翻译对象：`voice-mikon/src/voice_mikon/engines/`（`base.py` / `minimax.py` / `_http.py` /
 `streaming.py` / `vad.py` / `vad_silero.py` / `engine.py`）→
-`voice-mikon-next/src/VmNext.Engines/` + `voice-mikon-next/python/asr_server/`。
+`voice-mikon-csharp/src/VoiceMikonCSharp.Engines/` + `voice-mikon-csharp/python/asr_server/`。
 
 原则同 K1：**目的是让引擎层的行为与 Python 版一致**，不是重新设计一套。做法是 Python 的逻辑
 一一对应到 C#，注释里的"为什么"（踩坑记录）一并带进 C#；凡是不改行为就不动，
@@ -16,9 +16,9 @@
 
 约束遵守情况：
 
-- `voice-mikon/` 只读；`archive/` 未动；根 `VmNext.sln` 未改（sln 由主代理统一加）；
-  `src/VmNext.Shell/`、`src/VmNext.Core/`、`src/VmNext.Audio/` 未改。
-- `VmNext.Engines` **不引用** Shell/Core/Audio —— 引擎层的输入就是 `short[]` + 采样率。
+- `voice-mikon/` 只读；`archive/` 未动；根 `VoiceMikonCSharp.sln` 未改（sln 由主代理统一加）；
+  `src/VoiceMikonCSharp.Shell/`、`src/VoiceMikonCSharp.Core/`、`src/VoiceMikonCSharp.Audio/` 未改。
+- `VoiceMikonCSharp.Engines` **不引用** Shell/Core/Audio —— 引擎层的输入就是 `short[]` + 采样率。
 - 未 `git commit`；未安装系统软件；未 `pip install`；未加载真实模型（用户的 voice-mikon
   正在占显存）。
 
@@ -26,11 +26,11 @@
 
 ## 1. 翻译对照表
 
-### 1.1 后端抽象与热词 —— `src/VmNext.Engines/AsrBackend.cs`
+### 1.1 后端抽象与热词 —— `src/VoiceMikonCSharp.Engines/AsrBackend.cs`
 
 | Python（`voice_mikon.engines.base`） | C# | 备注 |
 |---|---|---|
-| `ASRError` | `VmNext.Engines.AsrError` | 模型加载或推理失败 |
+| `ASRError` | `VoiceMikonCSharp.Engines.AsrError` | 模型加载或推理失败 |
 | `ASRBackend`（抽象基类） | `IAsrBackend`（接口） + `AsrBackendBase`（抽象类） | 接口给消费者，基类放共用逻辑 |
 | `ASRBackend.transcribe(audio, sample_rate)` | `IAsrBackend.Transcribe(short[] audio, int sampleRate)` | audio 约定**单声道 int16** |
 | `ASRBackend.load() -> float` | `IAsrBackend.Load() -> double` | 返回耗时秒数 |
@@ -45,7 +45,7 @@
 | `base.resample_to(audio, src, dst)` | `Dsp.Resampler.Resample(float[], src, dst)` | 见 §4 |
 | `base.encode_wav(audio, rate)` | `Dsp.WavEncoder.Encode(float[], rate)` | 标准 44 字节 WAV 头 |
 
-### 1.2 网络后端 —— `src/VmNext.Engines/Minimax/MinimaxBackend.cs`
+### 1.2 网络后端 —— `src/VoiceMikonCSharp.Engines/Minimax/MinimaxBackend.cs`
 
 | Python（`voice_mikon.engines.minimax` / `_http`） | C# | 备注 |
 |---|---|---|
@@ -66,7 +66,7 @@
 | `minimax.MAX_DURATION_SECONDS / MAX_BYTES` | `MaxDurationSeconds` / `MaxBytes` | |
 | `minimax.API_KEY_ENV` / `ENV_FILE_NAME` | `ApiKeyEnv` / `EnvFileName` | key 绝不进 config.json、绝不进日志（只报长度） |
 
-### 1.3 流式引擎 —— `src/VmNext.Engines/Streaming/`
+### 1.3 流式引擎 —— `src/VoiceMikonCSharp.Engines/Streaming/`
 
 | Python（`voice_mikon.engines.streaming`） | C# | 备注 |
 |---|---|---|
@@ -91,7 +91,7 @@
 | `streaming.FULL_PASS_MIN_AUDIO_SECONDS` | `MinAudioSeconds` | 0.5 |
 | `streaming.make_preview_engine()` | 构造器直选（`SentencePreviewEngine` / `FullPassEngine`） | 见 §6 疑问 8 |
 
-### 1.4 判定层 —— `src/VmNext.Engines/Vad/`
+### 1.4 判定层 —— `src/VoiceMikonCSharp.Engines/Vad/`
 
 | Python（`voice_mikon.engines.vad` / `vad_silero`） | C# | 备注 |
 |---|---|---|
@@ -110,7 +110,7 @@
 | `vad_silero.SILERO_SPEECH_ON/OFF_THRESHOLD` | `SpeechOnThreshold` / `SpeechOffThreshold` | 0.5 / 0.35 |
 | `vad_silero._load_session()` | `SileroVadDetector.LoadSession()` | 进程级共享 session + 单线程 + 钉 CPU |
 
-### 1.5 本地后端 + IPC —— `src/VmNext.Engines/Local/` + `python/asr_server/`
+### 1.5 本地后端 + IPC —— `src/VoiceMikonCSharp.Engines/Local/` + `python/asr_server/`
 
 | Python（`voice_mikon.engines.engine`） | C# / Python 侧 | 备注 |
 |---|---|---|
@@ -134,7 +134,7 @@
 细节见 **`python/asr_server/README.md`**（协议定稿在那里）。要点：
 
 - **管道**：Windows 命名管道 `\\.\pipe\{名字}`，双向。管道名由 **C# 生成**：
-  `vmnext-asr-{进程ID}-{8 位随机}`（`LocalBackend.BuildPipeName()`），多实例不打架。
+  `voice-mikon-csharp-asr-{进程ID}-{8 位随机}`（`LocalBackend.BuildPipeName()`），多实例不打架。
 - **握手**：Python 侧必须先 `CreateNamedPipe` 建实例再 `ConnectNamedPipe` 等客户端
   （**不能**直接 `open(path,"r+b")` —— 那条路在实例不存在时立刻报错，双方互等会死锁；
   这是实现过程中踩到的第一个坑）。
@@ -155,7 +155,7 @@
 
 ## 3. `dotnet test` 结果摘要
 
-命令（在 `tests/VmNext.Engines.Tests/` 目录下，.NET 10 SDK 的 MTP runner）：
+命令（在 `tests/VoiceMikonCSharp.Engines.Tests/` 目录下，.NET 10 SDK 的 MTP runner）：
 
 ```
 dotnet test
@@ -188,7 +188,7 @@ MiniMax 单元 13 项。
 
 ## 4. 重采样实现说明
 
-`src/VmNext.Engines/Dsp/Resampler.cs`。**不用** NAudio 的 `WdlResamplingSampleProvider`
+`src/VoiceMikonCSharp.Engines/Dsp/Resampler.cs`。**不用** NAudio 的 `WdlResamplingSampleProvider`
 （它的滤波器设计不同、不可控，而这里的滤波器参数要与 Python 版对齐）。
 
 ### 4.1 滤波器参数（与 `scipy.signal.resample_poly` 默认值逐项对齐）
@@ -353,7 +353,7 @@ ExecutionProvider 浮点内核不完全相同，LSTM 会把微小差异放大。
   且**同一原因只通知一次**（进程级 `_notified_reasons` 集合）。
 - **我的处理**：`VadFactory.Make()` 通过 `onFallback(reason, message)` 回调把降级交给上层，
   本层不发通知。
-- **为什么**：`VmNext.Engines` 不引用 `VmNext.Core`（通知中心在那儿）。"同一原因只通知一次"
+- **为什么**：`VoiceMikonCSharp.Engines` 不引用 `VoiceMikonCSharp.Core`（通知中心在那儿）。"同一原因只通知一次"
   的去重逻辑留给上层（K3）做 —— 那是通知中心该管的事。
   降级本身的三条路径（模型缺失 / 加载失败 / 采样率不支持）与原因标识与 Python 版一致。
 
@@ -409,8 +409,8 @@ Silero 的逐窗概率对齐到 1e-4 以内（§5）。包只带 CPU provider，
 ## 附：文件清单
 
 ```
-src/VmNext.Engines/
-    VmNext.Engines.csproj
+src/VoiceMikonCSharp.Engines/
+    VoiceMikonCSharp.Engines.csproj
     AsrBackend.cs                     IAsrBackend / AsrError / AsrBackendBase / HotwordSource / ToFloat32
     Dsp/Resampler.cs                   多相重采样（FIR 低通 + 抽取/插值）
     Dsp/WavEncoder.cs                  WAV 编码（44 字节标准头）
@@ -429,8 +429,8 @@ python/asr_server/
     README.md                          IPC 协议定稿 + 依赖 + 怎么跑 + mock 模式
     tools/vad_ref.py                   Silero 参考概率（测试用）
 
-tests/VmNext.Engines.Tests/
-    VmNext.Engines.Tests.csproj  global.json
+tests/VoiceMikonCSharp.Engines.Tests/
+    VoiceMikonCSharp.Engines.Tests.csproj  global.json
     Fakes.cs  TestEnv.cs
     HotwordSourceTests.cs  EnergyVadDetectorTests.cs  ResamplerTests.cs
     SentencePreviewEngineTests.cs  FullPassEngineTests.cs

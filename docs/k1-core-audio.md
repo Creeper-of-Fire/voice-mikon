@@ -2,8 +2,8 @@
 
 > 本文是 **K1 阶段的过程记录**，现状以代码和 [`AGENTS.md`](../AGENTS.md) 为准。
 
-翻译对象：`voice-mikon/src/voice_mikon/` 下的 12 个模块 → `voice-mikon-next/src/VmNext.Core/` 与
-`src/VmNext.Audio/`。
+翻译对象：`voice-mikon/src/voice_mikon/` 下的 12 个模块 → `voice-mikon-csharp/src/VoiceMikonCSharp.Core/` 与
+`src/VoiceMikonCSharp.Audio/`。
 
 **这一阶段的目标**：让 C# 版的核心层与音频层**行为与 Python 版一致**，不是重新设计一套。
 做法是 Python 的逻辑一一对应到 C#，Python 注释里的"为什么"（踩坑记录）一并带进 C# 注释 ——
@@ -19,8 +19,8 @@
 
 | Python（`voice_mikon.`） | C# | 备注 |
 |---|---|---|
-| `config.Config` | `VmNext.Core.Config` | JSON 字段名与 Python 逐字一致（`hotkey` / `model_root` / `save_recordings` …） |
-| `config.OrbConfig` | `VmNext.Core.OrbConfig` | |
+| `config.Config` | `VoiceMikonCSharp.Core.Config` | JSON 字段名与 Python 逐字一致（`hotkey` / `model_root` / `save_recordings` …） |
+| `config.OrbConfig` | `VoiceMikonCSharp.Core.OrbConfig` | |
 | `config.Config.validate()` | `Config.Validate()` | 返回问题列表 |
 | `config.Config.to_dict()` | `Config.ToDictionary()` | |
 | `config.Config.from_dict()` | `Config.FromDictionary(IReadOnlyDictionary<string, JsonElement>)` | 未知键告警不崩 |
@@ -39,7 +39,7 @@
 | `paths.ensure_dirs()` | `Paths.EnsureDirs()` | |
 | `logging_setup.setup()` | `Log.Setup()` | 幂等；文件写不了不拖垮程序 |
 | `logging_setup.get_logger()` | `Log.GetLogger()` | |
-| `notify.Notification` | `VmNext.Core.Notification` | level / kind / message 三元组是契约 |
+| `notify.Notification` | `VoiceMikonCSharp.Core.Notification` | level / kind / message 三元组是契约 |
 | `notify.NotificationHub.subscribe()` | `NotificationHub.Subscribe()` | |
 | `notify.NotificationHub.publish()` | `NotificationHub.Publish()` | 出口 `data/notify.log` |
 | `notify.notify`（全局单例） | `NotificationHub.Notify` | |
@@ -48,16 +48,16 @@
 
 | Python | C# | 备注 |
 |---|---|---|
-| `core.state.AppState` | `VmNext.Core.AppState` | 不可变 record，`with` 表达式 ≈ `with_changes()` |
-| `core.state.BackendHealth` | `VmNext.Core.BackendHealth` | `Ready` / `Failed` / `Loading` |
-| `core.state.CommandResult` | `VmNext.Core.CommandResult` | `Rejected` ≈ Python 的 `rejected` |
+| `core.state.AppState` | `VoiceMikonCSharp.Core.AppState` | 不可变 record，`with` 表达式 ≈ `with_changes()` |
+| `core.state.BackendHealth` | `VoiceMikonCSharp.Core.BackendHealth` | `Ready` / `Failed` / `Loading` |
+| `core.state.CommandResult` | `VoiceMikonCSharp.Core.CommandResult` | `Rejected` ≈ Python 的 `rejected` |
 | `core.state.STATES` / `HEALTH_STATUSES` | `AppStates.All` / `HealthStatuses.All` | |
 
 ### Win32 互操作
 
 | Python（`win32.`） | C# | 备注 |
 |---|---|---|
-| `clipboard.ClipboardResult` | `VmNext.Core.Interop.ClipboardResult` | |
+| `clipboard.ClipboardResult` | `VoiceMikonCSharp.Core.Interop.ClipboardResult` | |
 | `clipboard.read_text()` | `ClipboardService.ReadText()` | **(ok, text)** 两段信息：读失败 ≠ 没有文本 |
 | `clipboard.get_text()` | `ClipboardService.GetText()` | |
 | `clipboard.get_sequence_number()` | `ClipboardService.GetSequenceNumber()` | |
@@ -65,7 +65,7 @@
 | `clipboard.set_text()` | `ClipboardService.SetText()` | |
 | `clipboard.ensure_owner_window()` | `ClipboardService.EnsureOwnerWindow()` | owner 窗口**只在 owner 线程创建** |
 | `clipboard.release_ownership()` | `ClipboardService.ReleaseOwnership()` | 转交所有权，内容留住 |
-| `monitors.Monitor` | `VmNext.Core.Interop.Monitor` | |
+| `monitors.Monitor` | `VoiceMikonCSharp.Core.Interop.Monitor` | |
 | `monitors.list_monitors()` | `Monitors.ListMonitors()` | `EnumDisplayMonitors` 逐个枚举 |
 | `monitors.monitor_at_point()` | `Monitors.MonitorAtPoint()` | |
 | `monitors.monitor_by_device()` | `Monitors.MonitorByDevice()` | |
@@ -83,7 +83,7 @@
 
 | Python（`core.inject`） | C# | 备注 |
 |---|---|---|
-| `InjectResult` | `VmNext.Core.Inject.InjectResult` | `Ok` / `Reason` / `TextInClipboard` |
+| `InjectResult` | `VoiceMikonCSharp.Core.Inject.InjectResult` | `Ok` / `Reason` / `TextInClipboard` |
 | `paste_text()` | `Injector.PasteText()` | 剪贴板 + Ctrl+V；3 次重试；末尾补空格开关 |
 | `paste_with_feedback()` | `Injector.PasteWithFeedback()` | |
 | `_text_in_clipboard()` | `Injector.TextInClipboard()`（private） | 读回比对，不猜 |
@@ -96,7 +96,7 @@
 
 | Python | C# | 备注 |
 |---|---|---|
-| `core.levels.dbfs_to_unit()` | `VmNext.Core.Levels.LevelPump.DbfsToUnit()` | 对数映射 + 底噪门 |
+| `core.levels.dbfs_to_unit()` | `VoiceMikonCSharp.Core.Levels.LevelPump.DbfsToUnit()` | 对数映射 + 底噪门 |
 | `core.levels.level_gate()` | `LevelPump.LevelGate()` | 门限 = max(下限, 底噪 × 1.5) |
 | `core.controller._level_loop()` | `LevelPump.Start()` / `Stop()` | 30fps（`PushInterval = 1/30`） |
 | `core.controller._mapped_levels()` | `LevelPump.Map()`（private） | 数据源由 `ILevelSource` 提供 |
@@ -106,7 +106,7 @@
 
 | Python（`audio.`） | C# | 备注 |
 |---|---|---|
-| `recorder.Recorder` | `VmNext.Audio.Recorder` | NAudio `WasapiCapture` |
+| `recorder.Recorder` | `VoiceMikonCSharp.Audio.Recorder` | NAudio `WasapiCapture` |
 | `recorder.Recorder.start()` | `Recorder.Start()` | |
 | `recorder.Recorder.stop()` | `Recorder.Stop()` | 返回 `RecordingResult(int16 单声道, 原生采样率)` |
 | `recorder.Recorder.snapshot()` | `Recorder.Snapshot()` | **不消费** |
@@ -117,19 +117,19 @@
 | `recorder.frames_to_int16()` | `Int16CaptureSource`（通道混音 + int16 转换） | |
 | `recorder.is_recording()` | `Recorder.IsRecording`（static） | 后台探测让路 |
 | `recorder.rms_of()` | `DevicePicker.RmsOf()` | |
-| `devices.InputDevice` | `VmNext.Audio.InputDevice` | **索引口径不同，见疑问清单 #1** |
+| `devices.InputDevice` | `VoiceMikonCSharp.Audio.InputDevice` | **索引口径不同，见疑问清单 #1** |
 | `devices.list_inputs()` | `DevicePicker.ListInputs()` | |
 | `devices.supported_rate()` | `DevicePicker.SupportedRate()` | WASAPI 下 = 设备 mix format（原生率） |
 | `devices.probe()` | `DevicePicker.Probe()` | 开流看有没有数据 |
 | `devices.choose_device()` | `DevicePicker.ChooseDevice()` | 显式 > 名称 hints > 实测最好 |
-| `noise.NoiseFloorTracker` | `VmNext.Audio.NoiseFloorTracker` | 滑动窗口 p10 |
+| `noise.NoiseFloorTracker` | `VoiceMikonCSharp.Audio.NoiseFloorTracker` | 滑动窗口 p10 |
 | `recording_store.write_wav()` | `RecordingStore.WriteWav()` | int16 单声道、小端 |
 | `recording_store.prune_recordings()` | `RecordingStore.PruneRecordings()` | 只留最近 20 个 |
 | `recording_store.save_recording()` | `RecordingStore.SaveRecording()` | `data/recordings/` |
 
 ### P/Invoke 落点
 
-全部 Win32 声明集中在 `src/VmNext.Shell/NativeMethods.cs`（**唯一 P/Invoke 源**，K1 只追加、不改已有函数）：
+全部 Win32 声明集中在 `src/VoiceMikonCSharp.Shell/NativeMethods.cs`（**唯一 P/Invoke 源**，K1 只追加、不改已有函数）：
 
 - 剪贴板：`OpenClipboard` / `CloseClipboard` / `EmptyClipboard` / `GetClipboardData` / `SetClipboardData` /
   `GetClipboardSequenceNumber` / `GetClipboardOwner` / `GlobalAlloc` / `GlobalLock` / `GlobalUnlock` / `GlobalFree`
@@ -142,7 +142,7 @@
 
 > ⚠ `NativeMethods.cs` 文件头原来的约定「绝不注入输入」被 K1 打了**有记录的例外**：
 > 产品本身就是"把文字注入当前光标"的工具，必须能注入键盘事件；注入能力集中在
-> `VmNext.Core.Inject.Injector` 一处，唯一的调用方式是「剪贴板 + Ctrl+V」且**必须读回校验**。
+> `VoiceMikonCSharp.Core.Inject.Injector` 一处，唯一的调用方式是「剪贴板 + Ctrl+V」且**必须读回校验**。
 > 窗口层与验证壳仍然只做查询。
 
 ---
@@ -154,8 +154,8 @@
 > 两个测试项目各有一份 `global.json`，所以要**进项目目录**跑：
 >
 > ```
-> cd tests/VmNext.Core.Tests && dotnet test        # 或直接跑 bin\Debug\net10.0\VmNext.Core.Tests.exe
-> cd tests/VmNext.Audio.Tests && dotnet test
+> cd tests/VoiceMikonCSharp.Core.Tests && dotnet test        # 或直接跑 bin\Debug\net10.0\VoiceMikonCSharp.Core.Tests.exe
+> cd tests/VoiceMikonCSharp.Audio.Tests && dotnet test
 > ```
 >
 > 从仓库根目录跑 `dotnet test tests\...` 不会命中那份 `global.json`，会报
@@ -169,8 +169,8 @@
 
 | 测试项目 | 总数 | 通过 | 失败 | 跳过 | 耗时 |
 |---|---|---|---|---|---|
-| `VmNext.Core.Tests` | 23 | 22 | 0 | **1** | 15.1 s |
-| `VmNext.Audio.Tests` | 10 | 10 | 0 | 0 | 4.2 s |
+| `VoiceMikonCSharp.Core.Tests` | 23 | 22 | 0 | **1** | 15.1 s |
+| `VoiceMikonCSharp.Audio.Tests` | 10 | 10 | 0 | 0 | 4.2 s |
 
 ### 集成测试（`Category = Integration`）逐条状态
 
@@ -241,7 +241,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 - **原文**：`core/levels.py`（68 行）只有 `dbfs_to_unit` / `level_gate` 两个纯函数；
   30 fps 的电平泵在 `core/controller.py`（`_level_loop` / `_mapped_levels`，属 K3 的范围）。
 - **我的处理**：`LevelPump` = 两个纯函数 + 30 fps 泵（`PushInterval = 1/30`）+ 计时，
-  数据源抽成接口 `ILevelSource`（`Levels` / `NoiseFloor` / `Elapsed`），由 `VmNext.Audio.Recorder` 实现。
+  数据源抽成接口 `ILevelSource`（`Levels` / `NoiseFloor` / `Elapsed`），由 `VoiceMikonCSharp.Audio.Recorder` 实现。
 - **为什么**：K1 要求 Core 里有"30fps 电平 + 计时的事件推送"，而 **Core 不能引用 Audio**
   （Audio 引用 Core，反过来会成环）。窄接口是唯一不产生依赖环的写法。
 
@@ -250,7 +250,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 - **状态**：**已解决，不再适用**。K3 改用「自建 Win32 编辑窗口 + 独立线程消息循环」落地了同一件事；相关碰桌面的集成测试（`InjectTarget.cs` 等）已按「不碰桌面」原则删除 —— 本条只留作背景知识。
 - **原文**：验收要求"启动 Notepad → 等到窗口 → 设前台 → 注入 → 用 `WM_GETTEXT` 读 Edit 控件"。
 - **我的处理**：默认目标是**自建的最小 Win32 编辑窗口**（顶层窗口 + `EDIT` 控件，跑在
-  **独立线程 + 消息循环**上）；真记事本保留在 `VMNEXT_TEST_TARGET=notepad` 开关下。
+  **独立线程 + 消息循环**上）；真记事本保留在 `VOICE_MIKON_CSHARP_TEST_TARGET=notepad` 开关下。
 - **为什么**：新记事本是 packaged 单实例应用 —— ① `notepad.exe` 只是转发器，窗口不挂在
   notepad.exe 进程上（实测新进程 `MainWindowHandle` 恒为 0）；② 请求会转给**已经开着**的实例，
   在用户正在编辑的文档里插标签（不能接受）；③ 即使拿到窗口，它的编辑区不是传统
@@ -273,9 +273,9 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #5 `NativeMethods.cs` 的"绝不注入输入"约定需要例外
 
-- **状态**：**仍然成立**。注入能力仍集中在 `VmNext.Core.Inject.Injector`，唯一调用方式是「剪贴板 + Ctrl+V」且必须读回校验。
+- **状态**：**仍然成立**。注入能力仍集中在 `VoiceMikonCSharp.Core.Inject.Injector`，唯一调用方式是「剪贴板 + Ctrl+V」且必须读回校验。
 - **原文**：文件头第 1 条："只做查询与窗口样式/区域设置，绝不注入输入。禁止 SendInput …"
-- **我的处理**：加了**有记录的例外**并写明理由：注入能力集中在 `VmNext.Core.Inject.Injector`
+- **我的处理**：加了**有记录的例外**并写明理由：注入能力集中在 `VoiceMikonCSharp.Core.Inject.Injector`
   一处，唯一调用方式是「剪贴板 + Ctrl+V」且**必须读回校验**；窗口层与验证壳仍然只做查询。
 - **为什么**：产品本身就是"把文字注入当前光标"的语音输入工具 —— 没有注入就没有产品。
   那条约定是**重构骨架期**为了"本机验证期间不要劫持用户键鼠"而立的，现在有了明确归属。
@@ -291,7 +291,7 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 
 ### #7 测试框架：xunit v2 → v3
 
-- **状态**：**部分过时**。`Core.Tests` / `Audio.Tests` / `Engines.Tests` 用 xunit v3 + 项目目录里的 `global.json`；但 `tests/VmNext.Ui.Tests` 仍是 **xunit v2**（`Avalonia.Headless.XUnit` 只支持 v2），而且它没有 `global.json`。
+- **状态**：**部分过时**。`Core.Tests` / `Audio.Tests` / `Engines.Tests` 用 xunit v3 + 项目目录里的 `global.json`；但 `tests/VoiceMikonCSharp.Ui.Tests` 仍是 **xunit v2**（`Avalonia.Headless.XUnit` 只支持 v2），而且它没有 `global.json`。
 - **原文**：任务写的是 `xunit` + `xunit.runner.visualstudio` + `Microsoft.NET.Test.Sdk`。
 - **我的处理**：用 `xunit.v3` 4.0.3 + `xunit.runner.visualstudio` 4.0.1 + `Microsoft.NET.Test.Sdk` 17.12.0，
   每个测试项目目录放一份 `global.json`（`test.runner = Microsoft.Testing.Platform`）。
@@ -358,27 +358,27 @@ save→load 往返 / 读不到配置文件回退默认值 / 退役后端名回�
 | `NAudio` | **2.2.1**（NuGet，随 `NAudio.Core` / `NAudio.Wasapi` / `NAudio.WinMM` / `NAudio.Asio` / `NAudio.Midi` 拆分包） |
 | 只用到 | `NAudio.CoreAudioApi`（`MMDeviceEnumerator` / `MMDevice` / `DataFlow` / `DeviceState`）、`NAudio.Wave`（`WasapiCapture` / `WaveInEventArgs`） |
 | `WasapiCapture` 所在命名空间 | `NAudio.CoreAudioApi`（**不是** `NAudio.Wave`）—— 实测踩过 |
-| 引用位置 | `src/VmNext.Audio/VmNext.Audio.csproj` |
+| 引用位置 | `src/VoiceMikonCSharp.Audio/VoiceMikonCSharp.Audio.csproj` |
 
 ---
 
 ## 6. 产出文件清单
 
 **新增（Core）**
-`src/VmNext.Core/`：`VmNext.Core.csproj`、`Paths.cs`、`Log.cs`、`Notifier.cs`、`Config.cs`、`State.cs`、
+`src/VoiceMikonCSharp.Core/`：`VoiceMikonCSharp.Core.csproj`、`Paths.cs`、`Log.cs`、`Notifier.cs`、`Config.cs`、`State.cs`、
 `Interop/ClipboardService.cs`、`Interop/Monitors.cs`、`Interop/Dpi.cs`、`Inject/Injector.cs`、`Levels/LevelPump.cs`
 
 **新增（Audio）**
-`src/VmNext.Audio/`：`VmNext.Audio.csproj`、`Recorder.cs`、`DevicePicker.cs`、`NoiseFloor.cs`、
+`src/VoiceMikonCSharp.Audio/`：`VoiceMikonCSharp.Audio.csproj`、`Recorder.cs`、`DevicePicker.cs`、`NoiseFloor.cs`、
 `RecordingStore.cs`、`Int16CaptureSource.cs`
 
 **追加（Shell，只追加不改已有函数）**
-`src/VmNext.Shell/NativeMethods.cs`：剪贴板 / 键盘注入 / 焦点 / 显示器与 DPI / 消息循环 相关声明
+`src/VoiceMikonCSharp.Shell/NativeMethods.cs`：剪贴板 / 键盘注入 / 焦点 / 显示器与 DPI / 消息循环 相关声明
 
 **测试**（其中带 `Integration` 的三个文件**现已删除** —— 碰桌面的测试）
-`tests/VmNext.Core.Tests/`：`ConfigTests.cs`、`LevelPumpTests.cs`、`ClipboardIntegrationTests.cs`、
+`tests/VoiceMikonCSharp.Core.Tests/`：`ConfigTests.cs`、`LevelPumpTests.cs`、`ClipboardIntegrationTests.cs`、
 `InjectorIntegrationTests.cs`、`InjectTarget.cs`（注入验证目标：真记事本 or 自建 Win32 编辑窗口）
-`tests/VmNext.Audio.Tests/`：`NoiseFloorTests.cs`、`RecordingStoreTests.cs`、`RecorderIntegrationTests.cs`
+`tests/VoiceMikonCSharp.Audio.Tests/`：`NoiseFloorTests.cs`、`RecordingStoreTests.cs`、`RecorderIntegrationTests.cs`
 
-**未动**：`voice-mikon/`（只读）、`archive/`（冻结）、`VmNext.sln`（由主代理统一加项目）
+**未动**：`voice-mikon/`（只读）、`archive/`（冻结）、`VoiceMikonCSharp.sln`（由主代理统一加项目）
 

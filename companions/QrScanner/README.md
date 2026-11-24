@@ -2,16 +2,16 @@
 
 悬浮球右键菜单「二维码扫描」拉起的小工具：**截屏 → 全屏框选 → 解码 → 结果窗（自动复制）**。
 
-C# 重写版（`voice-mikon-next`）。Python 版在 `voice-mikon/companions/qr_scanner/`（tkinter + mss + pyzbar），
+C# 重写版（`voice-mikon-csharp`）。Python 版在 `voice-mikon/companions/qr_scanner/`（tkinter + mss + pyzbar），
 两边各跑各的，**互不认识**。
 
 ## 架构边界（为什么独立）
 
-- 与语音主程序 `VmNext.*` **零 import**：双向都不引用对方的程序集。
-  - 本项目**不 ProjectReference 任何 `VmNext.*` 项目**；
-  - `VmNext.App` 那边是 `ReferenceOutputAssembly="false"` 的 build-only 引用 ——
+- 与语音主程序 `VoiceMikonCSharp.*` **零 import**：双向都不引用对方的程序集。
+  - 本项目**不 ProjectReference 任何 `VoiceMikonCSharp.*` 项目**；
+  - `VoiceMikonCSharp.App` 那边是 `ReferenceOutputAssembly="false"` 的 build-only 引用 ——
     **只用来定构建顺序 + 复制产物，不产生任何代码引用**（复制不是引用）。
-- 本项目在 `VmNext.sln` 的 `companions` solution folder 里（**不进 `src/`**）。
+- 本项目在 `VoiceMikonCSharp.sln` 的 `companions` solution folder 里（**不进 `src/`**）。
 - 主程序侧只有一根线：菜单点击 → `Process.Start` 拉起本工具（**独立进程**）。
   工具崩溃 / 被强杀不影响语音主程序；工具缺失时主程序发一条通知报路径。
 - UI 走 WinForms（选区 + 结果窗），**不碰 Avalonia** —— 不与主程序的透明 / 裁形那套纠缠，

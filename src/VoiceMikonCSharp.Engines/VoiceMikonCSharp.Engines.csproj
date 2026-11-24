@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VoiceMikonCSharp.Engines</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      OnnxRuntime：只给 Silero VAD 判定层用（CPU 版就够）。
+      上游 Python 版同样只用 onnxruntime 而不是 torch.jit ——
+      理由见 Vad/SileroVad.cs 的注释：判定层最轻，却会把 torch 拖进来。
+      版本与本机 Python 侧 onnxruntime 保持一致（1.20.1），
+      这样 Silero 的逐窗概率可以与 Python 参考值逐帧对齐（偏差 < 1e-5）。
+    -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Silero 模型文件随包走、离线优先（上游 snakers4/silero-vad，MIT 许可，允许再分发）。
+      运行时**不联网**下载。
+    -->
+    <None Update="Models\silero_vad.onnx" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,7 +1,7 @@
 # asr_server —— 本地推理子进程（named pipe IPC）
 
 C# 版把"本地推理"从"进程内 `import torch`"改成"**Python 子进程 + 命名管道**"：
-本脚本被 `VmNext.Engines.Local.LocalBackend` 拉起，双方用一套行式 JSON 协议对话。
+本脚本被 `VoiceMikonCSharp.Engines.Local.LocalBackend` 拉起，双方用一套行式 JSON 协议对话。
 
 这样 C# 主进程不再背着几百 MB 的 torch 常驻 —— 只有真正要用本地模型时才起这个子进程。
 
@@ -23,7 +23,7 @@ C# 版把"本地推理"从"进程内 `import torch`"改成"**Python 子进程 + 
 ### 真模型模式
 
 ```powershell
-python python/asr_server/asr_server.py --pipe vmnext-asr-1234-abcdefgh
+python python/asr_server/asr_server.py --pipe voice-mikon-csharp-asr-1234-abcdefgh
 ```
 
 需要（本机装好即可，脚本本身不负责装）：
@@ -33,12 +33,12 @@ python python/asr_server/asr_server.py --pipe vmnext-asr-1234-abcdefgh
 - `numpy`（torch 的依赖，脚本用它在识别时把 int16 转成 float32）
 
 > ⚠ **不要用 `voice-mikon` 的 venv 跑本脚本** —— 那是另一个工程的依赖环境。
-> 本脚本用**系统 python**（`C# 侧默认就是系统 python`，可用环境变量 `VMNEXT_PYTHON` 覆盖）。
+> 本脚本用**系统 python**（`C# 侧默认就是系统 python`，可用环境变量 `VOICE_MIKON_CSHARP_PYTHON` 覆盖）。
 
 ### mock 模式（测试用）
 
 ```powershell
-python python/asr_server/asr_server.py --pipe vmnext-asr-1234-abcdefgh --mock
+python python/asr_server/asr_server.py --pipe voice-mikon-csharp-asr-1234-abcdefgh --mock
 ```
 
 - **一个第三方包都不 import**（只用标准库）—— 系统 python 干干净净也能跑。
@@ -61,7 +61,7 @@ python python/asr_server/asr_server.py --pipe vmnext-asr-1234-abcdefgh --mock
 
 - Windows 命名管道：`\\.\pipe\{名字}`
 - 方向：双向（`PipeDirection.InOut`）
-- 管道名由 **C# 生成**：`vmnext-asr-{进程ID}-{8 位随机}` —— 带 PID 和随机后缀，多实例不打架。
+- 管道名由 **C# 生成**：`voice-mikon-csharp-asr-{进程ID}-{8 位随机}` —— 带 PID 和随机后缀，多实例不打架。
 - 服务端 `open()` 会**阻塞直到客户端连上**；C# 侧的 `Connect()` 与之会合。
 
 ---
@@ -140,7 +140,7 @@ python python/asr_server/asr_server.py --pipe vmnext-asr-1234-abcdefgh --mock
 给 C# 侧比对（预期偏差 < 1e-5）：
 
 ```powershell
-python python/asr_server/tools/vad_ref.py --onnx src/VmNext.Engines/Models/silero_vad.onnx --rate 16000 --input 某段.wav
+python python/asr_server/tools/vad_ref.py --onnx src/VoiceMikonCSharp.Engines/Models/silero_vad.onnx --rate 16000 --input 某段.wav
 ```
 
 输出：

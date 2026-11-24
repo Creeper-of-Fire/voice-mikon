@@ -1,7 +1,7 @@
 using System;
 using Avalonia.Threading;
-using VmNext.Core.Presentation;
-using VmNext.Ui;
+using VoiceMikonCSharp.Core.Presentation;
+using VoiceMikonCSharp.Ui;
 
 namespace Capsule.Demo;
 

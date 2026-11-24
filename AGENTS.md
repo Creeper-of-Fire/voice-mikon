@@ -1,4 +1,4 @@
-# voice-mikon-next
+# voice-mikon-csharp
 
 [voice-mikon](../voice-mikon/)（Python + pywebview）的 **C# / Avalonia 11 / .NET 10 重写**。
 Windows 全局语音输入：按热键说话 → 文字注入光标处。
@@ -37,7 +37,7 @@ portable 约定（运行时数据只进项目内的 `data/`）见上级目录 `.
   (踩过的坑:曾用"整段平均 RMS < silence_rms"判静音报「没有检测到声音」,
   静音占比越高越容易被误杀 —— 说得越久反而越容易中招;同一处还有
   "录音太短"那道门。两道门都已删除,别再加回来。)
-- **预览层的 VAD（`VmNext.Engines/Vad/`）只用于断句**，不是判定用 ——
+- **预览层的 VAD（`VoiceMikonCSharp.Engines/Vad/`）只用于断句**，不是判定用 ——
   它只影响实时预览的出字节奏，最终结果永远来自整段识别。它可以留着调。
 - **剪贴板写入必须带 owner**（`Core/Interop/ClipboardService.cs`）：
   `OpenClipboard(NULL)` 写入的话，第三方剪贴板管理器(Ditto 一类)查不到
@@ -121,23 +121,23 @@ portable 约定（运行时数据只进项目内的 `data/`）见上级目录 `.
 ### 依赖方向（别改）
 
 ```
-VmNext.Engines    ← 不引用本仓库任何项目（引擎层的输入就是 short[] + 采样率）
-VmNext.Shell      ← 不引用本仓库任何项目（窗口层 + 全部 Win32 P/Invoke）
-VmNext.Core       → Shell + Engines
-VmNext.Audio      → Core
-VmNext.Ui         → Core + Shell
-VmNext.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这一层
+VoiceMikonCSharp.Engines    ← 不引用本仓库任何项目（引擎层的输入就是 short[] + 采样率）
+VoiceMikonCSharp.Shell      ← 不引用本仓库任何项目（窗口层 + 全部 Win32 P/Invoke）
+VoiceMikonCSharp.Core       → Shell + Engines
+VoiceMikonCSharp.Audio      → Core
+VoiceMikonCSharp.Ui         → Core + Shell
+VoiceMikonCSharp.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这一层
 ```
 
 - **`Core` 只认 `IRecorder` / `IDrainableRecorder` 窄接口，不引用 `Audio`**：
   `Audio` 引用 `Core`（电平泵在 Core），反过来会成环，MSBuild 直接报错。
-  适配在 `VmNext.Audio/RecorderAdapter.cs`。
+  适配在 `VoiceMikonCSharp.Audio/RecorderAdapter.cs`。
 - **UI 层不直接摸 `Config` / `ClipboardService` / `CoreController`**：
   配置读写走 `PanelPresenter` + `IPanelConfig`，剪贴板走
   `presenter.TryCopyResult()`，业务走 presenter 事件。
   （为什么：owner 窗口必须在主线程 —— 让 UI 直接摸剪贴板等于把那条规矩漏给 UI 层。）
-- **Win32 P/Invoke 集中在 `src/VmNext.Shell/NativeMethods.cs`**：
-  唯一例外是 `src/VmNext.App/Program.cs` 里的 `AttachConsole` / `GetStdHandle`
+- **Win32 P/Invoke 集中在 `src/VoiceMikonCSharp.Shell/NativeMethods.cs`**：
+  唯一例外是 `src/VoiceMikonCSharp.App/Program.cs` 里的 `AttachConsole` / `GetStdHandle`
   （进程入口自己要的）。别的项目里出现 `[DllImport]` 就是走偏了。
 - **本地推理走 Python 子进程**（`python/asr_server/`），C# 侧用命名管道通信。
   不要为了"少一个进程"把 torch 拉回主进程 —— 那样几百 MB 常驻内存就回来了。
@@ -148,10 +148,10 @@ VmNext.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这�
 **与主程序零 import**：双向都不认识对方。
 
 - **"零 import" 在 C# 里的含义**：
-  - 工具项目**不 ProjectReference 任何 `VmNext.*` 项目**；
-  - `VmNext.*` 也**不 Reference** 工具的程序集（工具的产物不参与主程序的依赖图）。
+  - 工具项目**不 ProjectReference 任何 `VoiceMikonCSharp.*` 项目**；
+  - `VoiceMikonCSharp.*` 也**不 Reference** 工具的程序集（工具的产物不参与主程序的依赖图）。
   - **构建期把工具的产物复制到输出目录不算引用** —— 那是"把一个独立 exe 放在旁边"，
-    不是代码依赖。`VmNext.App.csproj` 里那个 build-only 的 `ProjectReference`
+    不是代码依赖。`VoiceMikonCSharp.App.csproj` 里那个 build-only 的 `ProjectReference`
     （`ReferenceOutputAssembly="false"`）只用来**定构建顺序 + 复制产物**，
     工具的类型不参与主程序的编译。
 - **主程序只经 `Process.Start` 拉起独立进程**：不等它、不看它的输出、不管它的死活；
@@ -160,15 +160,15 @@ VmNext.App        → Core + Audio + Engines + Shell + Ui   ← 装配都在这�
   透明 / 裁形那套纠缠。附属工具坏也只坏自己。
 - **工具不继承主程序的"规矩"**：比如剪贴板 owner 窗口那条（`ClipboardService`）是
   主程序的需要；工具是独立进程，`Clipboard.SetText` 就够。
-- **附属工具在 `VmNext.sln` 的 `companions` solution folder 里**（它不是主程序的一部分，
+- **附属工具在 `VoiceMikonCSharp.sln` 的 `companions` solution folder 里**（它不是主程序的一部分，
   但**要在同一个 sln 里** —— sln 外的项目拿不到 sln 的配置映射，
-  `dotnet build VmNext.sln -c Release` 会拿 Debug 产物去复制）。
-  它的测试项目也在 sln 里（`tests/VmNext.Companions.Tests`）。
+  `dotnet build VoiceMikonCSharp.sln -c Release` 会拿 Debug 产物去复制）。
+  它的测试项目也在 sln 里（`tests/VoiceMikonCSharp.Companions.Tests`）。
 
 ### presenter 契约（改 UI 先看这个）
 
 **[`docs/core-api.md`](docs/core-api.md) 是 UI 的唯一接口依据。**
-不要去翻 `src/VmNext.Core/` 的实现来猜用法 —— 那是"怎么实现"，不是"怎么用"。
+不要去翻 `src/VoiceMikonCSharp.Core/` 的实现来猜用法 —— 那是"怎么实现"，不是"怎么用"。
 
 要点（细节看 core-api.md）：
 

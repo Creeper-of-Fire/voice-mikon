@@ -8,7 +8,7 @@
     <OutputType>WinExe</OutputType>
     <!--
       WinForms 需要带 -windows 的目标框架（TFM 必须如此）。
-      ⚠ 本项目**不引用任何 VmNext.* 程序集** —— 与语音主程序零 import（双向都不认识对方）。
+      ⚠ 本项目**不引用任何 VoiceMikonCSharp.* 程序集** —— 与语音主程序零 import（双向都不认识对方）。
       主程序只经 Process.Start 把本工具当**独立进程**拉起。
     -->
     <TargetFramework>net10.0-windows</TargetFramework>

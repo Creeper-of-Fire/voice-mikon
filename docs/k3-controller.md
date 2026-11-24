@@ -5,8 +5,8 @@
 翻译对象：`voice-mikon/src/voice_mikon/core/controller.py`（1058 行）、
 `core/state.py`、`apps/voicebar/protocol.py`、`apps/voicebar/presenter.py`、
 `host/hotkey.py`、`__main__.py`（装配部分）
-→ `voice-mikon-next/src/VmNext.Core/Controller/`、`src/VmNext.Core/Presentation/`、
-`src/VmNext.App/`、`src/VmNext.Audio/RecorderAdapter.cs`。
+→ `voice-mikon-csharp/src/VoiceMikonCSharp.Core/Controller/`、`src/VoiceMikonCSharp.Core/Presentation/`、
+`src/VoiceMikonCSharp.App/`、`src/VoiceMikonCSharp.Audio/RecorderAdapter.cs`。
 
 原则同 K1 / K2：**目的是让核心层的行为与 Python 版一致**，不是重新设计一套。做法是 Python 的逻辑
 一一对应到 C#，Python 注释里的"为什么"（踩坑记录）一并带进 C#；凡是不改行为就不动，
@@ -19,11 +19,11 @@
 
 ## 1. 翻译对照表
 
-### 1.1 控制器 —— `src/VmNext.Core/Controller/CoreController.cs`（+ `.Recording.cs` / `.Backend.cs`）
+### 1.1 控制器 —— `src/VoiceMikonCSharp.Core/Controller/CoreController.cs`（+ `.Recording.cs` / `.Backend.cs`）
 
 | Python（`core/controller.py`） | C# | 备注 |
 |---|---|---|
-| `class CoreController` | `VmNext.Core.Controller.CoreController`（partial，三份文件） | |
+| `class CoreController` | `VoiceMikonCSharp.Core.Controller.CoreController`（partial，三份文件） | |
 | `class State`（内部状态机） | `enum ControllerState` | Starting / Idle / Recording / Processing / Error |
 | `_APP_STATE_BY_V1` | `SetState()` 里的 switch | ⚠ **ERROR 没有对外状态**，对外仍是 idle |
 | `__init__(config, injector, recorder_factory, backend_factory, notifier)` | `CoreController(config, backendFactory, recorderFactory, injector, notifier, recordingSaver, micProbe, clipboard)` | 多两个装配口：`recordingSaver`（录音留存）、`micProbe`（麦克风探测）—— Core 不能引用 Audio 层（见疑问 #3） |
@@ -60,7 +60,7 @@
 | — | `ReloadMic()` | 托盘「重新探测麦克风」那条路（Python 在 `__main__.py` 里，本层收口） |
 | — | `StartMaxDurationTimer()` / `StopMaxDurationTimer()` | ⚠ **Python 没有实现**（见疑问 #2） |
 
-### 1.2 显示协议 —— `src/VmNext.Core/Presentation/DisplayProtocol.cs`
+### 1.2 显示协议 —— `src/VoiceMikonCSharp.Core/Presentation/DisplayProtocol.cs`
 
 | Python（`apps/voicebar/protocol.py`） | C# | 备注 |
 |---|---|---|
@@ -71,7 +71,7 @@
 | payload 的四个字段说明 | `DisplayPayload`（Message / Text / CanCopy / Reason + Warn / Body） | `Warn`/`Body` 是"等松键"瞬态覆盖那一条（Python 那边传的是另一个 dict） |
 | `DISPATCH_*` / `CMD_*` | — | Python 侧前端桥接常量，C# 阶段没有前端，**不翻** |
 
-### 1.3 presenter —— `src/VmNext.Core/Presentation/VoiceBarPresenter.cs`
+### 1.3 presenter —— `src/VoiceMikonCSharp.Core/Presentation/VoiceBarPresenter.cs`
 
 | Python（`apps/voicebar/presenter.py`） | C# | 备注 |
 |---|---|---|
@@ -98,7 +98,7 @@
 | `capsule.set_theme` / `set_preview_enabled` / `show_orb` / `hide_orb` | `ThemeChanged` / `PreviewEnabledChanged` / `OrbVisibilityChanged` | |
 | — | `TryCopyResult()` | ⚠ **Python 没有**（Python 胶囊自己管剪贴板），见疑问 #4 |
 
-### 1.4 热键 —— `src/VmNext.Core/Controller/HotkeyBinding.cs`
+### 1.4 热键 —— `src/VoiceMikonCSharp.Core/Controller/HotkeyBinding.cs`
 
 | Python（`host/hotkey.py`） | C# | 备注 |
 |---|---|---|
@@ -112,7 +112,7 @@
 | `HotkeyManager.unregister_all()` | `UnregisterAll()` | |
 | `HotkeyError` | `HotkeyError` | |
 
-### 1.5 入口 —— `src/VmNext.App/`
+### 1.5 入口 —— `src/VoiceMikonCSharp.App/`
 
 | Python（`__main__.py`） | C# | 备注 |
 |---|---|---|
@@ -130,11 +130,11 @@
 | `_flush_logs()` | `Console.Out.Flush()` | 日志本身 AutoFlush |
 | 托盘 / 面板 / 胶囊窗口 | — | **GUI 阶段才有**，本阶段不做 GUI |
 
-### 1.6 录音器适配 —— `src/VmNext.Audio/RecorderAdapter.cs`
+### 1.6 录音器适配 —— `src/VoiceMikonCSharp.Audio/RecorderAdapter.cs`
 
 | Python | C# | 备注 |
 |---|---|---|
-| `audio/recorder.py` `Recorder`（鸭子类型被 controller 直接用） | `VmNext.Audio.Recorder` + `RecorderAdapter : IDrainableRecorder` | Core 只认窄接口（疑问 #3） |
+| `audio/recorder.py` `Recorder`（鸭子类型被 controller 直接用） | `VoiceMikonCSharp.Audio.Recorder` + `RecorderAdapter : IDrainableRecorder` | Core 只认窄接口（疑问 #3） |
 
 ---
 
@@ -196,7 +196,7 @@
 |---|---|---|---|
 | 1 | `core/controller.py` 的 `_process` 在**注入前**取前台窗口（`hwnd = get_foreground_window()`） | **已修正 —— 与 Python 一致**：识别完成后、注入之前取当前前台窗口（`CoreController.Process` 里的 `NativeMethods.GetForegroundWindow()`） | K3 当时按任务书做成了"开始录音时记下前台窗口，注入时贴回那一个"，现已改回 Python 语义：说一两分钟、中途干别的事，用户早忘了开始时在哪个窗口 —— 结束录音那一刻看着的窗口才是意图所在 |
 | 2 | `config.max_duration` 是**死配置**（只有校验，没有任何地方用） | 每轮录音起一个定时器，到点自动 `StopRecording()`（发 `recording_timeout` 通知） | 任务书要求"`max_duration` 超时自动 stop"；Python 那边是漏实现 |
-| 3 | controller 直接用 `Recorder`（鸭子类型） | Core 只认 `IRecorder` / `IDrainableRecorder` 窄接口，`VmNext.Audio.RecorderAdapter` 适配 | `VmNext.Audio` 引用 `VmNext.Core`（电平泵在 Core），反向引用会成环 |
+| 3 | controller 直接用 `Recorder`（鸭子类型） | Core 只认 `IRecorder` / `IDrainableRecorder` 窄接口，`VoiceMikonCSharp.Audio.RecorderAdapter` 适配 | `VoiceMikonCSharp.Audio` 引用 `VoiceMikonCSharp.Core`（电平泵在 Core），反向引用会成环 |
 | 4 | 胶囊自己管剪贴板（复制按钮在 host 层） | presenter 上多一个 `TryCopyResult()` | UI 阶段只跟 core / presenter 打交道，不该让 UI 直接摸剪贴板 |
 | 5 | `parse_hotkey` 单字符走 `ord(part.upper())` | 同样取**大写**码位（`char.ToUpperInvariant`） | 键位按大写字母定义（VK_A = 0x41）；第一版照抄成了小写码位，被测试抓出来 |
 | 6 | 电平循环读 `controller.recorder`（一个常驻对象） | 每轮录音**现造**一个 `LevelPump`（数据源是那一轮的录音器），停录音就收 | `LevelPump` 的数据源在构造时定死（K1 的设计）；现造 = 每轮一个干净的电平窗口 |
@@ -215,13 +215,13 @@
 
 ```powershell
 # 每个测试项目目录里各放了一份 global.json（MTP runner），要进项目目录跑
-cd tests\VmNext.Core.Tests  && dotnet test
-cd tests\VmNext.Engines.Tests && dotnet test
-cd tests\VmNext.Audio.Tests  && dotnet test
-cd tests\VmNext.Ui.Tests    && dotnet test
+cd tests\VoiceMikonCSharp.Core.Tests  && dotnet test
+cd tests\VoiceMikonCSharp.Engines.Tests && dotnet test
+cd tests\VoiceMikonCSharp.Audio.Tests  && dotnet test
+cd tests\VoiceMikonCSharp.Ui.Tests    && dotnet test
 ```
 
-> ⚠ **历史记录**：`tests\VmNext.App.Tests`（端到端那套）**现已删除** —— 它碰桌面
+> ⚠ **历史记录**：`tests\VoiceMikonCSharp.App.Tests`（端到端那套）**现已删除** —— 它碰桌面
 > （真麦克风、真剪贴板、真注入目标窗口），按「不碰桌面」的原则不再保留。
 > 下面的数据是 K3 当时的结果，留档用，命令已不可跑。
 
@@ -229,17 +229,17 @@ cd tests\VmNext.Ui.Tests    && dotnet test
 
 | 测试项目 | 总数 | 通过 | 失败 | 跳过 |
 |---|---|---|---|---|
-| `VmNext.App.Tests`（**新增**，现已删除） | 10 | **9** | 0 | **1** |
-| `VmNext.Core.Tests`（K1，宿主抽走后复跑） | 23 | 22 | 0 | 1 |
-| `VmNext.Engines.Tests`（K2，未动） | 80 | 78 | 0 | 2 |
-| `VmNext.Audio.Tests`（K1，未动） | 10 | 10 | 0 | 0 |
+| `VoiceMikonCSharp.App.Tests`（**新增**，现已删除） | 10 | **9** | 0 | **1** |
+| `VoiceMikonCSharp.Core.Tests`（K1，宿主抽走后复跑） | 23 | 22 | 0 | 1 |
+| `VoiceMikonCSharp.Engines.Tests`（K2，未动） | 80 | 78 | 0 | 2 |
+| `VoiceMikonCSharp.Audio.Tests`（K1，未动） | 10 | 10 | 0 | 0 |
 
 跳过的 3 条都是**环境限制**，与移植无关：
 - App.Tests / Core.Tests 各 1 条：归还开关打开时本机 `SetClipboardData` 被 **1418** 拒绝
   （K1 疑问 #4 已经记过；Python 版在同样场景下同样写不回去）；
 - Engines.Tests 2 条：环境变量 `MINIMAX_API_KEY` 不存在。
 
-### 4.3 `VmNext.App.Tests` 逐条（该项目现已删除，下表留档）
+### 4.3 `VoiceMikonCSharp.App.Tests` 逐条（该项目现已删除，下表留档）
 
 | 测试 | 结果 | 说明 |
 |---|---|---|
@@ -257,11 +257,11 @@ cd tests\VmNext.Ui.Tests    && dotnet test
 ### 4.4 `--headless` 实测
 
 ```
-dotnet run --project src/VmNext.App -- --headless --mock --timeout 60
+dotnet run --project src/VoiceMikonCSharp.App -- --headless --mock --timeout 60
   → [无头] 引擎就绪
   → 退出码 0
 
-dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --mock
+dotnet run --project src/VoiceMikonCSharp.App -- --headless --timeout 30      # 不带 --mock
   → [无头] 引擎加载失败: 本地权重缺失:Qwen3-ASR-0.6B 不存在
              本地后端不会联网下载 —— 请二选一:
                1) 下载权重后,在 data/config.json 的 model_root 里配好权重根目录 …
@@ -270,7 +270,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 ```
 
 > ⚠ **不带 `--mock` 时退出码是 2，不是 0** —— 这是**正确行为**：
-> `voice-mikon-next/data/` 里没有 `config.json`，本地后端没有权重根目录，
+> `voice-mikon-csharp/data/` 里没有 `config.json`，本地后端没有权重根目录，
 > 按 AGENTS.md 的"不静默回落"规矩**明确报错指路**，绝不偷偷换成别的后端。
 > 本机权重其实在 `D:\Dev\Environments\models\`，但**不加载真模型**
 > （用户的 voice-mikon 正占着显存），所以自检走 `--mock`。
@@ -305,7 +305,7 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
   不是为"录音期间切窗口"准备的。）
 - **K3 当时（已弃用）**：按任务书做成了"**开始录音时**记下前台窗口
   （`CoreController._focusAtStart`），注入时贴回那一个"，并配了一条端到端测试验它
-  （那条测试连同 `VmNext.App.Tests` 一起删了 —— 碰桌面）。
+  （那条测试连同 `VoiceMikonCSharp.App.Tests` 一起删了 —— 碰桌面）。
 - **现在的处理**：`CoreController.Process()` 在识别完成、调用 `Injector` **之前**
   取一次当前前台窗口（`NativeMethods.GetForegroundWindow()`）传下去；
   `Injector.AttemptInject` 里原有的"焦点变了就还回去"逻辑照旧
@@ -329,14 +329,14 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #3：Core 不能引用 Audio（依赖方向）
 
-- **状态**：**仍然成立**。`Core` 仍不引用 `Audio`；窄接口 `IRecorder` / `IDrainableRecorder` + `VmNext.Audio.RecorderAdapter` 适配。
+- **状态**：**仍然成立**。`Core` 仍不引用 `Audio`；窄接口 `IRecorder` / `IDrainableRecorder` + `VoiceMikonCSharp.Audio.RecorderAdapter` 适配。
 - **原文**：`core/controller.py` 直接用 `audio/recorder.py` 的 `Recorder`（鸭子类型）。
 - **我的处理**：
-  - `VmNext.Core` → `VmNext.Engines`（控制器要 `IAsrBackend` 与流式引擎；
+  - `VoiceMikonCSharp.Core` → `VoiceMikonCSharp.Engines`（控制器要 `IAsrBackend` 与流式引擎；
     Engines 不引用本仓库任何项目，所以这条边不成环）；
-  - `VmNext.Audio` → `VmNext.Core`（K1 已有的方向：电平泵在 Core）；
+  - `VoiceMikonCSharp.Audio` → `VoiceMikonCSharp.Core`（K1 已有的方向：电平泵在 Core）；
   - 于是 **Core 不能反向引用 Audio** → Core 只认窄接口 `IRecorder` /
-    `IDrainableRecorder`，`VmNext.Audio.RecorderAdapter` 做适配。
+    `IDrainableRecorder`，`VoiceMikonCSharp.Audio.RecorderAdapter` 做适配。
 - **为什么**：不引入接口的话，Core 引用 Audio、Audio 引用 Core = 项目环，
   MSBuild 直接报错。窄接口还顺带让"假录音器"在测试里可复现。
 
@@ -394,10 +394,10 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 ### 疑问 #9：测试宿主抽到共享项目，顺手修了一个真 bug
 
-- **状态**：**已失效**。`tests/VmNext.TestSupport/` 与 `tests/VmNext.App.Tests/` 都已删除（「不碰桌面」原则）；本条描述的静态字段覆盖 bug 随测试宿主一起没了，只留作背景知识。
-- **原文**：`tests/VmNext.Core.Tests/InjectTarget.cs` 里的 `TestEditHost`
+- **状态**：**已失效**。`tests/VoiceMikonCSharp.TestSupport/` 与 `tests/VoiceMikonCSharp.App.Tests/` 都已删除（「不碰桌面」原则）；本条描述的静态字段覆盖 bug 随测试宿主一起没了，只留作背景知识。
+- **原文**：`tests/VoiceMikonCSharp.Core.Tests/InjectTarget.cs` 里的 `TestEditHost`
   用**单个静态字段** `s_editHwnd` 记编辑控件句柄（窗口过程是静态委托，拿不到实例）。
-- **我的处理**：抽到共享项目 `tests/VmNext.TestSupport/`（两个测试项目共用；
+- **我的处理**：抽到共享项目 `tests/VoiceMikonCSharp.TestSupport/`（两个测试项目共用；
   该项目现已删除），并把静态字段改成**按窗口**的映射（`Dictionary<IntPtr, IntPtr>`）。
 - **为什么**：**两个窗口同时存在时**，第二个宿主会覆盖第一个的映射 ——
   第一个窗口 WM_SETFOCUS 时把焦点设到**第二个**窗口的控件上，焦点被另一个线程抢走，
@@ -410,36 +410,36 @@ dotnet run --project src/VmNext.App -- --headless --timeout 30      # 不带 --m
 
 **新增（Core）**
 ```
-src/VmNext.Core/Controller/IRecorder.cs            录音器窄接口 + 停止结果
-src/VmNext.Core/Controller/CoreController.cs        状态机 / 订阅 / 通知 / 后端 / 生命周期
-src/VmNext.Core/Controller/CoreController.Recording.cs  录音编排 / 预览 / 电平 / 识别注入
-src/VmNext.Core/Controller/CoreController.Backend.cs    切后端 / 切模型
-src/VmNext.Core/Controller/HotkeyBinding.cs        热键解析 + 注册 / 注销
-src/VmNext.Core/Presentation/DisplayProtocol.cs     mode 枚举 + dwell 表 + payload
-src/VmNext.Core/Presentation/VoiceBarPresenter.cs  状态 / 通知 → 显示状态
+src/VoiceMikonCSharp.Core/Controller/IRecorder.cs            录音器窄接口 + 停止结果
+src/VoiceMikonCSharp.Core/Controller/CoreController.cs        状态机 / 订阅 / 通知 / 后端 / 生命周期
+src/VoiceMikonCSharp.Core/Controller/CoreController.Recording.cs  录音编排 / 预览 / 电平 / 识别注入
+src/VoiceMikonCSharp.Core/Controller/CoreController.Backend.cs    切后端 / 切模型
+src/VoiceMikonCSharp.Core/Controller/HotkeyBinding.cs        热键解析 + 注册 / 注销
+src/VoiceMikonCSharp.Core/Presentation/DisplayProtocol.cs     mode 枚举 + dwell 表 + payload
+src/VoiceMikonCSharp.Core/Presentation/VoiceBarPresenter.cs  状态 / 通知 → 显示状态
 ```
 
 **新增（App / Audio）**
 ```
-src/VmNext.App/VmNext.App.csproj
-src/VmNext.App/Program.cs                           入口 / 参数 / headless / 控制台服务
-src/VmNext.App/AppOptions.cs                        命令行参数
-src/VmNext.App/AppHost.cs                           装配链 + 退出收尾
-src/VmNext.Audio/RecorderAdapter.cs                Recorder → IRecorder
+src/VoiceMikonCSharp.App/VoiceMikonCSharp.App.csproj
+src/VoiceMikonCSharp.App/Program.cs                           入口 / 参数 / headless / 控制台服务
+src/VoiceMikonCSharp.App/AppOptions.cs                        命令行参数
+src/VoiceMikonCSharp.App/AppHost.cs                           装配链 + 退出收尾
+src/VoiceMikonCSharp.Audio/RecorderAdapter.cs                Recorder → IRecorder
 ```
 
 **追加（K1/K2 已有文件，只补成员不改行为）**
 ```
-src/VmNext.Core/Notifier.cs                         + NotificationPosted 事件
-src/VmNext.Shell/HotKeyWindow.cs                    + Handle 属性
-src/VmNext.Shell/NativeMethods.cs                   + MOD_WIN 常量
-src/VmNext.Core/VmNext.Core.csproj                  + VmNext.Engines 引用
+src/VoiceMikonCSharp.Core/Notifier.cs                         + NotificationPosted 事件
+src/VoiceMikonCSharp.Shell/HotKeyWindow.cs                    + Handle 属性
+src/VoiceMikonCSharp.Shell/NativeMethods.cs                   + MOD_WIN 常量
+src/VoiceMikonCSharp.Core/VoiceMikonCSharp.Core.csproj                  + VoiceMikonCSharp.Engines 引用
 ```
 
 **测试**（下面两个项目**现已删除** —— 碰桌面的端到端测试，留档用）
 ```
-tests/VmNext.TestSupport/                           共享注入验证宿主（从 Core.Tests 抽出）
-tests/VmNext.App.Tests/                             端到端测试（FakeBackend / 真链路）
+tests/VoiceMikonCSharp.TestSupport/                           共享注入验证宿主（从 Core.Tests 抽出）
+tests/VoiceMikonCSharp.App.Tests/                             端到端测试（FakeBackend / 真链路）
 ```
 
 **文档**
@@ -448,5 +448,5 @@ docs/k3-controller.md                               本文件
 docs/core-api.md                                    UI 阶段的唯一接口依据
 ```
 
-**未动**：`voice-mikon/`（只读）、`archive/`（冻结）、`VmNext.sln`（由主代理统一加项目）、
-`src/VmNext.Engines/`、`src/VmNext.Audio/`（除新增适配器）。
+**未动**：`voice-mikon/`（只读）、`archive/`（冻结）、`VoiceMikonCSharp.sln`（由主代理统一加项目）、
+`src/VoiceMikonCSharp.Engines/`、`src/VoiceMikonCSharp.Audio/`（除新增适配器）。

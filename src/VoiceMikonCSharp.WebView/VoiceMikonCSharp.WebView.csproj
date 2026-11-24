@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      net10.0-windows + UseWindowsForms：
+      壳用 WinForms 承载 WebView2 官方控件（Microsoft.Web.WebView2.WinForms），
+      不用 Avalonia —— 视觉由 WebView2 里的原始 CSS/JS 负责（见 Static/）。
+
+      DPI 感知由宿主进程声明（Core/Interop/Dpi.cs 的 SetDpiAwareness），
+      本项目不自己声明，避免两处打架。
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VoiceMikonCSharp.WebView</RootNamespace>
+    <AssemblyName>VoiceMikonCSharp.WebView</AssemblyName>
+    <!-- 卫星资源只留英文：省得每个 UI 线程都去查缺失的本地化资源。 -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      WebView2 官方 .NET 包（WinForms 控件在 Microsoft.Web.WebView2.WinForms 里）。
+
+      版本选 1.0.4314.35：本机装的运行时是 157.0.4341.60，
+      SDK 版本必须 **不高于** 运行时版本，否则启动时报"运行时太旧"。
+    -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      依赖方向（AGENTS.md）：
+        Core → Shell + Engines，Ui → Core + Shell。
+      本项目是新的 UI 层：**只依赖 Core（presenter 契约）+ Shell（Win32 窗口层）**，
+      不依赖 Avalonia，也不依赖旧的 VoiceMikonCSharp.Ui。
+    -->
+    <ProjectReference Include="..\VoiceMikonCSharp.Core\VoiceMikonCSharp.Core.csproj" />
+    <ProjectReference Include="..\VoiceMikonCSharp.Shell\VoiceMikonCSharp.Shell.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      前端静态资源（capsule.* / panel.* / bridge.js）原样复制自
+      voice-mikon（Python 版）的 host/static/，**样式与布局一个数不改**。
+
+      CopyToOutputDirectory=PreserveNewest：内容会随本项目流到宿主 App 的
+      输出目录（MSBuild 的 GetCopyToOutputDirectoryItems 会沿 ProjectReference
+      收集），路径保持 Static/xxx 的相对结构。
+    -->
+    <None Include="Static\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

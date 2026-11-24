@@ -1,13 +1,10 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using Avalonia.Controls.ApplicationLifetimes;
-using Avalonia.Threading;
 using VoiceMikonCSharp.Core;
 using VoiceMikonCSharp.Core.Presentation;
 using VoiceMikonCSharp.Shell;
-using VoiceMikonCSharp.Ui;
+using VoiceMikonCSharp.WebView;
 
 namespace VoiceMikonCSharp.App.Gui;
 
@@ -16,19 +13,19 @@ namespace VoiceMikonCSharp.App.Gui;
 ///
 /// <para>职责边界（core-api.md §1 第 7 步）：
 /// <list type="bullet">
-/// <item>造 <see cref="CapsuleWindow"/>（覆盖层窗口：透明 / 不抢焦点 / 置顶 / 点击穿透）。</item>
-/// <item>造 <see cref="UiBinder"/>：presenter 的显示状态 → 窗口；窗口的用户动作 → presenter。</item>
+/// <item>造 <see cref="CapsuleWindow"/>（WebView2 覆盖层窗口：透明 / 不抢焦点 / 置顶 / 点击穿透）。</item>
+/// <item>造 <see cref="CapsuleBinder"/>：presenter 的显示状态 → 窗口；窗口的用户动作 → presenter。</item>
 /// <item>造 <see cref="TrayIcon"/>：托盘图标 + 右键菜单（灰/黄/红三色跟状态走）。</item>
 /// <item>按 <c>config.ui_mode</c> 决定球的显隐（orb 常驻球 / resident 无球 / on_demand 同 resident）。</item>
 /// <item>球的位置记忆：拖完写 <c>config.orb</c>，启动时读回来。</item>
 /// <item>设置面板（K5）：按需创建、关闭即销毁；面板的主题 / 界面形态改动要推给胶囊。</item>
 /// </list>
-/// 面板的翻译层（<c>PanelPresenter</c>）在 core 里，窗口在 VoiceMikonCSharp.Ui；
+/// 面板的翻译层（<c>PanelPresenter</c>）在 core 里，窗口在 VoiceMikonCSharp.WebView；
 /// 这层只负责把两头接上。</para>
 ///
 /// <para><b>退出顺序</b>（core-api.md §1 + 任务书）：
 /// <code>
-/// 停 UI 推送（UiBinder 解绑） → 销毁窗口 → 删托盘图标 → 注销热键（AppHost.Shutdown）
+/// 停 UI 推送（Binder 解绑） → 销毁窗口 → 删托盘图标 → 注销热键（AppHost.Shutdown）
 /// </code>
 /// 热键是全局资源，注销晚会导致"退出后马上重启"注册失败。
 /// 重启 = 置标记走同一条退出路径，<b>全部清理完成后</b>才拉新实例。</para>
@@ -38,10 +35,9 @@ public sealed class GuiHost : IDisposable
     private static readonly Logger _log = Log.GetLogger("gui.host");
 
     private readonly AppHost _host;
-    private readonly UiBinder _binder;
+    private readonly CapsuleBinder _binder;
     private readonly Config _config;
     private readonly TrayIcon _tray;
-    private readonly IClassicDesktopStyleApplicationLifetime _desktop;
 
     /// <summary>面板的翻译层（core 快照 / 通知 → 面板快照）。</summary>
     private readonly PanelPresenter _panelPresenter;
@@ -56,13 +52,11 @@ public sealed class GuiHost : IDisposable
     private GuiHost(
         AppHost host,
         CapsuleWindow window,
-        UiBinder binder,
+        CapsuleBinder binder,
         Config config,
-        TrayIcon tray,
-        IClassicDesktopStyleApplicationLifetime desktop)
+        TrayIcon tray)
     {
         _host = host;
-        _desktop = desktop;
         Window = window;
         _binder = binder;
         _config = config;
@@ -79,7 +73,7 @@ public sealed class GuiHost : IDisposable
     public CapsuleWindow Window { get; }
 
     /// <summary>UI 绑定层（窗口 ↔ presenter）。</summary>
-    public UiBinder Binder => _binder;
+    public CapsuleBinder Binder => _binder;
 
     /// <summary>托盘图标。</summary>
     public TrayIcon Tray => _tray;
@@ -91,69 +85,64 @@ public sealed class GuiHost : IDisposable
     /// 装配 GUI：造窗口 + 绑定层 + 托盘，按界面形态决定球的显隐。
     /// </summary>
     /// <param name="host">K3 的装配链（controller + presenter 都在里面）。</param>
-    /// <param name="desktop">Avalonia 生命周期（用来当 MainWindow + 收摊）。</param>
     /// <param name="config">配置（看 <c>ui_mode</c> / <c>theme</c> / <c>show_preview</c> / <c>orb</c>）。</param>
     /// <param name="restartArgs">重启时要带上的命令行参数（与启动时一样）。</param>
     public static GuiHost Create(
         AppHost host,
-        IClassicDesktopStyleApplicationLifetime desktop,
         Config config,
         string[]? restartArgs = null)
     {
-        var window = new CapsuleWindow();
-        var binder = new UiBinder(host.Presenter, window);
+        // 建窗前记下前台窗口：建窗的副作用可能把焦点抢走，
+        // 胶囊要是成了前台窗口，用户的键盘输入就进了胶囊。
+        IntPtr focusRestore = NativeMethods.GetForegroundWindow();
+
+        var window = new CapsuleWindow(focusRestore);
+
+        // UI 线程调度锚定到胶囊窗口（presenter 的事件在别的线程上发出来）。
+        UiDispatch.Bind(window);
+
+        var binder = new CapsuleBinder(host.Presenter, window);
         var tray = new TrayIcon();
 
-        var gui = new GuiHost(host, window, binder, config, tray, desktop);
+        var gui = new GuiHost(host, window, binder, config, tray);
         gui._restartArgs = restartArgs ?? Array.Empty<string>();
 
         // ---- 面板的翻译层（K5）----
         var panelPresenter = gui._panelPresenter;
 
         // 面板改了主题 → 胶囊跟着换（Python 版：theme_broadcaster=capsule.set_theme）。
-        // 面板自己的配色也换（面板与胶囊是**两套** token，但档位是同一个）。
-        panelPresenter.ThemeChanged += (_, mode) => Dispatcher.UIThread.Post(() =>
-        {
-            gui.Window.SetTheme(mode);
-            PanelTheme.Apply(PanelTheme.ParseMode(mode));
-        });
+        // 胶囊的配色由 CSS 的 data-theme 决定，这里把新档位推过去即可。
+        panelPresenter.ThemeChanged += (_, mode) => UiDispatch.Post(() =>
+            gui.Window.SetTheme(mode));
 
         // 面板改了界面形态 → 胶囊当场收球 / 露球
         // （Python 版：ui_mode_broadcaster=presenter.apply_ui_mode）。
-        panelPresenter.UiModeChanged += (_, mode) => Dispatcher.UIThread.Post(() =>
+        panelPresenter.UiModeChanged += (_, mode) => UiDispatch.Post(() =>
             host.Presenter.ApplyUiMode(mode));
 
         // 面板的「退出」走与托盘**同一条**收尾路径（K4b 留的回调位）。
-        panelPresenter.QuitRequested += (_, _) => Dispatcher.UIThread.Post(() => gui.RequestQuit());
+        panelPresenter.QuitRequested += (_, _) => UiDispatch.Post(() => gui.RequestQuit());
 
         // 面板的关闭钮：关掉面板（**不是**退出程序）。
-        panelPresenter.CloseRequested += (_, _) => Dispatcher.UIThread.Post(() => gui.ClosePanel());
-
-        // 面板的配色跟着配置里的主题档位走（档位与胶囊共用，配色各一套）。
-        // 放在启动时落一次 —— 面板是按需打开的，开之前 palette 就该是对的。
-        PanelTheme.Apply(PanelTheme.ParseMode(config.Theme));
+        panelPresenter.CloseRequested += (_, _) => UiDispatch.Post(() => gui.ClosePanel());
 
         // 界面形态（orb / resident / on_demand）→ 球的显隐。
         // presenter 的构造函数已经读过 config.UiMode，这里再落一次到窗口上。
-        window.SetUiMode(config.UiMode);
+        window.OrbEnabledProvider = () =>
+            string.Equals(config.UiMode, "orb", StringComparison.OrdinalIgnoreCase);
 
-        // 主题：先按配置落一档（auto 时跟随系统）。
-        window.SetTheme(config.Theme);
-
-        // 预览开关。
-        window.SetPreviewEnabled(config.ShowPreview);
+        // 主题 / 预览开关：窗口不直接碰 Config —— 读值都通过这两个委托。
+        window.ThemeProvider = () => config.Theme ?? "auto";
+        window.PreviewEnabledProvider = () => config.ShowPreview;
 
         // 位置记忆：启动时读回来，拖完写回去。
-        // UI 层不直接碰 Config —— 读写都通过这两个委托（"配置怎么存"留在宿主层）。
-        window.PositionHintProvider = () => new OrbPlacementHint(
-            config.Orb?.Geometry ?? string.Empty,
-            config.Orb?.Monitor ?? string.Empty);
-
-        window.PositionSaver = hint =>
+        window.OrbGeometryProvider = () => config.Orb?.Geometry ?? string.Empty;
+        window.OrbMonitorProvider = () => config.Orb?.Monitor ?? string.Empty;
+        window.OrbPositionSaver = (geometry, monitor) =>
         {
             config.Orb ??= new OrbConfig();
-            config.Orb.Geometry = hint.Geometry;
-            config.Orb.Monitor = hint.Monitor;
+            config.Orb.Geometry = geometry;
+            config.Orb.Monitor = monitor;
 
             try
             {
@@ -190,7 +179,6 @@ public sealed class GuiHost : IDisposable
     private void StartTray()
     {
         // 菜单项文案与顺序照 Python 版（voice-mikon 的 __main__.py 的 tray.set_menu）。
-        // 「设置」在 Python 版是"设置面板"（打开面板）；面板是 K5，这里先发一条通知。
         _tray.SetMenu(new[]
         {
             new TrayMenuEntry("开始 / 停止录音", "record", IsDefault: true),
@@ -203,8 +191,8 @@ public sealed class GuiHost : IDisposable
         });
 
         // 托盘菜单的回调在**托盘线程**上 —— 要动 UI / controller 的东西都得切回 UI 线程。
-        _tray.MenuItemActivated += (_, key) => Dispatcher.UIThread.Post(() => OnTrayMenuItem(key));
-        _tray.DefaultItemActivated += (_, key) => Dispatcher.UIThread.Post(() => OnTrayMenuItem(key));
+        _tray.MenuItemActivated += (_, key) => UiDispatch.Post(() => OnTrayMenuItem(key));
+        _tray.DefaultItemActivated += (_, key) => UiDispatch.Post(() => OnTrayMenuItem(key));
 
         if (!_tray.Start())
         {
@@ -291,7 +279,7 @@ public sealed class GuiHost : IDisposable
     {
         try
         {
-            if (!File.Exists(path))
+            if (!System.IO.File.Exists(path))
             {
                 _log.Warning($"要打开的文件不存在: {path}");
                 return;
@@ -304,15 +292,6 @@ public sealed class GuiHost : IDisposable
             _log.Error($"打开文件失败: {ex.Message}");
         }
     }
-
-    /// <summary>
-    /// 「设置」：打开设置面板。
-    ///
-    /// <para>面板是**按需创建、关闭即销毁**的（Python 版必须常驻只是隐藏，
-    /// 因为 pywebview 的 <c>start()</c> 之后不能建窗 —— 那个限制不搬）。
-    /// 已经开着就把它激活到前面，不重复建。</para>
-    /// </summary>
-    private void OnSettingsRequested() => OpenPanel();
 
     // ==================== 附属工具（二维码扫描）====================
 
@@ -343,7 +322,7 @@ public sealed class GuiHost : IDisposable
             using Process? process = Process.Start(new ProcessStartInfo(exe)
             {
                 UseShellExecute = false,
-                WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
+                WorkingDirectory = System.IO.Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
             });
 
             _log.Info($"二维码扫描：已拉起附属工具({exe})");
@@ -357,6 +336,15 @@ public sealed class GuiHost : IDisposable
 
     // ==================== 面板 ====================
 
+    /// <summary>
+    /// 「设置」：打开设置面板。
+    ///
+    /// <para>面板是**按需创建、关闭即销毁**的（Python 版必须常驻只是隐藏，
+    /// 因为 pywebview 的 <c>start()</c> 之后不能建窗 —— 那个限制不搬）。
+    /// 已经开着就把它激活到前面，不重复建。</para>
+    /// </summary>
+    private void OnSettingsRequested() => OpenPanel();
+
     /// <summary>打开设置面板（托盘「设置」与球菜单「设置」都走这里）。</summary>
     public void OpenPanel()
     {
@@ -367,7 +355,7 @@ public sealed class GuiHost : IDisposable
             return;
         }
 
-        var window = new PanelWindow();
+        var window = new PanelWindow(_config.Theme);
         _panel = window;
 
         // ---- 位置记忆（UI 层不直接碰 Config）----
@@ -388,7 +376,7 @@ public sealed class GuiHost : IDisposable
         // ---- presenter → 面板 ----
         // 快照在**触发它的那条线程**上发出来（core-api.md §3），要切回 UI 线程。
         void OnSnapshot(object? sender, PanelSnapshot snapshot)
-            => Dispatcher.UIThread.Post(() =>
+            => UiDispatch.Post(() =>
             {
                 if (_panel == window)
                 {
@@ -397,7 +385,7 @@ public sealed class GuiHost : IDisposable
             });
 
         _panelPresenter.SnapshotChanged += OnSnapshot;
-        window.Closed += (_, _) =>
+        window.FormClosed += (_, _) =>
         {
             _panelPresenter.SnapshotChanged -= OnSnapshot;
             if (_panel == window)
@@ -421,10 +409,20 @@ public sealed class GuiHost : IDisposable
         // 提示语 8 秒后自己淡掉 —— 事实也归零，免得下一条快照把它顶回来。
         window.NoticeExpired += (_, _) => _panelPresenter.ClearNotice();
 
+        // 前端就绪之前的所有推送都被丢弃了（面板会停在默认值上）——
+        // 就绪那一刻把当前快照**重推一遍**（照 Python 版 on_frontend_ready 的 push_full_state）。
+        window.FrontendReadyChanged += (_, _) => UiDispatch.Post(() =>
+        {
+            if (_panel == window)
+            {
+                window.ApplySnapshot(_panelPresenter.Snapshot);
+            }
+        });
+
         // 首屏：把当前快照铺上去（订阅即投递，此刻 presenter 已经有快照了）。
         window.ApplySnapshot(_panelPresenter.Snapshot);
 
-        // 面板本来就要拿焦点做交互（与胶囊相反）—— ShowActivated 是默认值。
+        // 面板本来就要拿焦点做交互（与胶囊相反）—— 显示时激活。
         window.Show();
     }
 
@@ -469,9 +467,13 @@ public sealed class GuiHost : IDisposable
         }
 
         // 2) 销毁窗口。
+        //    胶囊窗口**从不显示为 WinForms 窗体**（显示走 Win32 的 SW_SHOWNOACTIVATE），
+        //    所以 Close() 发的 WM_CLOSE 未必有人处理 —— 直接 Dispose：
+        //    WebView2 控件随之释放，msedgewebview2.exe 子进程才会干净退出。
         try
         {
-            Window.Close();
+            Window.Shutdown();
+            Window.Dispose();
         }
         catch (Exception ex)
         {
@@ -546,7 +548,7 @@ public sealed class GuiHost : IDisposable
             // `dotnet run` / `dotnet xxx.dll` 时 ProcessPath 是 dotnet.exe ——
             // 那就还得把入口 dll 带上，不然拉起来的是个空的 dotnet。
             if (string.Equals(
-                    Path.GetFileNameWithoutExtension(exe), "dotnet", StringComparison.OrdinalIgnoreCase))
+                    System.IO.Path.GetFileNameWithoutExtension(exe), "dotnet", StringComparison.OrdinalIgnoreCase))
             {
                 string? entry = Environment.GetCommandLineArgs().FirstOrDefault();
                 if (!string.IsNullOrEmpty(entry))

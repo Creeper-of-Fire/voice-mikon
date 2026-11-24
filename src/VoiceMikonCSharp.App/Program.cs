@@ -4,9 +4,10 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using Avalonia;
+using System.Windows.Forms;
 using VoiceMikonCSharp.Core;
 using VoiceMikonCSharp.Core.Interop;
+using VoiceMikonCSharp.App.Gui;
 
 namespace VoiceMikonCSharp.App;
 
@@ -56,6 +57,12 @@ public static class Program
     private const int STD_OUTPUT_HANDLE = -11;
 
     /// <summary>入口。</summary>
+    /// <remarks>
+    /// ⚠ 必须是 **STA**：WebView2 的 COM 对象是单线程套间（STA）的，
+    /// 线程 apartment 已经被设成别的模式后再改会报
+    /// <c>RPC_E_CHANGED_MODE (0x80010106)</c>。WinForms 的消息循环同样要求 STA。
+    /// </remarks>
+    [STAThread]
     public static int Main(string[] args)
     {
         // 输出被重定向（管道 / 文件）时固定用 UTF-8：脚本与自动化读到的字节是
@@ -122,16 +129,42 @@ public static class Program
     }
 
     /// <summary>
-    /// GUI 形态：启动 Avalonia，弹出胶囊覆盖层。
+    /// GUI 形态：启动 WinForms 桌面壳，弹出胶囊覆盖层。
+    ///
+    /// <para>装配顺序照 <c>docs/core-api.md</c> §1（每一步都不能换位置）：
+    /// DPI 感知 → 剪贴板 owner → 配置 + 日志 → 通知出口 → controller → presenter
+    /// → <b>胶囊窗口</b> → 热键 → 引擎。前六步由 <see cref="AppHost"/> 的构造函数
+    /// 做完（K3 的那条链），这里补第 7 步（窗口 + 绑定层），然后把第 8、9 步交回
+    /// <see cref="AppHost.Start"/> —— 顺序不能变：热键是全局资源，注册得太早会在
+    /// 退出时跟"引擎卸载"抢时间。</para>
     /// </summary>
     private static int RunGui(AppOptions options, Config config)
     {
-        Gui.App.StartupOptions = options;
-        Gui.App.StartupConfig = config;
-
         try
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(Array.Empty<string>());
+            // WinForms 的 DPI 模式：进程级声明已经在 Run() 里做过了（Dpi.SetDpiAwareness），
+            // 这里再设一次是幂等的 —— 拿不到就说明已经是 Per-Monitor V2。
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+            ApplicationConfiguration.Initialize();
+
+            // ---- 5) controller + 6) presenter（AppHost 的构造函数里做完）----
+            var host = new AppHost(options, config);
+
+            // 进程退出（关窗口 / 未捕获异常）也要走同一条收尾路径。
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => host.Shutdown();
+
+            // ---- 7) 胶囊窗口 + 绑定层 + 托盘 ----
+            var gui = GuiHost.Create(host, config, options.RawArgs);
+
+            // 退出：三条退出路（托盘菜单 / 球菜单 / 面板按钮）都汇到 GuiHost.RequestQuit，
+            // 那里已经按 core-api.md §1 的顺序收完尾了（停推送 → 销毁窗口 → 删托盘图标 →
+            // 注销热键），这里只负责关掉 WinForms 的消息循环。
+            gui.QuitRequested += () => Application.Exit();
+
+            // ---- 8) 热键 + 9) 引擎启动（后台加载模型，主流程不阻塞）----
+            host.Start();
+
+            Application.Run();
             return 0;
         }
         catch (Exception ex)
@@ -140,12 +173,6 @@ public static class Program
             return 1;
         }
     }
-
-    /// <summary>构建 Avalonia 应用（GUI 形态）。</summary>
-    public static AppBuilder BuildAvaloniaApp()
-        => AppBuilder.Configure<Gui.App>()
-            .UsePlatformDetect()
-            .LogToTrace();
 
     /// <summary>
     /// 控制台形态：装配整条链，等引擎就绪（<c>--headless</c>）或等 Ctrl+C（常驻服务）。

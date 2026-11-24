@@ -9,7 +9,8 @@ namespace VmNext.Shell;
 /// <summary>
 /// 覆盖层窗口的构造参数。
 ///
-/// 这里**不含任何几何参数**：窗口多大由内容决定（SizeToContent），裁剪区域
+/// 这里**不含任何几何参数**：窗口多大由 UI 层自己定（覆盖层窗口一律
+/// <c>SizeToContent = Manual</c>，尺寸是 UI 设计的一部分），裁剪区域
 /// 跟随客户区实际尺寸。球的直径、胶囊的高度与宽度属于 UI 设计，真相源在
 /// voice-mikon 的 capsule.css / placement.py，正式版翻译到 XAML 里，
 /// 窗口层不设默认值。
@@ -21,7 +22,7 @@ public sealed class OverlayOptions
     /// false = 加 WS_EX_NOACTIVATE，点击不会抢走用户当前窗口的焦点（覆盖层默认）。
     /// true  = 不加该样式，窗口可获得焦点。
     ///
-    /// 已知约束（archive 验证壳确认）：不激活 ⇔ 收不到键盘事件 ⇔ 文字选不了、复制不了。
+    /// 已知约束：不激活 ⇔ 收不到键盘事件 ⇔ 文字选不了、复制不了。
     /// voice-mikon 原设计是"按文字条时临时激活"（capsule.py 的 focus_textbar），
     /// 正式版按同样思路用 <see cref="OverlayWindow.SetAllowActivation"/> 在需要时切换，
     /// 而不是一直开着。
@@ -29,20 +30,20 @@ public sealed class OverlayOptions
     public bool AllowActivation { get; init; }
 
     /// <summary>
-    /// 是否加 WS_EX_LAYERED（分层窗口，逐像素 alpha）。
-    /// 验证壳确认：Avalonia 走 DirectComposition，加上这个样式不影响渲染。
+    /// 是否加 WS_EX_LAYERED（分层窗口）。默认 false。
+    ///
+    /// <para>Avalonia 11 的真透明走 <c>WS_EX_NOREDIRECTIONBITMAP</c> + DirectComposition
+    /// 做逐像素 alpha 合成，不需要分层窗口样式；<c>WS_EX_LAYERED</c> 是
+    /// WebView2 / WinForms 时代才需要的 workaround，搬过来只会多一份无用复杂度。</para>
     /// </summary>
-    public bool UseLayeredStyle { get; init; } = true;
-
-    /// <summary>初始裁剪形状。形变时通过 <see cref="OverlayWindow.RegionShape"/> 切换。</summary>
-    public OverlayShape Shape { get; init; } = OverlayShape.Circle;
+    public bool UseLayeredStyle { get; init; }
 }
 
 /// <summary>
 /// 透明覆盖层窗口：真透明 / 不抢焦点 / 置顶 / 点击穿透 / DPI 感知移动，
 /// 这几件**平台相关**的事集中在这一个类里。不含任何 UI 内容和设计常量。
 ///
-/// 三条平台约定（archive 验证壳实测确认，见 archive/docs/feasibility.md）：
+/// 三条平台约定：
 /// 1. Avalonia 的 ShowActivated 只影响 Show() 那一刻，之后点击仍会激活窗口
 ///    → 必须自己补 WS_EX_NOACTIVATE。
 /// 2. 点击穿透靠 Win32 的 SetWindowRgn：区域之外的像素不属于本窗口。
@@ -59,21 +60,31 @@ public class OverlayWindow : Window
 {
     // 本类管理的扩展样式位。重设样式时先清掉这些位再按当前配置设回去，
     // 这样 AllowActivation / UseLayeredStyle 运行时切换才能真正生效（只 OR 的话关不掉）。
+    // WS_EX_LAYERED 仍然在管理范围内：默认不启用（见 OverlayOptions.UseLayeredStyle），
+    // 但一旦被打开过，这里能把它清掉。
     private const int ManagedExStyle =
         NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_TOPMOST
         | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_LAYERED;
 
+    /// <summary>
+    /// 命中区每边向外扩的余量（逻辑像素）。
+    ///
+    /// <para>命中区是精确按控件 Bounds 裁的，而控件边缘是**抗锯齿**的 ——
+    /// 正好切在抗锯齿像素上，边缘看起来全是锯齿。向外扩一点：扩出去的部分
+    /// 落在透明区域里看不见，但抗锯齿的那一圈被完整包含进来。</para>
+    ///
+    /// <para>对照 Python 版 <c>host/capsule.py</c> 的 <c>REGION_MARGIN = 3</c>
+    /// （那边是物理像素，这里按当前缩放换算）。</para>
+    /// </summary>
+    private const int RegionMarginLogicalPx = 3;
+
     private IntPtr _handle;
-    private bool _stylesApplied;
 
     /// <summary>是否允许窗口被激活（false = 加 WS_EX_NOACTIVATE，点击不抢用户焦点）。</summary>
     public bool AllowActivation { get; set; }
 
-    /// <summary>是否加 WS_EX_LAYERED。</summary>
-    public bool UseLayeredStyle { get; set; } = true;
-
-    /// <summary>当前裁剪形状。改完不会自动重裁，需要时调用 <see cref="ApplyRegion"/>（尺寸变化时会自动调）。</summary>
-    public OverlayShape RegionShape { get; set; } = OverlayShape.Circle;
+    /// <summary>是否加 WS_EX_LAYERED（默认 false：Avalonia 走 DirectComposition，不需要分层窗口样式）。</summary>
+    public bool UseLayeredStyle { get; set; }
 
     /// <summary>窗口原生句柄（Opened 之后有效）。</summary>
     public IntPtr Handle => _handle;
@@ -93,7 +104,6 @@ public class OverlayWindow : Window
     {
         AllowActivation = options.AllowActivation;
         UseLayeredStyle = options.UseLayeredStyle;
-        RegionShape = options.Shape;
 
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
         SystemDecorations = SystemDecorations.None;
@@ -102,7 +112,12 @@ public class OverlayWindow : Window
         Topmost = true;           // → WS_EX_TOPMOST
         ShowActivated = false;    // 只管 Show() 那一刻，后续靠 WS_EX_NOACTIVATE
         CanResize = false;
-        SizeToContent = SizeToContent.WidthAndHeight;
+
+        // ⚠ 尺寸**不跟内容**：覆盖层窗口的尺寸是 UI 设计的一部分（胶囊固定 512×190），
+        // 由 UI 层直接设 Width / Height。让窗口按内容长大会带来两个麻烦：
+        // 形变期间每帧 resize（点击穿透区域跟着每帧重算），以及"内容变了窗口就变高"
+        // —— 后者会让球在屏幕上跑位（真机 voice-mikon 用固定 512×260 窗口正是为了这个）。
+        SizeToContent = SizeToContent.Manual;
         WindowStartupLocation = WindowStartupLocation.Manual;
     }
 
@@ -135,30 +150,44 @@ public class OverlayWindow : Window
     }
 
     /// <summary>
-    /// 设置扩展样式：NOACTIVATE（不抢焦点）/ TOOLWINDOW（不进任务栏）/ TOPMOST（置顶）/ LAYERED（分层透明）。
-    /// 可重复调用：先清本类管理的位，再按当前配置设回去。
+    /// 设置扩展样式：NOACTIVATE（不抢焦点）/ TOOLWINDOW（不进任务栏）/ TOPMOST（置顶）。
+    /// 可重复调用：先清本类管理的位，再按当前配置设回去（幂等）。
+    ///
+    /// <para>⚠ 不能只设一次：Avalonia 的 <c>WindowImpl.UpdateWindowProperties</c>
+    /// 会在很多时机整体重写 exStyle，把这里加的位抹掉（抹掉之后点击就开始抢焦点）。
+    /// 所以 <see cref="ApplyRegion"/> 每次调用都会顺带重设一遍。</para>
+    ///
+    /// <para><b>但只在真的需要改的时候才写</b>：<c>SetWindowLong</c> 会触发
+    /// WM_NCCALCSIZE / 重绘 —— 每次裁区域都无条件重设一遍扩展样式，
+    /// 右键球的时候窗口会"闪一下"（多出来的那一帧重绘）。
+    /// 现在先读当前值，与目标一致就直接返回。</para>
     /// </summary>
     public void ApplyNativeStyles()
     {
-        if (_handle == IntPtr.Zero || _stylesApplied)
+        if (_handle == IntPtr.Zero)
         {
             return;
         }
 
-        int style = NativeMethods.GetWindowExStyle(_handle) & ~ManagedExStyle;
-        style |= NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_TOPMOST;
+        int current = NativeMethods.GetWindowExStyle(_handle);
+        int desired = current & ~ManagedExStyle;
+        desired |= NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_TOPMOST;
         if (!AllowActivation)
         {
-            style |= NativeMethods.WS_EX_NOACTIVATE;
+            desired |= NativeMethods.WS_EX_NOACTIVATE;
         }
 
+        // 默认不加 WS_EX_LAYERED：Avalonia 走 DirectComposition 做逐像素 alpha，
+        // 分层窗口样式是 WebView2 / WinForms 时代的 workaround。
         if (UseLayeredStyle)
         {
-            style |= NativeMethods.WS_EX_LAYERED;
+            desired |= NativeMethods.WS_EX_LAYERED;
         }
 
-        NativeMethods.SetWindowExStyle(_handle, style);
-        _stylesApplied = true;
+        if (desired != current)
+        {
+            NativeMethods.SetWindowExStyle(_handle, desired);
+        }
     }
 
     /// <summary>
@@ -175,7 +204,6 @@ public class OverlayWindow : Window
         }
 
         AllowActivation = allow;
-        _stylesApplied = false;
         ApplyNativeStyles();
     }
 
@@ -196,6 +224,16 @@ public class OverlayWindow : Window
         {
             return;
         }
+
+        // Avalonia 会在很多时机整体重写扩展样式，把我们加的位抹掉 ——
+        // 每次裁区域顺带重设一遍（幂等、便宜）。
+        ApplyNativeStyles();
+
+        // 窗口刚 resize 的那一瞬（SizeChanged），子控件的 Bounds 还是旧的 —— 布局在后面才跑。
+        // 按旧 Bounds 裁，会把刚露出来的东西（文字条、菜单、被顶上去的球）裁到区域外，
+        // 看起来就是"整个坏掉"。所以裁之前先把挂起的布局同步跑完（UpdateLayout），
+        // 读到的一定是当前几何。
+        UpdateLayout();
 
         if (!NativeMethods.GetClientRect(_handle, out var client))
         {
@@ -223,6 +261,18 @@ public class OverlayWindow : Window
     }
 
     /// <summary>
+    /// 让 Shell 重新裁一次点击穿透区域。
+    ///
+    /// <para><b>UI 层唯一的裁剪入口</b>：可见元素的集合变了（形态切换、菜单/气泡
+    /// 开关、文字条显隐）就调一次。UI 层只负责"报哪些元素可见"，
+    /// 裁不裁、裁成什么样、什么时候裁，全在 Shell 这一侧。</para>
+    ///
+    /// <para>窗口尺寸 / DPI 变化时 Shell 自己会重裁（见 <see cref="OnSizeChanged"/>
+    /// 与 <c>ScalingChanged</c>），UI 层不需要管那两件事。</para>
+    /// </summary>
+    public void InvalidateRegion() => ApplyRegion();
+
+    /// <summary>
     /// 命中区（客户区坐标，**物理像素**）。
     ///
     /// <para>默认返回空 = 用整个客户区（默认行为）；重写它 = 只裁这几块的并集。
@@ -236,7 +286,7 @@ public class OverlayWindow : Window
     protected virtual IReadOnlyList<HitRegion> BuildHitRegions() => Array.Empty<HitRegion>();
 
     /// <summary>
-    /// 按 <see cref="BuildHitRegions"/> 造区域；没填就退回"整个客户区 + 圆角"。
+    /// 按 <see cref="BuildHitRegions"/> 造区域；没填就退回"整个客户区"。
     /// </summary>
     private IntPtr BuildRegion(int clientWidth, int clientHeight)
     {
@@ -251,7 +301,7 @@ public class OverlayWindow : Window
                     continue;
                 }
 
-                IntPtr piece = CreatePiece(r);
+                IntPtr piece = CreatePiece(r, clientWidth, clientHeight);
                 if (piece == IntPtr.Zero)
                 {
                     continue;
@@ -263,12 +313,22 @@ public class OverlayWindow : Window
                     continue;
                 }
 
-                IntPtr combined = NativeMethods.CombineRgn(IntPtr.Zero, merged.Value, piece, NativeMethods.RGN_OR);
+                // ⚠ CombineRgn 的返回值**不是句柄**，是**区域类型码**
+                // （0=错误 / 1=空区域 / 2=单矩形 / 3=复杂区域；对照 voice-mikon 的
+                //  win32/api.py，那边 restype 声明的是 c_int）。
+                // NativeMethods 里它被声明成了 IntPtr —— 所以这里只判断"是不是 0"，
+                // **绝不能把返回值当句柄用**：那会把类型码 3 当成 GDI 句柄，
+                // SetWindowRgn 拿到无效句柄直接失败 → 窗口区域保持旧值 →
+                // 菜单那块被整个裁掉（真机症状："右键球，菜单不出现"）。
+                //
+                // 合并按 MSDN 的官方用法**就地**做：hDest = 第一个源
+                // （三个区域不必互不相同），成功时 dest 的内容已经变成并集、句柄不变。
+                int combineStatus = NativeMethods.CombineRgn(merged.Value, merged.Value, piece, NativeMethods.RGN_OR).ToInt32();
                 NativeMethods.DeleteObject(piece);
-                if (combined != IntPtr.Zero)
+                if (combineStatus == 0)
                 {
-                    NativeMethods.DeleteObject(merged.Value);
-                    merged = combined;
+                    // 合并失败（0 = 错误）：这块没并进去，继续用已有的区域。
+                    continue;
                 }
             }
 
@@ -278,29 +338,37 @@ public class OverlayWindow : Window
             }
         }
 
-        var (ellipseW, ellipseH) = OverlayGeometry.CornerEllipse(RegionShape, clientWidth, clientHeight);
-        return NativeMethods.CreateRoundRectRgn(0, 0, clientWidth, clientHeight, ellipseW, ellipseH);
+        // 兜底：整个客户区（直角矩形）。
+        return NativeMethods.CreateRectRgn(0, 0, clientWidth, clientHeight);
     }
 
     /// <summary>
-    /// 造一块区域：有圆角就用圆角矩形，没有就用直角矩形。
+    /// 造一块区域：**一律直角矩形**。
+    ///
+    /// <para>每块向外扩 <see cref="RegionMarginLogicalPx"/>（按当前缩放换算成物理像素），
+    /// 再夹回客户区内 —— 抗锯齿的边缘才不会被切出锯齿。</para>
+    ///
+    /// <para>球 / 胶囊 / 气泡的"跑道形"是**画出来的**视觉，不是裁出来的形状：
+    /// 裁剪只回答"这块归不归我管"。（对照真机 voice-mikon 的
+    /// <c>host/capsule.py</c>：<c>ellipses</c> 集合恒为空。）</para>
     /// </summary>
-    private static IntPtr CreatePiece(HitRegion region)
+    private IntPtr CreatePiece(HitRegion region, int clientWidth, int clientHeight)
     {
-        int radius = region.ClampedRadius;
-        if (radius <= 0)
+        int margin = Math.Max(1, OverlayGeometry.ToPixels(RegionMarginLogicalPx, CurrentRenderScaling));
+
+        // 向四周外扩，再夹在客户区范围内（不能越界）。
+        int left = Math.Max(0, region.Left - margin);
+        int top = Math.Max(0, region.Top - margin);
+        int right = Math.Min(clientWidth, region.Right + margin);
+        int bottom = Math.Min(clientHeight, region.Bottom + margin);
+
+        if (right <= left || bottom <= top)
         {
-            return NativeMethods.CreateRectRgn(region.Left, region.Top, region.Right, region.Bottom);
+            // 完全在客户区之外（扩完还是空的）→ 这块不参与并集。
+            return IntPtr.Zero;
         }
 
-        // Win32 的圆角矩形参数是"圆角椭圆的宽高"，直径 = 2 × 半径。
-        return NativeMethods.CreateRoundRectRgn(
-            region.Left,
-            region.Top,
-            region.Right,
-            region.Bottom,
-            radius * 2,
-            radius * 2);
+        return NativeMethods.CreateRectRgn(left, top, right, bottom);
     }
 
     /// <summary>

@@ -6,19 +6,18 @@ using VmNext.Shell;
 namespace VmNext.Ui;
 
 /// <summary>
-/// 一块参与命中区的可见元素（**客户区逻辑像素** + 圆角半径）。
+/// 一块参与命中区的可见元素（**客户区逻辑像素**）。
 ///
-/// <para>圆角直接抄 CSS：文字条 14px（capsule.css <c>.textbar { border-radius:14px }</c>）、
-/// 球的菜单 12px（<c>.orb-menu { border-radius:12px }</c>）、
-/// 气泡与胶囊 999px（<c>.orb-hint</c> / <c>.recording-pill</c>）。</para>
+/// <para>⚠ 这里只有矩形，没有圆角：裁剪一律用直角矩形 + 每边外扩 3 逻辑像素。
+/// 球 / 胶囊 / 气泡的"跑道形"是**画出来的**视觉，不是裁出来的形状
+/// （对照真机 voice-mikon 的 <c>host/capsule.py</c>：<c>ellipses</c> 集合恒为空）。</para>
 /// </summary>
 /// <param name="Bounds">
 /// 元素在客户区里的矩形（逻辑像素）。
 /// ⚠ 用的是 Avalonia 的 <c>Rect</c>，语义是 <c>(x, y, width, height)</c> ——
 /// 右/下边界由 <c>Rect.Right</c> / <c>Rect.Bottom</c> 算，不要自己拼。
 /// </param>
-/// <param name="CornerRadius">圆角半径（逻辑像素）。</param>
-public readonly record struct HitRegionSpec(Rect Bounds, double CornerRadius);
+public readonly record struct HitRegionSpec(Rect Bounds);
 
 /// <summary>
 /// 命中区计算（**纯函数**）：可见元素 → 命中区矩形列表。
@@ -29,7 +28,7 @@ public readonly record struct HitRegionSpec(Rect Bounds, double CornerRadius);
 /// 这里把"量"这一步抽成纯函数，"裁"由 <see cref="OverlayWindow"/> 做。</para>
 ///
 /// <para>⚠ 真机的规矩：**浮层（菜单 / 气泡）要单独一块，不能并进球的包围盒** ——
-/// 并进去中间全是空白，空白在裁形里会露出 WebView2 客户区的灰底。
+/// 并进去中间全是空白，空白在裁形里会露出客户区的底色。
 /// 这里的做法与之一致：每个可见元素各报一块，Shell 侧再 <c>CombineRgn</c> 取并集。</para>
 /// </summary>
 public static class HitRegionBuilder
@@ -66,8 +65,7 @@ public static class HitRegionBuilder
                 continue;
             }
 
-            int radius = (int)Math.Round(spec.CornerRadius * scale, MidpointRounding.AwayFromZero);
-            result.Add(new HitRegion(left, top, right, bottom, radius));
+            result.Add(new HitRegion(left, top, right, bottom));
         }
 
         return result;

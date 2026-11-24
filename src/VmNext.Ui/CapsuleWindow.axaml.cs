@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Avalonia;
 using Avalonia.Animation;
-using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
@@ -75,20 +74,28 @@ public enum CapsuleTextKind
 /// <para><b>翻译，不是设计。</b>所有数值都来自 capsule.css / capsule.js / placement.py，
 /// 每个值旁边都有来源注释。CSS 注释里的"为什么"也一并带了过来。</para>
 ///
-/// <para>形状过渡必须改**布局尺寸**（MaxWidth），不能用 RenderTransform 缩放：
-/// 形变期间窗口每帧都要 resize + 重裁 SetWindowRgn 的区域，
-/// 视觉形状与点击穿透区域必须始终一致（CSS 注释里"不能有 transform"的理由在 Avalonia 下
-/// 不完全成立 —— 这里不需要前端上报命中区 —— 但结论一样：改布局尺寸最稳）。</para>
-///
-/// <para>本类只**演**：什么时候发生、停多久、到点回哪，全归 presenter 的 dwell 表。
+/// <para><b>本类只"演"</b>：什么时候发生、停多久、到点回哪，全归 presenter 的 dwell 表。
 /// 入口是 <see cref="SetMode"/>（对应 capsule.js 的 <c>applyMode</c>）。</para>
+///
+/// <para><b>分层</b>：
+/// <list type="bullet">
+/// <item>窗口的尺寸 / 位置 / 置顶 / 穿透 / 裁剪时机 → <b>Shell</b>（<see cref="OverlayWindow"/>）。</item>
+/// <item>胶囊的几何（球 / 跑道 / 波形 / 图标 / 计时 / 状态文字）→ <b>自绘控件</b>
+/// <see cref="PillShape"/>。</item>
+/// <item>文本预览（框选 / 复制）→ <b>Avalonia 文本引擎</b>（<c>SelectableTextBlock</c>）。</item>
+/// <item>菜单 / 气泡 → <b>普通控件</b>，静态叠放（不回流）。</item>
+/// </list></para>
+///
+/// <para><b>窗口尺寸固定 512×190</b>：球固定待在窗口的**底边居中**，
+/// 宽度一变球就横向跑位、高度一变球就在屏幕上跑位。
+/// 窗口尺寸**不参与视觉**（内容自己在窗口里排），窗口只负责"往哪摆"和"裁哪块"。</para>
 /// </summary>
 public partial class CapsuleWindow : OverlayWindow
 {
     // ==================== 几何常量（全部来自 CSS / Python）====================
 
     /// <summary>
-    /// 球的直径 = 胶囊高度。来源：capsule.css L303 <c>height: 40px</c> + placement.py <c>ORB_SIZE = 40</c>。
+    /// 球的直径 = 胶囊高度。来源：capsule.css <c>height: 40px</c> + placement.py <c>ORB_SIZE = 40</c>。
     /// （真相源在 <see cref="Placement"/> —— 摆位与几何是同一套数。）
     /// </summary>
     public const double OrbSize = Placement.OrbSize;
@@ -104,86 +111,84 @@ public partial class CapsuleWindow : OverlayWindow
     public const double OrbMargin = Placement.OrbMargin;
 
     /// <summary>
-    /// 窗口宽度（**固定**）。来源：voice-mikon 的 host/capsule.py <c>WIN_W = 512</c>。
+    /// 窗口宽度（**固定**，逻辑像素）。来源：voice-mikon 的 host/capsule.py <c>WIN_W = 512</c>。
     ///
-    /// 为什么必须固定：球固定待在窗口的**底边居中**（placement.py 的模块说明），
+    /// <para>为什么必须固定：球固定待在窗口的**底边居中**（placement.py 的模块说明），
     /// 宽度一变球就会横向跑位 —— 真机正是靠"窗口定宽 + 内容居中"保证
-    /// 球↔胶囊形变时轨迹严丝合缝、命中区与视觉形状始终对得上。
+    /// 球↔胶囊形变时轨迹严丝合缝、命中区与视觉形状始终对得上。</para>
     /// </summary>
     public const double WindowWidth = 512;
 
-    /// <summary>胶囊展开态的最大宽度。来源：capsule.css L299 <c>max-width: 480px</c>。</summary>
+    /// <summary>文字条的最大高度（逻辑像素）。来源：capsule.css <c>.textbar { max-height: 120px }</c>。</summary>
+    public const double TextBarMaxHeight = 120;
+
+    /// <summary>上下留白（逻辑像素）。来源：capsule.css <c>.stack { padding: 10px 8px }</c>。</summary>
+    public const double StackPaddingY = 10;
+
+    /// <summary>文字条与胶囊之间的间隙（逻辑像素）。来源：capsule.css <c>.textbar { margin: 0 auto 10px }</c>。</summary>
+    public const double StackGap = 10;
+
+    /// <summary>胶囊高度（逻辑像素）。来源：capsule.css <c>.recording-pill { height: 40px }</c>。</summary>
+    public const double PillHeight = 40;
+
+    /// <summary>
+    /// 窗口高度（**固定**，逻辑像素）。
+    ///
+    /// <para>= stack 上内边距 10 + 文字条 max-height 120 + 间隙 10 + 胶囊 40 + stack 下内边距 10 = 190。</para>
+    /// </summary>
+    public const double WindowHeight =
+        StackPaddingY + TextBarMaxHeight + StackGap + PillHeight + StackPaddingY;
+
+    /// <summary>胶囊展开态的最大宽度。来源：capsule.css <c>max-width: 480px</c>。</summary>
     public const double PillExpandedMaxWidth = 480;
 
-    /// <summary>球形态的最大宽度。来源：capsule.css L589 <c>body.orb-mode.orb-idle .recording-pill { max-width: 40px }</c>。</summary>
+    /// <summary>球形态的宽度（= 胶囊高度 = 球直径）。来源：capsule.css <c>body.orb-mode.orb-idle .recording-pill { max-width: 40px }</c>。</summary>
     public const double PillCollapsedMaxWidth = 40;
 
     /// <summary>
-    /// 胶囊圆角。CSS 展开态写的是 <c>border-radius: 999px</c>，但胶囊只有 40px 高，
-    /// 浏览器会把超过一半的圆角按比例缩成 20px（= 40/2），和球形态的 20px 视觉相同。
-    /// 这里直接用等效值 20，避免依赖渲染器的 clamp 行为。
+    /// 球形态的拖动位移判据（**逻辑**像素）。来源：capsule.js 的 <c>ORB_DRAG_THRESHOLD = 5</c>。
+    /// 用来区分"点球开始录音"和"拖球挪位置"（手抖一下不算拖）。
+    /// 展开态是 0（按下即拖，见 capsule.js 的 <c>CAPSULE_DRAG_OPTS</c>）。
     /// </summary>
-    private const double PillCornerRadius = 20;
+    private const double OrbDragThresholdLogical = 5;
 
-    /// <summary>形变时长（ms）。来源：capsule.css L339 <c>max-width .8s</c>。</summary>
-    private const int MorphDurationMs = 800;
-
-    /// <summary>元素淡入淡出时长（ms）。来源：capsule.css L507 <c>transition: opacity .2s ease</c>。</summary>
-    private const int FadeDurationMs = 200;
-
-    /// <summary>展开态的内容淡入时长（ms）。来源：capsule.css L630 <c>transition-duration: .1s</c>。</summary>
-    private const int FadeInDurationMs = 100;
-
-    /// <summary>收起态的内容淡出时长（ms）。来源：capsule.css L620 <c>transition-duration: .12s</c>。</summary>
-    private const int FadeOutDurationMs = 120;
-
-    /// <summary>球图标淡入淡出时长（ms）。来源：capsule.css L561 <c>transition: opacity .07s ease</c>。</summary>
-    private const int OrbFadeDurationMs = 70;
-
-    /// <summary>球图标收起时的延迟（ms）。来源：capsule.css L569 <c>transition-delay: .76s</c>。</summary>
-    private const int OrbFadeDelayMs = 760;
-
-    /// <summary>收起态颜色的延迟（ms）。来源：capsule.css L647 <c>transition-delay: 0s,0s,0s,.58s,.58s,.58s</c>。</summary>
+    /// <summary>收起态颜色的延迟（ms）。来源：capsule.css <c>transition-delay: 0s,0s,0s,.58s,.58s,.58s</c>。</summary>
     private const int CollapsedColorDelayMs = 580;
-
-    /// <summary>展开后多久启动波形条（ms）。来源：capsule.js <c>WAVEFORM_START_DELAY_MS = 620</c>。</summary>
-    private const int WaveformStartDelayMs = 620;
-
-    /// <summary>呼吸动画周期（ms）。来源：capsule.css L575 <c>animation: orb-breathe 2.8s ease-in-out infinite</c>。</summary>
-    private const int BreathePeriodMs = 2800;
-
-    /// <summary>球上 loader 的旋转周期（ms）。来源：capsule.css L695 <c>animation: bar-spin 1.1s linear infinite</c>。</summary>
-    private const int SpinPeriodMs = 1100;
 
     /// <summary>文字条空态占位文案。来源：capsule.js <c>PLACEHOLDER = '正在聆听…'</c>。</summary>
     private const string Placeholder = "正在聆听…";
 
-    /// <summary>波形区宽度（px）。来源：capsule.css L381 <c>.waveform { width: 75px }</c>。</summary>
-    private const double WaveformWidth = 75;
-
-    /// <summary>波形区高度（px）。来源：capsule.css L382 <c>.waveform { height: 24px }</c>。</summary>
-    private const double WaveformHeight = 24;
-
     /// <summary>球上提示气泡的存活时长（ms）。来源：capsule.css 的 <c>.orb-hint</c> 段落（JS 负责定时收尾）。</summary>
     private const int OrbHintDurationMs = 2200;
 
+    /// <summary>右键菜单的淡入淡出时长（ms）。来源：capsule.css 的 <c>.orb-menu { transition: opacity .12s ease }</c>。</summary>
+    private const int MenuFadeDurationMs = 120;
+
+    /// <summary>提示气泡的淡入淡出时长（ms）。来源：capsule.css 的 <c>.orb-hint { transition: opacity .18s ease }</c>。</summary>
+    private const int HintFadeDurationMs = 180;
+
+    /// <summary>元素淡入淡出时长（ms）。来源：capsule.css <c>transition: opacity .2s ease</c>。</summary>
+    private const int FadeDurationMs = 200;
+
     // ==================== 运行状态 ====================
 
-    private readonly WaveformData _waveform = new();
-    private readonly List<Rectangle> _bars = new();
-    private readonly List<Transitions> _contentOpacityTransitions = new();
-    private readonly int[] _ages = new int[WaveformData.PoolSize];
-    private readonly double[] _heights = new double[WaveformData.PoolSize];
-
-    private DispatcherTimer? _levelTimer;
-    private DispatcherTimer? _barTimer;
     private DispatcherTimer? _colorTimer;
-    private DispatcherTimer? _waveformStartTimer;
     private DispatcherTimer? _menuFadeTimer;
     private DispatcherTimer? _hintTimer;
 
-    private Transitions? _orbOpacityTransition;
-    private double _spinAngle;
+    /// <summary>
+    /// 命中区的节流重裁（30fps）。
+    ///
+    /// <para>胶囊的宽度是 800ms 的过渡，过渡期间每帧宽度都在变 ——
+    /// 命中区必须跟着变（不然展开后的胶囊点不到）。但每帧都
+    /// <c>SetWindowRgn</c> 太重，所以这里节流到 30fps
+    /// （对齐真机 <c>host/capsule.py</c> 的 <c>HIT_REFRESH_INTERVAL = 0.5</c> 的思路）。</para>
+    /// </summary>
+    private readonly DispatcherTimer _regionTimer;
+
+    /// <summary>命中区脏了（可见元素集合或几何变了）。</summary>
+    private bool _regionDirty;
+
     private CapsuleForm _form = CapsuleForm.OrbIdle;
     private CapsulePhase _phase = CapsulePhase.Recording;
     private CapsuleTextKind _textKind = CapsuleTextKind.Normal;
@@ -227,6 +232,27 @@ public partial class CapsuleWindow : OverlayWindow
 
     /// <summary>复制按钮是否亮着（CSS 的 <c>.can-copy</c>）。</summary>
     public bool CanCopy => _copyPayload.Length > 0;
+
+    /// <summary>
+    /// 胶囊控件的**实际**宽度（逻辑像素）。过渡结束后应当等于 <see cref="PillExpandedWidth"/>。
+    /// 自检用。
+    /// </summary>
+    public double PillWidth => Pill.Width;
+
+    /// <summary>
+    /// 胶囊展开态的**手算**宽度（按 CSS 盒模型算出来的目标宽度，逻辑像素）。自检用。
+    /// </summary>
+    public double PillExpandedWidth => Pill.ExpandedWidth;
+
+    /// <summary>
+    /// 胶囊里最近一帧画出来的**图标中心**（控件本地坐标）。自检用。
+    /// </summary>
+    public Point PillIconCenter => Pill.IconCenter;
+
+    /// <summary>
+    /// 胶囊控件的几何中心（控件本地坐标）。自检用：应当与 <see cref="PillIconCenter"/> 一致。
+    /// </summary>
+    public Point PillCenter => new(Pill.Bounds.Width / 2, Pill.Bounds.Height / 2);
 
     /// <summary>用户点了球（想开始录音）。</summary>
     public event EventHandler? StartRecordingRequested;
@@ -286,12 +312,16 @@ public partial class CapsuleWindow : OverlayWindow
     /// <summary>按下时的渲染缩放（折算"逻辑位移"用）。</summary>
     private double _dragScaleAtPress;
 
-    // ==================== 过渡时长（动效降级）====================
+    /// <summary>
+    /// 这一轮的位移判据（逻辑像素）：球形态 5（手抖不算拖），展开态 0（按下即拖）。
+    /// 对齐 capsule.js 的 <c>ORB_DRAG_OPTS.threshold</c> / <c>CAPSULE_DRAG_OPTS.threshold</c>。
+    /// </summary>
+    private double _dragThresholdLogical;
 
     /// <summary>
     /// 所有过渡的"默认时长"（动效降级时置 0，恢复时还原）。
     /// </summary>
-    private readonly List<(Avalonia.Animation.ITransition Transition, TimeSpan Duration)> _transitionDurations = new();
+    private readonly List<(Avalonia.Animation.ITransition Transition, TimeSpan Duration)> _transitionDurationsList = new();
 
     /// <summary>
     /// 动效降级（CSS 的 <c>@media (prefers-reduced-motion: reduce)</c>）。
@@ -304,22 +334,34 @@ public partial class CapsuleWindow : OverlayWindow
     {
         InitializeComponent();
 
-        // 窗口尺寸：**宽度定值（真机 WIN_W = 512）+ 高度跟着内容**。
+        // 窗口尺寸：**固定 512×190**（逻辑像素），SizeToContent = Manual（OverlayWindow 已设）。
         //
-        // ⚠ 宽度只能设在 Window 上（不能靠 SizeToContent 把宽度也交给内容）：
-        // 实测 175% 缩放下，宽度取自内容时 Win32 后端会按**逻辑**像素建窗，
-        // 而内容按 1.75 倍渲染 → 右边被裁掉一截（球跑到窗口角落）。
-        // 走 Window.Width 这条路，后端会按缩放换算成物理像素（实测正确）。
-        //
-        // 宽度固定是"球固定在窗口底边居中"的前提（见 WindowWidth 的注释）。
+        // ⚠ 不能用 SizeToContent：窗口高度一变（文字条出现/变长、菜单弹出），
+        // 球在屏幕上就会跟着往下挪 —— 位置归摆位层管，窗口不参与。
         Width = WindowWidth;
-        SizeToContent = SizeToContent.Height;
-        Root.Width = WindowWidth;
+        Height = WindowHeight;
+        CanResize = false;
 
         ConfigureTransitions();
         CollectTransitionDurations();
-        BuildWaveform();
         WireInteractions();
+
+        // 命中区的节流重裁（30fps）。
+        _regionTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(1000.0 / 30.0),
+        };
+        _regionTimer.Tick += (_, _) =>
+        {
+            if (!_regionDirty)
+            {
+                return;
+            }
+
+            _regionDirty = false;
+            InvalidateRegion();
+        };
+        _regionTimer.Start();
 
         // 动效降级：CSS 的 `@media (prefers-reduced-motion: reduce)`（capsule.css L674-684）
         // —— 系统关了"在显示中显示动画"时，所有过渡时长归零。
@@ -341,42 +383,31 @@ public partial class CapsuleWindow : OverlayWindow
         // 主题：跟随系统档要跟着系统走；切换时颜色要平滑过渡（就地改 brush.Color）。
         // （档位在构造函数里定过一次，这里不再重置 —— 配置里的 light/dark 要算数。）
 
-        // 球上 loader 的旋转变换（CSS: animation: bar-spin 1.1s linear infinite）。
-        OrbLoaderIcon.RenderTransform = new RotateTransform();
-        OrbLoaderIcon.RenderTransformOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative);
-
         ApplyForm(CapsuleForm.OrbIdle);
         ApplyPhase(CapsulePhase.Recording);
         WriteText(string.Empty, CapsuleTextKind.Normal);
 
-        // 摆位：等布局落定（SizeToContent 的高度要算完）再摆。
+        // 摆位：等布局落定再摆。
         // 摆哪儿由"上次记住的位置"决定；没记住就用默认位置（工作区右下角）。
         Dispatcher.UIThread.Post(PlaceAtRememberedPosition, DispatcherPriority.Loaded);
+
+        // DPI 变化（拖到另一块缩放不同的屏）→ 按记忆里的逻辑偏移重新摆位。
+        // 位置记忆存的是**逻辑**偏移，换缩放时球在屏幕上的相对位置不变。
+        ScalingChanged += (_, _) => Dispatcher.UIThread.Post(PlaceAtRememberedPosition, DispatcherPriority.Loaded);
     }
 
     /// <inheritdoc />
     protected override void OnClosed(EventArgs e)
     {
-        _levelTimer?.Stop();
-        _barTimer?.Stop();
         _colorTimer?.Stop();
-        _waveformStartTimer?.Stop();
         _menuFadeTimer?.Stop();
         _hintTimer?.Stop();
+        _regionTimer.Stop();
 
         CapsuleTheme.Applied -= OnThemeApplied;
         CapsuleTheme.DetachPlatformWatcher();
 
         base.OnClosed(e);
-    }
-
-    /// <inheritdoc />
-    protected override void OnSizeChanged(SizeChangedEventArgs e)
-    {
-        base.OnSizeChanged(e);
-
-        // 尺寸变了 → 命中区要重算（球的矩形变了），位置也要重摆（保持球在原地）。
-        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
     }
 
     // ==================== 状态机入口（core-api.md §3 / §4）====================
@@ -399,7 +430,6 @@ public partial class CapsuleWindow : OverlayWindow
                 // 回到待机：波形停、收回球形态、上一轮的错误残留清干净。
                 // ⚠ 只有**有球**的界面形态才收成球（非常驻模式没有 orb-idle 这一档，
                 // CSS 里没有 body.orb-mode.*，胶囊一直是展开态）。
-                StopWaveform();
                 ResetErrorFlags();
                 ApplyForm(_orbVisible ? CapsuleForm.OrbIdle : CapsuleForm.Expanded);
                 WriteText(string.Empty, CapsuleTextKind.Normal);
@@ -417,7 +447,6 @@ public partial class CapsuleWindow : OverlayWindow
                 CloseOrbMenu();
                 HideOrbHint();
                 WriteText(string.Empty, CapsuleTextKind.Normal);
-                ResetWaveform();
                 SetElapsed(0);
                 ResetErrorFlags();
                 ApplyPhase(CapsulePhase.Recording);
@@ -465,6 +494,9 @@ public partial class CapsuleWindow : OverlayWindow
                 // 才是真的失败（错误色）。
                 _copyPayload = payload.CanCopy ? payload.Text : string.Empty;
                 _errorDismissable = payload.CanCopy;
+
+                // 自绘控件要知道"有没有可复制的原文"（CSS 的 .can-copy：出现复制钮）。
+                Pill.CanCopy = _copyPayload.Length > 0;
 
                 if (payload.CanCopy)
                 {
@@ -537,7 +569,7 @@ public partial class CapsuleWindow : OverlayWindow
     {
         if (levels.Count > 0)
         {
-            _waveform.SetLevel(levels[levels.Count - 1]);
+            Pill.Level = levels[levels.Count - 1];
         }
 
         SetElapsed(elapsed);
@@ -592,43 +624,12 @@ public partial class CapsuleWindow : OverlayWindow
     /// 配置过渡。**全部在代码里设** —— XAML 里写 <c>Property="MaxWidth"</c> 会解析成 null
     /// （archive 意外发现 #2）。
     ///
-    /// capsule.css 的 <c>.recording-pill</c> 一共 6 条 transition，按顺序是：
-    /// <code>
-    /// opacity .2s ease,
-    /// max-width .8s cubic-bezier(.25,.85,.3,1),
-    /// border-radius .8s cubic-bezier(.25,.85,.3,1),
-    /// background-color .18s ease-out,
-    /// border-color .18s ease-out,
-    /// color .18s ease-out
-    /// </code>
-    /// 前三条（形状 + 整体透明度）用 Avalonia 的 Transition；
-    /// 后三条（颜色）走 <see cref="OverlayTheme.TweenBrush"/> 就地改 brush.Color ——
-    /// 换 brush 实例会瞬间跳色，就地改才有补间。
+    /// <para>胶囊自身的过渡（宽度形变、内容淡入淡出、球图标淡入淡出）在
+    /// <see cref="PillShape"/> 内部 —— 它自己管自己的动画。
+    /// 这里只管**普通控件**（文字条 / 菜单 / 气泡）的透明度过渡。</para>
     /// </summary>
     private void ConfigureTransitions()
     {
-        Pill.Transitions = new Transitions
-        {
-            new DoubleTransition
-            {
-                Property = Layoutable.MaxWidthProperty,
-                Duration = TimeSpan.FromMilliseconds(MorphDurationMs),
-                Easing = CapsuleTheme.MorphEase,
-            },
-            new CornerRadiusTransition
-            {
-                Property = Border.CornerRadiusProperty,
-                Duration = TimeSpan.FromMilliseconds(MorphDurationMs),
-                Easing = CapsuleTheme.MorphEase,
-            },
-            new DoubleTransition
-            {
-                Property = Visual.OpacityProperty,
-                Duration = TimeSpan.FromMilliseconds(FadeDurationMs),
-                Easing = CapsuleTheme.CssEase,
-            },
-        };
-
         // .textbar { transition: opacity .2s ease } —— 球形态下文字条只淡入淡出，不位移。
         TextBar.Transitions = new Transitions
         {
@@ -640,38 +641,27 @@ public partial class CapsuleWindow : OverlayWindow
             },
         };
 
-        // .bar-orb { transition: opacity .07s ease } —— 收起时要等 .76s 才出来。
-        _orbOpacityTransition = new Transitions
+        // .orb-menu { transition: opacity .12s ease }
+        OrbMenu.Transitions = new Transitions
         {
             new DoubleTransition
             {
                 Property = Visual.OpacityProperty,
-                Duration = TimeSpan.FromMilliseconds(OrbFadeDurationMs),
+                Duration = TimeSpan.FromMilliseconds(MenuFadeDurationMs),
                 Easing = CapsuleTheme.CssEase,
             },
         };
-        OrbHost.Transitions = _orbOpacityTransition;
 
-        // .recording-pill > * { transition: opacity .2s ease } —— 胶囊里各个子元素。
-        // 每个控件要**自己的** Transitions 实例：Avalonia 的 Transitions 集合只能挂在一个
-        // Animatable 上（共享会抛异常）。
-        foreach (var element in new Control[]
-                 {
-                     CancelButton, BarContent, StopButton, StateIcon, CopyButton,
-                 })
+        // .orb-hint { transition: opacity .18s ease }
+        OrbHint.Transitions = new Transitions
         {
-            var transitions = new Transitions
+            new DoubleTransition
             {
-                new DoubleTransition
-                {
-                    Property = Visual.OpacityProperty,
-                    Duration = TimeSpan.FromMilliseconds(FadeDurationMs),
-                    Easing = CapsuleTheme.CssEase,
-                },
-            };
-            element.Transitions = transitions;
-            _contentOpacityTransitions.Add(transitions);
-        }
+                Property = Visual.OpacityProperty,
+                Duration = TimeSpan.FromMilliseconds(HintFadeDurationMs),
+                Easing = CapsuleTheme.CssEase,
+            },
+        };
     }
 
     // ==================== 形态与阶段 ====================
@@ -694,92 +684,42 @@ public partial class CapsuleWindow : OverlayWindow
     public void SetOrbLoading(bool loading)
     {
         _orbLoading = loading;
-        OrbMicIcon.IsVisible = !loading;
-        OrbLoaderIcon.IsVisible = loading;
+        Pill.OrbLoading = loading;
     }
 
     /// <summary>
     /// 切形态。对应 CSS 的 <c>body.orb-mode.orb-idle</c> / <c>body.orb-mode.orb-expanded</c> 两组规则。
+    ///
+    /// <para>形状过渡、内容淡入淡出、宽度计算都在 <see cref="PillShape"/> 内部 ——
+    /// 它只在形态**真的变了**的时候才做一次（重复设成同一个形态不会重新淡入）。</para>
     /// </summary>
     private void ApplyForm(CapsuleForm form)
     {
         _form = form;
         bool orb = form == CapsuleForm.OrbIdle;
 
-        // 形状：max-width .8s cubic-bezier(.25,.85,.3,1)。
-        // 实际宽度 = min(内容宽, MaxWidth) —— CSS 的 fit-content 就是这个意思，
-        // 所以视觉上是"一点点长开"，不是整条跳到 480。
-        Pill.MaxWidth = orb ? PillCollapsedMaxWidth : PillExpandedMaxWidth;
-        Pill.CornerRadius = new CornerRadius(PillCornerRadius);
+        // 光标：胶囊本体是拖拽把手（CSS: .can-drag .recording-pill { cursor: grab }）。
+        // 球形态与展开态都是 Hand（拖动中换 grabbing，见 OnPillPointerPressed）。
+        Pill.Cursor = new Cursor(StandardCursorType.Hand);
 
         // 形状过渡**不延迟**；只有颜色在收起态延迟 .58s
         // （CSS: body.orb-mode.orb-idle .recording-pill { transition-delay: 0s,0s,0s,.58s,.58s,.58s }）。
         _colorDelayMs = orb ? CollapsedColorDelayMs : 0;
 
-        // 内容淡入淡出：展开 .1s / 收起 .12s（CSS L627-631 / L615-621）。
-        ApplyContentFadeDuration();
-
-        // 球图标：收起时延迟 .76s 才淡入（CSS L564-570），展开时立刻淡出。
-        // 动效降级时延迟也归零（CSS 的 `transition: none` 连 delay 一起作废）。
-        if (_orbOpacityTransition is not null)
-        {
-            TimeSpan delay = _reducedMotion
-                ? TimeSpan.Zero
-                : (orb ? TimeSpan.FromMilliseconds(OrbFadeDelayMs) : TimeSpan.Zero);
-
-            foreach (var transition in _orbOpacityTransition)
-            {
-                if (transition is DoubleTransition doubleTransition)
-                {
-                    doubleTransition.Delay = delay;
-                }
-            }
-        }
-
-        OrbHost.Opacity = orb ? 1 : 0;
-        foreach (var element in new Control[] { CancelButton, BarContent, StopButton, StateIcon, CopyButton })
-        {
-            element.Opacity = orb ? 0 : 1;
-        }
+        // 形态 → 自绘控件（宽度过渡 + 内容淡入淡出都在它内部）。
+        Pill.Form = form;
 
         // 文字条：球形态整块淡出（只淡入淡出，不位移）。
         TextBar.Opacity = orb ? 0 : 1;
 
-        // 球形态下文字条**不占布局**：真机的窗口是固定 512×260，文字条占位只是为了
-        // "窗口留够空间、内容贴底"；Avalonia 的窗口高度跟着内容走，
-        // 文字条占着 96px 的最小宽度会把窗口撑高。
-        // 视觉上没有差别（文字条在球形态本来就是 opacity:0）。
+        // 球形态下文字条**不占布局**：它整块淡出（CSS: opacity:0 + pointer-events:none）。
         TextBar.IsVisible = !orb;
 
-        // 形状不同 → 窗口的点击穿透区域形状也要跟着换。
-        RegionShape = orb ? OverlayShape.Circle : OverlayShape.Capsule;
-
-        // 波形条：收起时立刻停；展开时等形变落定再启动
-        // （capsule.js: "条子在动 + 胶囊在变宽，两件事叠在一起容易糊成一片残影"）。
-        if (orb)
-        {
-            StopWaveform();
-        }
-        else
-        {
-            _waveformStartTimer?.Stop();
-            _waveformStartTimer = new DispatcherTimer(DispatcherPriority.Render)
-            {
-                Interval = TimeSpan.FromMilliseconds(WaveformStartDelayMs),
-            };
-            _waveformStartTimer.Tick += (_, _) =>
-            {
-                _waveformStartTimer!.Stop();
-                if (_phase == CapsulePhase.Recording)
-                {
-                    StartWaveform();
-                }
-            };
-            _waveformStartTimer.Start();
-        }
-
         RefreshDerivedColors();
-        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+
+        // 可见元素的集合变了（文字条显隐）→ 让 Shell 重裁一次命中区。
+        // 形态变了 → 胶囊宽度变了 → 命中区跟着变（节流重裁）。
+        _regionDirty = true;
     }
 
     /// <summary>
@@ -789,63 +729,16 @@ public partial class CapsuleWindow : OverlayWindow
     private void ApplyPhase(CapsulePhase phase, string? labelText = null)
     {
         _phase = phase;
-        bool recording = phase == CapsulePhase.Recording;
 
-        // CSS: .recording-pill.recording .waveform { display:block } 等四条。
-        Waveform.IsVisible = recording;
-        BarTimer.IsVisible = recording;
-        StopButton.IsVisible = recording;
-        BarLabel.IsVisible = !recording;
-        StateIcon.IsVisible = !recording;
-
-        // CSS: .bar-state svg { display:none } + 各 phase 匹配一个图标。
-        // ⚠ warning 态 CSS **没有**匹配任何图标 → 三个都不显示（一个空的圆）。照搬。
-        StateLoaderIcon.IsVisible = phase is CapsulePhase.Processing or CapsulePhase.Cancelled;
-        StateCheckIcon.IsVisible = phase == CapsulePhase.Done;
-        StateInfoIcon.IsVisible = phase == CapsulePhase.Error;
-
-        // CSS: .recording-pill.error.can-copy .bar-copy / .warning.can-copy .bar-copy { display:grid }
-        // —— 复制按钮只在"带原文"的错误/警告态出现。
-        CopyButton.IsVisible = _copyPayload.Length > 0
-            && phase is CapsulePhase.Error or CapsulePhase.Warning;
-
-        // CSS: .recording-pill.error.can-copy .bar-state { display:none }
-        //      .recording-pill.warning.can-copy .bar-state { display:none }
-        // —— 有复制按钮时状态图标让位（文案已经说明了出错，两个图标并排反而挤）。
-        if (CopyButton.IsVisible)
-        {
-            StateIcon.IsVisible = false;
-        }
-
-        BarLabel.Text = labelText ?? PhaseText(phase);
-
-        // 波形只在录音阶段跑（CSS: "滚动电平条只在**录音阶段**跑"）。
-        if (recording && _form == CapsuleForm.Expanded)
-        {
-            if (_barTimer is null || !_barTimer.IsEnabled)
-            {
-                StartWaveform();
-            }
-        }
-        else
-        {
-            StopWaveform();
-        }
+        // 阶段 → 自绘控件（波形 / 状态文字 / 结束钮 / 状态图标 / 复制钮都在它内部）。
+        Pill.Phase = phase;
+        Pill.LabelText = labelText;
 
         RefreshDerivedColors();
-    }
 
-    /// <summary>各阶段胶囊里的文案。来源：capsule.js 的 <c>PHASE_TEXT</c>。</summary>
-    private static string PhaseText(CapsulePhase phase) => phase switch
-    {
-        CapsulePhase.Recording => string.Empty,
-        CapsulePhase.Processing => "识别中…",
-        CapsulePhase.Done => "已输入",
-        CapsulePhase.Error => "出错了",
-        CapsulePhase.Warning => "没送出去",
-        CapsulePhase.Cancelled => "已取消",
-        _ => string.Empty,
-    };
+        // 阶段变了 → 胶囊的内容变了 → 宽度变了 → 命中区跟着变。
+        _regionDirty = true;
+    }
 
     // ==================== 文字条 ====================
 
@@ -870,6 +763,9 @@ public partial class CapsuleWindow : OverlayWindow
         TextBody.Text = _textHasContent ? value : Placeholder;
 
         RefreshDerivedColors();
+
+        // 文字变了 → 文字条的矩形变了 → 命中区跟着变。
+        _regionDirty = true;
     }
 
     // ==================== 派生色 ====================
@@ -877,8 +773,8 @@ public partial class CapsuleWindow : OverlayWindow
     /// <summary>
     /// 重算并补间所有派生色（胶囊底/描边/前景、文字条底/描边/前景、状态文字、状态图标）。
     ///
-    /// 派生色不是 CSS 令牌：它们的值由「形态 + 阶段 + 主题」三者共同决定
-    /// （例如胶囊底色在球形态是录音红、在错误态是 err-bg、在展开态是 deep）。
+    /// <para>派生色不是 CSS 令牌：它们的值由「形态 + 阶段 + 主题」三者共同决定
+    /// （例如胶囊底色在球形态是录音红、在错误态是 err-bg、在展开态是 deep）。</para>
     /// </summary>
     private void RefreshDerivedColors()
     {
@@ -1019,105 +915,11 @@ public partial class CapsuleWindow : OverlayWindow
 
     private void OnThemeApplied(object? sender, EventArgs e) => RefreshDerivedColors();
 
-    // ==================== 波形 ====================
-
-    /// <summary>造 14 根条（13 根可见 + 1 根屏外的回收位）。</summary>
-    private void BuildWaveform()
+    /// <summary>计时显示。CSS: formatTime → m:ss。</summary>
+    private void SetElapsed(double seconds)
     {
-        this.TryFindResource("Capsule.WaveDim.Brush", null, out object? waveDimResource);
-        IBrush waveDimBrush = waveDimResource as IBrush ?? new SolidColorBrush(Color.Parse("#47F4F4F5"));
-
-        for (int i = 0; i < WaveformData.PoolSize; i++)
-        {
-            var bar = new Rectangle
-            {
-                // CSS: .waveform i { width:3px; height:2px; border-radius:3px; }
-                // 3px 宽的条上写 3px 圆角 → 浏览器 clamp 成 1.5px（正圆）。
-                Width = WaveformData.BarWidth,
-                Height = WaveformData.SilentHeight,
-                RadiusX = 1.5,
-                RadiusY = 1.5,
-                Fill = waveDimBrush,
-                IsVisible = false,
-            };
-
-            // 高度过渡：CSS: .waveform i { transition: transform 140ms linear, height 75ms ease-out }
-            bar.Transitions = new Transitions
-            {
-                new DoubleTransition
-                {
-                    Property = Layoutable.HeightProperty,
-                    Duration = TimeSpan.FromMilliseconds(75),
-                    Easing = CapsuleTheme.CssEaseOut,
-                },
-            };
-
-            // 位置：CSS 里条固定在右边缘，用 transform: translateX(-age × 6px) 向左滚。
-            var translate = new TranslateTransform();
-            translate.Transitions = new Transitions
-            {
-                new DoubleTransition
-                {
-                    Property = TranslateTransform.XProperty,
-                    Duration = TimeSpan.FromMilliseconds(140),
-                    Easing = new LinearEasing(),
-                },
-            };
-
-            bar.RenderTransform = translate;
-            bar.RenderTransformOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative);
-
-            // CSS: .waveform i { position:absolute; right:0; bottom:0; }
-            // 条固定在波形区的**右边缘**，水平位置完全由 translateX(-age × 6px) 决定。
-            Canvas.SetLeft(bar, WaveformWidth - WaveformData.BarWidth);
-            Canvas.SetBottom(bar, 0);
-
-            WaveCanvas.Children.Add(bar);
-            _bars.Add(bar);
-        }
-
-        _waveform.Reset();
-    }
-
-    /// <summary>启动波形（录音阶段）。</summary>
-    private void StartWaveform()
-    {
-        _waveform.Reset();
-
-        foreach (Rectangle bar in _bars)
-        {
-            bar.IsVisible = true;
-            bar.Height = WaveformData.SilentHeight;
-            if (bar.RenderTransform is TranslateTransform translate)
-            {
-                translate.X = 0;
-            }
-        }
-
-        _levelTimer ??= new DispatcherTimer(DispatcherPriority.Render)
-        {
-            Interval = TimeSpan.FromMilliseconds(1000.0 / WaveformData.LevelFps),
-        };
-        _levelTimer.Tick -= OnLevelTick;
-        _levelTimer.Tick += OnLevelTick;
-        _levelTimer.Start();
-
-        _barTimer ??= new DispatcherTimer(DispatcherPriority.Render)
-        {
-            Interval = TimeSpan.FromMilliseconds(WaveformData.BarTickMs),
-        };
-        _barTimer.Tick -= OnBarTick;
-        _barTimer.Tick += OnBarTick;
-        _barTimer.Start();
-
-        OnLevelTick(this, EventArgs.Empty);
-    }
-
-    /// <summary>停波形（收起 / 非录音阶段）。</summary>
-    private void StopWaveform()
-    {
-        _barTimer?.Stop();
-        _levelTimer?.Stop();
+        _elapsed = Math.Max(0, seconds);
+        Pill.Elapsed = _elapsed;
     }
 
     /// <summary>清掉上一轮错误态留下的东西（原文、复制按钮、✕ 的语义）。</summary>
@@ -1125,127 +927,7 @@ public partial class CapsuleWindow : OverlayWindow
     {
         _copyPayload = string.Empty;
         _errorDismissable = false;
-    }
-
-    /// <summary>波形复位（capsule.js 的 resetLevelBars）。</summary>
-    private void ResetWaveform()
-    {
-        _waveform.Reset();
-        foreach (Rectangle bar in _bars)
-        {
-            bar.IsVisible = false;
-            bar.Height = WaveformData.SilentHeight;
-        }
-    }
-
-    /// <summary>每 1/30 秒更新呼吸动画与球上的 loader。</summary>
-    private void OnLevelTick(object? sender, EventArgs e)
-    {
-        double t = _elapsed;
-
-        // 呼吸：CSS 的 orb-breathe（2.8s ease-in-out infinite，0.72 ↔ 1）。
-        if (_form == CapsuleForm.OrbIdle && !_orbLoading)
-        {
-            double phase = (t * 1000.0) % BreathePeriodMs / BreathePeriodMs;
-            double breath = 0.5 + (0.5 * Math.Sin(2 * Math.PI * phase));
-            OrbMicIcon.Opacity = 0.72 + (0.28 * breath);
-        }
-
-        // 球上的 loader：CSS 的 bar-spin（1.1s linear infinite）。
-        if (_orbLoading)
-        {
-            _spinAngle = (_spinAngle + (360.0 * (1000.0 / WaveformData.LevelFps) / SpinPeriodMs)) % 360.0;
-            if (OrbLoaderIcon.RenderTransform is RotateTransform rotate)
-            {
-                rotate.Angle = _spinAngle;
-            }
-        }
-    }
-
-    /// <summary>每 140ms 推进一根条（capsule.js 的 BAR_TICK_MS）。</summary>
-    private void OnBarTick(object? sender, EventArgs e)
-    {
-        _waveform.Advance(_ages, _heights);
-
-        this.TryFindResource("Capsule.Wave.Brush", null, out object? waveResource);
-        this.TryFindResource("Capsule.WaveDim.Brush", null, out object? waveDimResource);
-        IBrush waveBrush = waveResource as IBrush ?? Brushes.Red;
-        IBrush waveDimBrush = waveDimResource as IBrush ?? Brushes.Gray;
-
-        Rectangle? recycled = null;
-        double recycledTargetHeight = 0;
-
-        for (int i = 0; i < _bars.Count; i++)
-        {
-            Rectangle bar = _bars[i];
-            double targetX = -_ages[i] * WaveformData.BarStep;
-
-            if (i == 0)
-            {
-                // 回收的那根要**瞬移**到最右（CSS: recycled.style.transition='none'），
-                // 否则它会从屏幕左边一路飞过来。
-                recycled = bar;
-                recycledTargetHeight = _heights[0];
-                if (bar.RenderTransform is TranslateTransform translate)
-                {
-                    translate.Transitions = null;
-                    translate.X = targetX;
-                }
-
-                bar.Height = WaveformData.SilentHeight;
-            }
-            else if (bar.RenderTransform is TranslateTransform translate)
-            {
-                translate.X = targetX;
-            }
-
-            // 静音条画灰色（CSS: .waveform i.is-silent { color:var(--wave-dim) }）。
-            bool silent = _heights[i] <= WaveformData.SilentMaxPx;
-            bar.Fill = silent ? waveDimBrush : waveBrush;
-        }
-
-        // 下一帧恢复过渡并给高度（CSS: requestAnimationFrame 后 transition='' + height=target）。
-        if (recycled is not null)
-        {
-            var pending = recycled;
-            Dispatcher.UIThread.Post(() =>
-            {
-                pending.Transitions = new Transitions
-                {
-                    new DoubleTransition
-                    {
-                        Property = Layoutable.HeightProperty,
-                        Duration = TimeSpan.FromMilliseconds(75),
-                        Easing = CapsuleTheme.CssEaseOut,
-                    },
-                };
-
-                if (pending.RenderTransform is TranslateTransform translate)
-                {
-                    translate.Transitions = new Transitions
-                    {
-                        new DoubleTransition
-                        {
-                            Property = TranslateTransform.XProperty,
-                            Duration = TimeSpan.FromMilliseconds(140),
-                            Easing = new LinearEasing(),
-                        },
-                    };
-                }
-
-                pending.Height = recycledTargetHeight;
-            }, DispatcherPriority.Render);
-        }
-    }
-
-    /// <summary>计时显示。CSS: formatTime → m:ss。</summary>
-    private void SetElapsed(double seconds)
-    {
-        _elapsed = Math.Max(0, seconds);
-        int total = (int)Math.Floor(_elapsed);
-        int minutes = total / 60;
-        int rest = total % 60;
-        BarTimer.Text = $"{minutes}:{(rest < 10 ? "0" : "")}{rest}";
+        Pill.CanCopy = false;
     }
 
     // ==================== 交互 ====================
@@ -1274,19 +956,27 @@ public partial class CapsuleWindow : OverlayWindow
         WireMenuButtonHover(QrMenuButton, isQuit: false);
         WireMenuButtonHover(QuitMenuButton, isQuit: true);
 
-        // 结束钮（✓）→ 停止录音。
-        StopButton.Click += (_, _) => StopRecordingRequested?.Invoke(this, EventArgs.Empty);
+        // 胶囊里的按钮（自绘控件自己命中判定，按下时抛事件过来）。
+        Pill.CancelClicked += (_, _) => OnCancelClick();
+        Pill.StopClicked += (_, _) => StopRecordingRequested?.Invoke(this, EventArgs.Empty);
+        Pill.CopyClicked += (_, _) => CopyRequested?.Invoke(this, EventArgs.Empty);
 
-        // 取消钮（✕）→ 取消这一轮；带原文的错误常驻态里是"关掉提示"。
-        CancelButton.Click += (_, _) => OnCancelClick();
-
-        // 复制钮 → 把原文写进剪贴板。
-        CopyButton.Click += (_, _) => CopyRequested?.Invoke(this, EventArgs.Empty);
+        // 胶囊宽度变了 → 命中区跟着变（节流重裁）。
+        Pill.PropertyChanged += OnPillPropertyChanged;
 
         // 文字条按下 → 临时激活（要键盘焦点才能选文本 / Ctrl+C）。
         // 对应 capsule.py 的 focus_textbar。
         TextBodyScroll.PointerPressed += OnTextBarPointerPressed;
         TextBodyScroll.PointerReleased += (_, _) => RestoreTextBarFocus();
+    }
+
+    /// <summary>胶囊的几何变了（宽度过渡）→ 命中区脏了。</summary>
+    private void OnPillPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Layoutable.WidthProperty)
+        {
+            _regionDirty = true;
+        }
     }
 
     /// <summary>
@@ -1375,8 +1065,12 @@ public partial class CapsuleWindow : OverlayWindow
             return;
         }
 
-        // 只在**球形态**响应点击（展开态的胶囊上是按钮区，不是"点球录音"）。
-        if (_form != CapsuleForm.OrbIdle)
+        bool orb = _form == CapsuleForm.OrbIdle;
+
+        // 展开态：点在 ✕ / ✓ / 复制钮上**不启动拖动**
+        // （CSS: makeDraggable 的 filter: noButtons —— 按钮自己有点击语义）。
+        // 这里不设 e.Handled：让事件继续走到 PillShape，由它按自己的命中判定触发点击。
+        if (!orb && Pill.HitSubRegion(e.GetPosition(Pill)) != PillSubRegion.None)
         {
             return;
         }
@@ -1388,12 +1082,20 @@ public partial class CapsuleWindow : OverlayWindow
         // （与 Python 的 DragSession._moved 同款）。
         _dragging = true;
         _dragMoved = false;
+
+        // 位移判据：球形态 5 逻辑像素（区分"点球"与"拖球"），展开态 0（按下即拖）。
+        // 对齐 capsule.js 的 ORB_DRAG_OPTS / CAPSULE_DRAG_OPTS。
+        _dragThresholdLogical = orb ? OrbDragThresholdLogical : 0;
+
         _dragWindowStart = Position;
         _dragMouseStart = this.PointToScreen(e.GetPosition(this));
         _dragScaleAtPress = CurrentRenderScaling;
 
         // 捕获指针：鼠标拖到控件外面也要继续收到移动/松开事件。
         e.Pointer.Capture(Pill);
+
+        // 拖动中换 grabbing 光标（CSS: body.orb-dragging .recording-pill { cursor: grabbing }）。
+        Pill.Cursor = new Cursor(StandardCursorType.SizeAll);
     }
 
     private void OnCancelClick()
@@ -1438,8 +1140,8 @@ public partial class CapsuleWindow : OverlayWindow
         // CSS: requestAnimationFrame 后加 is-open（淡入 .12s）。
         Dispatcher.UIThread.Post(() => OrbMenu.Opacity = 1, DispatcherPriority.Render);
 
-        // 布局变了 → 命中区跟着更新（菜单那块要算进来，不然看得见点不到）。
-        Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+        // 可见元素的集合变了（菜单出来了）→ 命中区要跟着变（看得见就得点得到）。
+        _regionDirty = true;
     }
 
     private void CloseOrbMenu()
@@ -1463,7 +1165,7 @@ public partial class CapsuleWindow : OverlayWindow
             OrbMenu.IsVisible = false;
 
             // 菜单那块要还给底下的应用（capsule.js: 布局变了 → 命中区跟着收）。
-            Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+            _regionDirty = true;
         };
         _menuFadeTimer.Start();
     }
@@ -1484,6 +1186,9 @@ public partial class CapsuleWindow : OverlayWindow
         OrbHint.Opacity = 0;
 
         Dispatcher.UIThread.Post(() => OrbHint.Opacity = 1, DispatcherPriority.Render);
+
+        // 气泡出来了 → 命中区要跟着变。
+        _regionDirty = true;
 
         _hintTimer?.Stop();
         _hintTimer = new DispatcherTimer(DispatcherPriority.Render)
@@ -1520,7 +1225,7 @@ public partial class CapsuleWindow : OverlayWindow
             OrbHint.IsVisible = false;
 
             // 气泡那块要还给底下的应用。
-            Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+            _regionDirty = true;
         };
         timer.Start();
     }
@@ -1543,7 +1248,7 @@ public partial class CapsuleWindow : OverlayWindow
             if (!IsVisible)
             {
                 Show();
-                Dispatcher.UIThread.Post(RefreshHitRegion, DispatcherPriority.Loaded);
+                Dispatcher.UIThread.Post(() => _regionDirty = true, DispatcherPriority.Loaded);
                 Dispatcher.UIThread.Post(PlaceAtRememberedPosition, DispatcherPriority.Loaded);
             }
         }
@@ -1556,7 +1261,7 @@ public partial class CapsuleWindow : OverlayWindow
     // ==================== 命中区 ====================
 
     /// <summary>
-    /// 命中区：**只裁"真正可见的那几块"**的并集。    ///
+    /// 命中区：**只裁"真正可见的那几块"**的并集。
     /// <para>对齐 Python 的 <c>update_regions</c>：前端把可见元素的矩形报上来，
     /// Python 侧 <c>SetWindowRgn</c> 裁成它们的并集 —— 窗口其余部分（大片空白）
     /// 不归窗口管，点击直接穿透到下面的应用。</para>
@@ -1566,8 +1271,7 @@ public partial class CapsuleWindow : OverlayWindow
     /// "量矩形"这一步抽成了纯函数 <see cref="HitRegionBuilder"/>（可单元测试）。</para>
     ///
     /// <para>⚠ 真机的规矩：浮层（菜单 / 气泡）**单独一块**，不能并进球的包围盒 ——
-    /// 并进去中间全是空白，空白在裁形里会露出底色。这里每个可见元素各报一块，
-    /// Shell 侧再 <c>CombineRgn</c> 取并集。</para>
+    /// 并进去中间全是空白。这里每个可见元素各报一块，Shell 侧再 <c>CombineRgn</c> 取并集。</para>
     /// </summary>
     protected override IReadOnlyList<HitRegion> BuildHitRegions()
     {
@@ -1589,20 +1293,7 @@ public partial class CapsuleWindow : OverlayWindow
             // 控件坐标 → 客户区坐标（逻辑像素）
             Point origin = control.TranslatePoint(new Point(0, 0), this) ?? default;
 
-            // 圆角：抄 CSS（文字条 14px / 浮层 12px / 气泡与胶囊 999px）。
-            // Border 的 CornerRadius 一眼就是布局用的那个值，直接读。
-            double radius = 0;
-            if (control is Border border)
-            {
-                CornerRadius corners = border.CornerRadius;
-                radius = Math.Max(
-                    Math.Max(corners.TopLeft, corners.TopRight),
-                    Math.Max(corners.BottomLeft, corners.BottomRight));
-            }
-
-            specs.Add(new HitRegionSpec(
-                new Rect(origin.X, origin.Y, bounds.Width, bounds.Height),
-                radius));
+            specs.Add(new HitRegionSpec(new Rect(origin.X, origin.Y, bounds.Width, bounds.Height)));
         }
 
         Add(Pill);
@@ -1620,16 +1311,6 @@ public partial class CapsuleWindow : OverlayWindow
     /// 区域之外的点击直接穿透到下面的应用。</para>
     /// </summary>
     public IReadOnlyList<HitRegion> ComputeHitRegions() => BuildHitRegions();
-
-    /// <summary>
-    /// 重算点击穿透区域。
-    ///
-    /// 布局落定后（尺寸变了、菜单弹出/收起）才需要重算 —— 不是每帧都算。
-    /// </summary>
-    private void RefreshHitRegion()
-    {
-        ApplyRegion();
-    }
 
     // ==================== 摆位与位置记忆 ====================
 
@@ -1665,23 +1346,35 @@ public partial class CapsuleWindow : OverlayWindow
 
         double scale = monitor.Scale;
         (int winW, int winH) = WindowSizePhysical(scale);
+        int reserve = ReserveHeightPhysical(scale);
 
         (int X, int Y)? position = null;
         if (hint is not null && !string.IsNullOrEmpty(hint.Geometry))
         {
             position = Placement.OrbPositionFromGeometry(
-                hint.Geometry, monitor.WorkArea, scale, winW, winH);
+                hint.Geometry, monitor.WorkArea, scale, winW, winH, reserveHeight: reserve);
         }
 
         if (position is null)
         {
             // 还没拖过：给个合理的默认值（工作区右下角）。
             (int orbX, int orbY) = Placement.DefaultOrbPosition(monitor.WorkArea, scale);
-            position = Placement.OrbWindowPosition(orbX, orbY, winW, winH, scale, monitor.WorkArea);
+            position = Placement.OrbWindowPosition(
+                orbX, orbY, winW, winH, scale, monitor.WorkArea, reserveHeight: reserve);
         }
 
         MoveToPhysicalPixels(position.Value.X, position.Value.Y);
     }
+
+    /// <summary>
+    /// 球上方要预留的窗口高度（物理像素）。
+    ///
+    /// <para>窗口高度固定 → 预留量就是窗口本身的高度（<see cref="WindowHeight"/>）：
+    /// 球上方要放得下"文字条 + 胶囊"。球拖得太靠上时，展开后的文字条会顶出屏幕，
+    /// 所以纵向夹取要按这个高度把球往下推（球在屏幕上不会跳）。</para>
+    /// </summary>
+    private static int ReserveHeightPhysical(double scale)
+        => (int)Math.Round(WindowHeight * scale, MidpointRounding.ToEven);
 
     /// <summary>
     /// 窗口的**物理**尺寸（按目标显示器的缩放换算）。
@@ -1689,18 +1382,14 @@ public partial class CapsuleWindow : OverlayWindow
     /// <para>Avalonia 的 <c>ClientSize</c> 是逻辑像素；Win32 的窗口坐标是物理像素。
     /// 摆位算的是物理坐标，所以要过一遍目标显示器的缩放 ——
     /// 摆到缩放不同的屏上时，窗口会被框架按新 DPI 重新缩放，位置也必须按新缩放算。</para>
+    ///
+    /// <para>⚠ 尺寸是**常量**（512×190），不取 <c>ClientSize</c> ——
+    /// 窗口不随内容变，内容再长也不会把窗口撑高。</para>
     /// </summary>
-    private (int Width, int Height) WindowSizePhysical(double scale)
-    {
-        double logicalWidth = ClientSize.Width > 0 ? ClientSize.Width : Width;
-        double logicalHeight = ClientSize.Height > 0
-            ? ClientSize.Height
-            : (Placement.OrbInsetY * 2 + Placement.OrbSize);
-
-        return (
-            (int)Math.Round(logicalWidth * scale, MidpointRounding.ToEven),
-            (int)Math.Round(logicalHeight * scale, MidpointRounding.ToEven));
-    }
+    private static (int Width, int Height) WindowSizePhysical(double scale)
+        => (
+            (int)Math.Round(WindowWidth * scale, MidpointRounding.ToEven),
+            (int)Math.Round(WindowHeight * scale, MidpointRounding.ToEven));
 
     // ==================== 拖拽 ====================
 
@@ -1730,13 +1419,24 @@ public partial class CapsuleWindow : OverlayWindow
         PixelPoint mouseScreen = this.PointToScreen(e.GetPosition(this));
         double dx = mouseScreen.X - _dragMouseStart.X;
         double dy = mouseScreen.Y - _dragMouseStart.Y;
+
+        // 位移判据（逻辑像素 → 物理像素）：球形态 5px（手抖不算拖），展开态 0（按下即拖）。
+        if (!_dragMoved)
+        {
+            double threshold = _dragThresholdLogical * _dragScaleAtPress;
+            if (threshold > 0 && Math.Sqrt((dx * dx) + (dy * dy)) <= threshold)
+            {
+                return;
+            }
+
+            _dragMoved = true;
+        }
+
         PixelPoint target = DragGeometry.WindowPosition(
             _dragWindowStart, dx, dy, _dragScaleAtPress, CurrentRenderScaling);
 
         target = ClampDragTarget(target);
         MoveToPhysicalPixels(target.X, target.Y);
-
-        _dragMoved = DragGeometry.HasMoved(_dragWindowStart, Position);
     }
 
     /// <summary>
@@ -1761,15 +1461,20 @@ public partial class CapsuleWindow : OverlayWindow
 
         _dragging = false;
         e.Pointer.Capture(null);
+        Pill.Cursor = new Cursor(StandardCursorType.Hand);
 
-        if (!_dragMoved)
+        if (_form == CapsuleForm.OrbIdle && !_dragMoved)
         {
-            // 点球（想开始录音）。
+            // 点球（想开始录音）。展开态松手不触发任何点击动作
+            // （CSS: CAPSULE_DRAG_OPTS 没有 onClick）。
             StartRecordingRequested?.Invoke(this, EventArgs.Empty);
             return;
         }
 
-        SaveOrbPosition();
+        if (_dragMoved)
+        {
+            SaveOrbPosition();
+        }
     }
 
     /// <summary>
@@ -1803,8 +1508,11 @@ public partial class CapsuleWindow : OverlayWindow
         }
 
         (int orbX, int orbY) = Placement.OrbScreenPosition(target.X, target.Y, winW, winH, scale);
-        (int cx, int cy) = Placement.ClampOrbPosition(orbX, orbY, winW, winH, scale, area.Value);
-        (int wx, int wy) = Placement.OrbWindowPosition(cx, cy, winW, winH, scale, area.Value);
+        int reserve = ReserveHeightPhysical(scale);
+        (int cx, int cy) = Placement.ClampOrbPosition(
+            orbX, orbY, winW, winH, scale, area.Value, reserveHeight: reserve);
+        (int wx, int wy) = Placement.OrbWindowPosition(
+            cx, cy, winW, winH, scale, area.Value, reserveHeight: reserve);
         return new PixelPoint(wx, wy);
     }
 
@@ -1817,11 +1525,6 @@ public partial class CapsuleWindow : OverlayWindow
     /// </summary>
     private void SaveOrbPosition()
     {
-        if (PositionSaver is null)
-        {
-            return;
-        }
-
         double scale = CurrentRenderScaling;
         (int winW, int winH) = WindowSizePhysical(scale);
         if (winW <= 0 || winH <= 0)
@@ -1830,6 +1533,11 @@ public partial class CapsuleWindow : OverlayWindow
         }
 
         (int orbX, int orbY) = Placement.OrbScreenPosition(Position.X, Position.Y, winW, winH, scale);
+
+        if (PositionSaver is null)
+        {
+            return;
+        }
 
         int orbCenterX = orbX + (int)Math.Round(Placement.OrbSize * scale / 2.0, MidpointRounding.ToEven);
         int orbCenterY = orbY + (int)Math.Round(Placement.OrbSize * scale / 2.0, MidpointRounding.ToEven);
@@ -1867,57 +1575,21 @@ public partial class CapsuleWindow : OverlayWindow
     {
         _reducedMotion = disabled;
 
-        foreach ((Avalonia.Animation.ITransition transition, TimeSpan duration) in _transitionDurations)
+        foreach ((Avalonia.Animation.ITransition transition, TimeSpan duration) in _transitionDurationsList)
         {
             SetTransitionDuration(transition, disabled ? TimeSpan.Zero : duration);
         }
 
-        if (!disabled)
-        {
-            // 内容淡入淡出的时长是**跟着形态变**的（展开 .1s / 收起 .12s），
-            // 恢复时按当前形态重新落一次。
-            ApplyContentFadeDuration();
-        }
-    }
-
-    /// <summary>
-    /// 内容淡入淡出的时长：展开 .1s / 收起 .12s（CSS L627-631 / L615-621）。
-    ///
-    /// <para>动效降级（<c>prefers-reduced-motion</c>）时归零 —— CSS 那边是
-    /// <c>transition: none !important</c>，效果就是"立刻到位"。</para>
-    /// </summary>
-    private void ApplyContentFadeDuration()
-    {
-        TimeSpan fade = TimeSpan.FromMilliseconds(
-            _form == CapsuleForm.OrbIdle ? FadeOutDurationMs : FadeInDurationMs);
-
-        if (_reducedMotion)
-        {
-            fade = TimeSpan.Zero;
-        }
-
-        foreach (var transitions in _contentOpacityTransitions)
-        {
-            foreach (var transition in transitions)
-            {
-                if (transition is DoubleTransition doubleTransition)
-                {
-                    doubleTransition.Duration = fade;
-                    doubleTransition.Delay = TimeSpan.Zero;
-                }
-            }
-        }
+        // 胶囊自己的过渡（宽度形变、内容淡入淡出、球图标呼吸）在 PillShape 内部。
+        Pill.ApplyReducedMotion(disabled);
     }
 
     /// <summary>把各个过渡的默认时长记下来（动效降级时置 0，恢复时还原）。</summary>
     private void CollectTransitionDurations()
     {
-        _transitionDurations.Clear();
+        _transitionDurationsList.Clear();
 
-        foreach (Control control in new Control[]
-                 {
-                     Pill, TextBar, OrbHost, CancelButton, BarContent, StopButton, StateIcon, CopyButton,
-                 })
+        foreach (Control control in new Control[] { TextBar, OrbMenu, OrbHint })
         {
             Avalonia.Animation.Transitions? transitions = control.Transitions;
             if (transitions is null)
@@ -1927,7 +1599,7 @@ public partial class CapsuleWindow : OverlayWindow
 
             foreach (Avalonia.Animation.ITransition transition in transitions)
             {
-                _transitionDurations.Add((transition, GetTransitionDuration(transition)));
+                _transitionDurationsList.Add((transition, GetTransitionDuration(transition)));
             }
         }
     }
@@ -1941,22 +1613,15 @@ public partial class CapsuleWindow : OverlayWindow
     private static TimeSpan GetTransitionDuration(Avalonia.Animation.ITransition transition) => transition switch
     {
         DoubleTransition d => d.Duration,
-        CornerRadiusTransition c => c.Duration,
         _ => TimeSpan.Zero,
     };
 
     /// <summary>设置过渡的时长（理由同 <see cref="GetTransitionDuration"/>）。</summary>
     private static void SetTransitionDuration(Avalonia.Animation.ITransition transition, TimeSpan duration)
     {
-        switch (transition)
+        if (transition is DoubleTransition d)
         {
-            case DoubleTransition d:
-                d.Duration = duration;
-                break;
-
-            case CornerRadiusTransition c:
-                c.Duration = duration;
-                break;
+            d.Duration = duration;
         }
     }
 }

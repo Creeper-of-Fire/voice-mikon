@@ -49,6 +49,10 @@
   <SolidColorBrush x:Key="Capsule.Wave.Brush" Color="#FFFF5A5A" />
   <!-- css.wave-dim: rgba(244,244,245,.28)  波形里的静音条 -->
   <SolidColorBrush x:Key="Capsule.WaveDim.Brush" Color="#47F4F4F5" />
+  <!-- 结束钮 hover：CSS 的 .bar-stop:hover { filter: brightness(.92) }。
+       透明窗口上不能用 filter（会造出离屏合成层），所以换成"稍深的红"：
+       #ff5a5a × 0.92 = #eb5353。css.wave 两套主题一样，这个值也跟着一样。 -->
+  <SolidColorBrush x:Key="Capsule.WaveHover.Brush" Color="#FFEB5353" />
 
   <!-- ==================== 派生色 ====================
        这些不是 CSS 令牌：它们的值由「当前形态 + 当前阶段 + 当前主题」算出来
@@ -74,4 +78,86 @@
   <!-- 右侧状态图标的颜色（初始值 = wave） -->
   <SolidColorBrush x:Key="Capsule.StateIcon.Foreground.Brush" Color="#FFFF5A5A" />
 
+  <!-- ==================== 胶囊里的按钮 ====================
+       CSS 的按钮是纯色圆钮：
+         .recording-pill button { width:30px; height:30px; border-radius:50%; }
+         .recording-pill .bar-cancel { background:var(css.cancel-btn); color:var(css.fg); }
+         .recording-pill .bar-cancel:hover { background:var(css.cancel-btn-hover); }
+         .recording-pill .bar-stop { background:var(css.wave); color:var(css.wave-fg); }
+         .recording-pill .bar-stop:hover { filter: brightness(0.92); }
+         .recording-pill.error.can-copy .bar-copy { background:var(css.state-bg); color:var(css.fg); }
+         .recording-pill.error.can-copy .bar-copy:hover { background:var(css.cancel-btn-hover); }
+
+       ⚠ 为什么不用 Fluent 的 Button 主题：Fluent 给按钮加了 PointerOver / Pressed 的
+       底色，而球形态下胶囊里的按钮是**透明**的（CSS: opacity:0 + pointer-events:none）——
+       Fluent 的高亮会在红球上"发光"，看着像凭空多出来的一个圈。
+       所以这里给胶囊里的按钮用自己的 ControlTheme：自己的模板（圆角底 + 内容居中），
+       不带 Fluent 的 PointerOver；hover 色按 CSS 单独给。
+
+       ⚠ 底色**只能**由 ControlTheme 给（不能在按钮上写本地 Background）：
+       本地值的优先级最高，主题里的 :pointerover 规则就压不住它了。 -->
+  <ControlTheme x:Key="Capsule.IconButton" TargetType="Button">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="{TemplateBinding CornerRadius}"
+                Padding="{TemplateBinding Padding}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </ControlTheme>
+
+  <!-- 取消钮（✕）：CSS .bar-cancel -->
+  <ControlTheme x:Key="Capsule.CancelButton" TargetType="Button" BasedOn="{StaticResource Capsule.IconButton}">
+    <Setter Property="Background" Value="{DynamicResource Capsule.CancelBtn.Brush}" />
+    <Style Selector="^:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Capsule.CancelBtnHover.Brush}" />
+    </Style>
+    <Style Selector="^:pressed">
+      <Setter Property="Background" Value="{DynamicResource Capsule.CancelBtnHover.Brush}" />
+    </Style>
+  </ControlTheme>
+
+  <!-- 结束钮（✓）：CSS .bar-stop（hover 是 brightness(.92)，见 WaveHover 那条注释） -->
+  <ControlTheme x:Key="Capsule.StopButton" TargetType="Button" BasedOn="{StaticResource Capsule.IconButton}">
+    <Setter Property="Background" Value="{DynamicResource Capsule.Wave.Brush}" />
+    <Style Selector="^:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Capsule.WaveHover.Brush}" />
+    </Style>
+    <Style Selector="^:pressed">
+      <Setter Property="Background" Value="{DynamicResource Capsule.WaveHover.Brush}" />
+    </Style>
+  </ControlTheme>
+
+  <!-- 复制钮：CSS .bar-copy -->
+  <ControlTheme x:Key="Capsule.CopyButton" TargetType="Button" BasedOn="{StaticResource Capsule.IconButton}">
+    <Setter Property="Background" Value="{DynamicResource Capsule.StateBg.Brush}" />
+    <Style Selector="^:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Capsule.CancelBtnHover.Brush}" />
+    </Style>
+    <Style Selector="^:pressed">
+      <Setter Property="Background" Value="{DynamicResource Capsule.CancelBtnHover.Brush}" />
+    </Style>
+  </ControlTheme>
+
+  <!-- 球菜单里的圆钮：CSS .orb-menu-btn（hover 色在代码里手写，见 CapsuleWindow 的
+       WireMenuButtonHover —— 退出项 hover 要换成警示色，样式表表达不了） -->
+  <ControlTheme x:Key="Capsule.MenuButton" TargetType="Button" BasedOn="{StaticResource Capsule.IconButton}">
+    <Setter Property="Background" Value="{DynamicResource Capsule.StateBg.Brush}" />
+  </ControlTheme>
+
 </ResourceDictionary>
+

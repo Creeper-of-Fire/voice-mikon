@@ -163,8 +163,14 @@ public static class Placement
     /// 把球夹回"允许待着"的范围内（物理像素）。
     ///
     /// 纵向比横向严：球拖得太靠上，展开后的胶囊（文字条 + 胶囊）会出屏，
-    /// 所以球的上边至少要留出"窗口高 − (下边距 + 球高)"的高度。
+    /// 所以球的上边至少要留出"预留高度 − (下边距 + 球高)"的高度。
     /// </summary>
+    /// <param name="reserveHeight">
+    /// 球上方要预留的窗口高度（物理像素）。null = 按 <paramref name="winH"/> 推
+    /// （= 窗口整高的做法；Python 版窗口固定 260 时就是这个）。
+    /// 窗口高度随内容变时，预留量要按**最大**形态算 ——
+    /// 否则窗口一变高，纵向夹取就把球往下推，球在屏幕上会跳。
+    /// </param>
     public static (int X, int Y) ClampOrbPosition(
         int orbX,
         int orbY,
@@ -174,13 +180,16 @@ public static class Placement
         NativeMethods.RECT workArea,
         int orbSize = OrbSize,
         int insetY = OrbInsetY,
-        int margin = OrbMargin)
+        int margin = OrbMargin,
+        int? reserveHeight = null)
     {
         int sizePhys = (int)Math.Round(orbSize * scale, MidpointRounding.ToEven);
         int edge = (int)Math.Round(margin * scale, MidpointRounding.ToEven);
 
         // 球上方要留给胶囊（文字条 + 胶囊）的高度
-        int head = Math.Max(0, winH - (int)Math.Round((insetY + orbSize) * scale, MidpointRounding.ToEven));
+        int head = Math.Max(
+            0,
+            (reserveHeight ?? winH) - (int)Math.Round((insetY + orbSize) * scale, MidpointRounding.ToEven));
 
         int minX = workArea.Left + edge;
         int maxX = Math.Max(minX, workArea.Right - edge - sizePhys);
@@ -204,9 +213,10 @@ public static class Placement
         NativeMethods.RECT workArea,
         int orbSize = OrbSize,
         int insetY = OrbInsetY,
-        int margin = OrbMargin)
+        int margin = OrbMargin,
+        int? reserveHeight = null)
     {
-        (int ox, int oy) = ClampOrbPosition(orbX, orbY, winW, winH, scale, workArea, orbSize, insetY, margin);
+        (int ox, int oy) = ClampOrbPosition(orbX, orbY, winW, winH, scale, workArea, orbSize, insetY, margin, reserveHeight);
         int clientW = (int)Math.Round(winW / scale, MidpointRounding.ToEven);
         int x = ox - (int)Math.Round(OrbInsetX(clientW, orbSize) * scale, MidpointRounding.ToEven);
         int y = oy + (int)Math.Round((insetY + orbSize) * scale, MidpointRounding.ToEven) - winH;
@@ -243,7 +253,8 @@ public static class Placement
         int winH,
         int orbSize = OrbSize,
         int insetY = OrbInsetY,
-        int margin = OrbMargin)
+        int margin = OrbMargin,
+        int? reserveHeight = null)
     {
         (int dx, int dy)? offset = DecodeOffset(geometry);
         if (offset is null)
@@ -253,6 +264,6 @@ public static class Placement
 
         int orbX = workArea.Left + (int)Math.Round(offset.Value.dx * scale, MidpointRounding.ToEven);
         int orbY = workArea.Top + (int)Math.Round(offset.Value.dy * scale, MidpointRounding.ToEven);
-        return OrbWindowPosition(orbX, orbY, winW, winH, scale, workArea, orbSize, insetY, margin);
+        return OrbWindowPosition(orbX, orbY, winW, winH, scale, workArea, orbSize, insetY, margin, reserveHeight);
     }
 }

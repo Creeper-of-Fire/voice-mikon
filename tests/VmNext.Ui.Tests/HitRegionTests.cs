@@ -1,7 +1,5 @@
 using System.Collections.Generic;
 using Avalonia;
-using Avalonia.Headless.XUnit;
-using VmNext.Core.Presentation;
 using VmNext.Shell;
 using VmNext.Ui;
 using Xunit;
@@ -9,22 +7,30 @@ using Xunit;
 namespace VmNext.Ui.Tests;
 
 /// <summary>
-/// 命中区计算的单元测试。
+/// 命中区换算的单元测试（**纯函数**）。
 ///
-/// <para>两半：<b>纯函数</b>（可见元素 → 矩形列表，可控输入）与
-/// <b>无头窗口</b>（各状态下窗口真算出来的区域集合）。</para>
+/// <para>对照物：voice-mikon/src/voice_mikon/host/capsule.py 的 <c>update_regions</c>：
+/// <list type="bullet">
+/// <item>逻辑像素 → 物理像素：<c>expand()</c> 里是 <c>int(round(x * scale))</c>
+/// （四舍五入远离零）。</item>
+/// <item>隐藏的块不参与并集：<c>if w &lt;= 0 or h &lt;= 0: continue</c>。</item>
+/// <item>形状一律是**直角矩形**：真机那边 <c>ellipses</c> 集合恒为空 ——
+/// 胶囊与球同样按矩形裁，"跑道形"是画出来的视觉，不是裁出来的形状。
+/// 每边外扩 3 逻辑像素由 Shell 的 <c>OverlayWindow</c> 负责。</item>
+/// </list></para>
+///
+/// <para>窗口那一半（各状态下窗口真算出来的区域集合）不测 ——
+/// 那测的是 Avalonia 控件树的内部状态，不是规范。</para>
 /// </summary>
 public class HitRegionTests
 {
-    // ==================== 纯函数 ====================
-
     /// <summary>逻辑像素 → 物理像素（DPI 换算）。</summary>
     [Fact]
     public void 纯函数_按缩放换算成物理像素()
     {
         // Avalonia 的 Rect 语义是 (x, y, width, height)。
         IReadOnlyList<HitRegion> regions = HitRegionBuilder.Build(
-            new[] { new HitRegionSpec(new Rect(10, 20, 50, 60), 0) },
+            new[] { new HitRegionSpec(new Rect(10, 20, 50, 60)) },
             2.0);
 
         HitRegion region = Assert.Single(regions);
@@ -41,9 +47,9 @@ public class HitRegionTests
         IReadOnlyList<HitRegion> regions = HitRegionBuilder.Build(
             new[]
             {
-                new HitRegionSpec(new Rect(0, 0, 0, 0), 0),
-                new HitRegionSpec(new Rect(10, 10, 0, 40), 0),
-                new HitRegionSpec(new Rect(0, 0, 40, 40), 0),
+                new HitRegionSpec(new Rect(0, 0, 0, 0)),
+                new HitRegionSpec(new Rect(10, 10, 0, 40)),
+                new HitRegionSpec(new Rect(0, 0, 40, 40)),
             },
             1.0);
 
@@ -52,122 +58,37 @@ public class HitRegionTests
         Assert.Equal(40, region.Right);
     }
 
-    /// <summary>圆角按缩放换算（文字条 14px、浮层 12px）。</summary>
+    /// <summary>每个可见元素各报一块（浮层不能并进球的包围盒）。</summary>
     [Fact]
-    public void 纯函数_圆角按缩放换算()
+    public void 纯函数_浮层单独一块()
     {
         IReadOnlyList<HitRegion> regions = HitRegionBuilder.Build(
             new[]
             {
-                new HitRegionSpec(new Rect(0, 0, 100, 40), 14),
-                new HitRegionSpec(new Rect(0, 50, 60, 90), 12),
+                new HitRegionSpec(new Rect(236, 140, 40, 40)),   // 球
+                new HitRegionSpec(new Rect(16, 40, 480, 90)),    // 文字条
             },
-            1.75);
-
-        Assert.Equal(2, regions.Count);
-        Assert.Equal(25, regions[0].CornerRadius);   // round(14 * 1.75) = 25
-        Assert.Equal(21, regions[1].CornerRadius);   // round(12 * 1.75) = 21
-    }
-
-    /// <summary>999px 的胶囊圆角会被夹到短边的一半（Win32 的圆角矩形不允许超过一半）。</summary>
-    [Fact]
-    public void 纯函数_超大圆角夹到短边一半()
-    {
-        IReadOnlyList<HitRegion> regions = HitRegionBuilder.Build(
-            new[] { new HitRegionSpec(new Rect(0, 0, 40, 40), 999) },
             1.0);
 
+        Assert.Equal(2, regions.Count);
+        Assert.Equal(40, regions[0].Width);
+        Assert.Equal(40, regions[0].Height);
+        Assert.Equal(480, regions[1].Width);
+        Assert.Equal(90, regions[1].Height);
+    }
+
+    /// <summary>形状不带圆角信息：裁剪一律直角矩形。</summary>
+    [Fact]
+    public void 纯函数_命中区不带圆角()
+    {
+        IReadOnlyList<HitRegion> regions = HitRegionBuilder.Build(
+            new[] { new HitRegionSpec(new Rect(0, 0, 100, 40)) },
+            1.75);
+
         HitRegion region = Assert.Single(regions);
-        Assert.Equal(20, region.ClampedRadius);
-    }
 
-    // ==================== 无头窗口 ====================
-
-    /// <summary>
-    /// 球形态：只有球那一块参与命中（文字条不占布局）。
-    /// </summary>
-    [AvaloniaFact]
-    public async Task 球形态_只有球参与命中()
-    {
-        var window = await CapsuleWindowTests.OpenWindowAsync();
-        try
-        {
-            window.SetMode(DisplayModes.Orb, DisplayPayload.Empty);
-            await CapsuleWindowTests.SettleAsync();
-
-            IReadOnlyList<HitRegion> regions = window.ComputeHitRegions();
-            HitRegion region = Assert.Single(regions);
-
-            // 球在窗口里底边居中：宽 40、高 40。
-            Assert.Equal(40 * window.CurrentRenderScaling, region.Width, 0);
-            Assert.Equal(40 * window.CurrentRenderScaling, region.Height, 0);
-        }
-        finally
-        {
-            window.Close();
-        }
-    }
-
-    /// <summary>录音态：胶囊 + 文字条两块（真机的规矩：文字条要单独一块）。</summary>
-    [AvaloniaFact]
-    public async Task 录音态_胶囊与文字条两块()
-    {
-        var window = await CapsuleWindowTests.OpenWindowAsync();
-        try
-        {
-            window.SetMode(DisplayModes.Recording, DisplayPayload.Empty);
-            await CapsuleWindowTests.SettleAsync();
-
-            IReadOnlyList<HitRegion> regions = window.ComputeHitRegions();
-            Assert.Equal(2, regions.Count);
-        }
-        finally
-        {
-            window.Close();
-        }
-    }
-
-    /// <summary>球的右键菜单打开：多一块菜单（菜单要能点得到）。</summary>
-    [AvaloniaFact]
-    public async Task 菜单打开_多一块菜单()
-    {
-        var window = await CapsuleWindowTests.OpenWindowAsync();
-        try
-        {
-            window.SetMode(DisplayModes.Orb, DisplayPayload.Empty);
-            await CapsuleWindowTests.SettleAsync();
-
-            window.ToggleOrbMenu();
-            await CapsuleWindowTests.SettleAsync();
-
-            IReadOnlyList<HitRegion> regions = window.ComputeHitRegions();
-            Assert.Equal(2, regions.Count);
-        }
-        finally
-        {
-            window.Close();
-        }
-    }
-
-    /// <summary>气泡：多一块气泡。</summary>
-    [AvaloniaFact]
-    public async Task 气泡打开_多一块气泡()
-    {
-        var window = await CapsuleWindowTests.OpenWindowAsync();
-        try
-        {
-            window.SetMode(DisplayModes.Orb, DisplayPayload.Empty);
-            await CapsuleWindowTests.SettleAsync();
-
-            window.ShowOrbHint("模型加载中…");
-            await CapsuleWindowTests.SettleAsync();
-
-            IReadOnlyList<HitRegion> regions = window.ComputeHitRegions();
-            Assert.Equal(2, regions.Count);
-        }
-        finally
-        {
-            window.Close();
-        }
+        // 宽度只由矩形本身决定（1.75 倍缩放）。
+        Assert.Equal(175, region.Width);
+        Assert.Equal(70, region.Height);
     }
 }

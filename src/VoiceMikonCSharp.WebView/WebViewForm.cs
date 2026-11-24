@@ -34,16 +34,21 @@ public abstract class WebViewForm : Form
     private WebViewBridge? _bridge;
     private bool _initStarted;
 
+    /// <summary>这是不是一个透明窗口（靠 WebView2 的逐像素 alpha 透出桌面）。</summary>
+    private readonly bool _transparent;
+
     /// <summary>造一个 WebView 承载窗口。</summary>
     /// <param name="pageFile">静态资源里的页面文件名（相对虚拟主机根）。</param>
-    /// <param name="backgroundColor">页面未绘制区域的底色（透明窗口用色键色）。</param>
-    /// <param name="transparent">true = 透明窗口（按 <paramref name="backgroundColor"/> 做色键）。</param>
+    /// <param name="backgroundColor">页面未绘制区域的兜底底色。</param>
+    /// <param name="transparent">true = 透明窗口（靠 WebView2 的逐像素 alpha 透出桌面）。</param>
     protected WebViewForm(string pageFile, Color backgroundColor, bool transparent)
     {
         PageFile = pageFile;
         PageBackgroundColor = backgroundColor;
+        _transparent = transparent;
 
-        // Control 的真实背景色：透明窗口下它就是色键色。
+        // Control 的真实背景色：透明窗口下它只是"WebView2 还没铺满客户区时的兜底色"。
+        // 分层窗口**不绘制背景**（见 CreateParams），所以它不会露到屏幕上。
         BackColor = backgroundColor;
 
         FormBorderStyle = FormBorderStyle.None;
@@ -58,23 +63,26 @@ public abstract class WebViewForm : Form
         //   的同一个坑（WinForms 按字体自动缩放）。窗口尺寸我们自己算。
         AutoScaleMode = AutoScaleMode.None;
 
-        // 透明窗口：色键把网页里未被绘制的区域抠掉，透出桌面。
-        // 抠不掉的颜色 = WebView2 的 DefaultBackgroundColor，所以两者必须一致。
-        if (transparent)
-        {
-            TransparencyKey = backgroundColor;
-        }
-
+        // ⚠ 透明窗口**不能**用 WinForms 的 TransparencyKey（色键）那套。
+        //
+        //   色键走的是 UpdateLayeredWindow：WinForms 把整窗（含 WebView2 子窗口）
+        //   拍平成一张 32 位位图再交给 DWM，而 GDI 抓到的画面**没有 alpha 通道** ——
+        //   网页里半透明的像素因此被压成不透明色。
+        //   实测症状：文字条（Chromium 把它提升成独立合成层）四边出现一圈纯黑描边，
+        //   而直接画在根层上的悬浮球却干干净净 —— 合成层的 alpha 正是被色键这条
+        //   路径吃掉的（深色主题下黑边与底色融为一体，看着"没事"，其实还在）。
+        //
+        //   正确做法：窗口保持 WS_EX_LAYERED，但**不设任何分层属性**
+        //   （不设 TransparencyKey、不调 SetLayeredWindowAttributes）。
+        //   分层窗口不绘制背景，WebView2 子窗口保留自己的逐像素 alpha，
+        //   alpha=0 处真正透出桌面。见 CreateParams。
         _webView = new WebView2
         {
             Dock = DockStyle.Fill,
 
             // ⚠ 透明窗口的关键：WebView2 必须**不渲染背景**（Color.Transparent），
-            //   那样网页的透明区域 alpha=0，后面的桌面直接透出来。
-            //   若把它设成色键色（洋红），WebView2 会用不透明的洋红铺满整个客户区，
-            //   而**色键对子窗口无效**（子窗口不参与父窗口的 layered 合成）——
-            //   洋红就留在屏幕上了（实测：色键抠不掉）。
-            //   父窗口这边仍用 WinForms 的 TransparencyKey 把自己的底色抠掉。
+            //   那样网页的透明区域 alpha=0，后面的内容直接透出来。
+            //   若把它设成不透明底色，WebView2 会用那个颜色铺满整个客户区。
             DefaultBackgroundColor = transparent ? Color.Transparent : backgroundColor,
         };
 
@@ -84,7 +92,7 @@ public abstract class WebViewForm : Form
     /// <summary>静态资源里的页面文件名。</summary>
     public string PageFile { get; }
 
-    /// <summary>页面底色（透明窗口下也是色键色）。</summary>
+    /// <summary>页面兜底底色（透明窗口下只是 WebView2 未铺满客户区时的占位，不会露到屏幕上）。</summary>
     public Color PageBackgroundColor { get; }
 
     /// <summary>前端桥接对象（WebView2 初始化完成前为 null）。</summary>
@@ -118,6 +126,20 @@ public abstract class WebViewForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+
+        // 兜底：透明窗口必须是分层窗口（分层窗口不绘制背景，WebView2 的
+        // alpha=0 才真的透出桌面）。CreateParams 里已经加了，这里防的是
+        // 将来 handle 创建时机变了导致它被静默漏掉 —— 漏掉的后果是合成层
+        // 边缘混出父窗口底色（洋红条带），不报错、很难查。
+        if (_transparent)
+        {
+            int ex = NativeMethods.GetWindowExStyle(Handle);
+            if ((ex & NativeMethods.WS_EX_LAYERED) == 0)
+            {
+                NativeMethods.AddWindowExStyle(Handle, NativeMethods.WS_EX_LAYERED);
+                _log.Warning("透明窗口缺少 WS_EX_LAYERED，已补上");
+            }
+        }
 
         // 句柄建好才能拿到 DPI，也才能初始化 WebView2。
         ApplyLogicalSize();
@@ -301,6 +323,22 @@ public abstract class WebViewForm : Form
                 | NativeMethods.WS_BORDER
                 | NativeMethods.WS_DLGFRAME);
             cp.Style |= NativeMethods.WS_POPUP;
+
+            // 透明窗口：**分层，但不设任何分层属性**。
+            //
+            //   · 分层窗口不绘制背景 —— WebView2 提交 alpha=0 的地方，
+            //     后面没有父窗口的底色挡着，于是真正透出桌面。
+            //     （不去掉这个位的话，父窗口会拿 BackColor 把客户区填满，
+            //     合成层边缘那圈半透明像素就会把底色混出来 —— 实测是洋红条带。）
+            //   · 但**绝不能**再叠上色键（TransparencyKey /
+            //     SetLayeredWindowAttributes）：那会让 WinForms 改走
+            //     UpdateLayeredWindow 整窗拍平的老路，合成层的 alpha 被拍没，
+            //     文字条四边就长出一圈黑边。详见构造函数的说明。
+            if (_transparent)
+            {
+                cp.ExStyle |= NativeMethods.WS_EX_LAYERED;
+            }
+
             return cp;
         }
     }

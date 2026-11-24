@@ -30,6 +30,14 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
   </ItemGroup>
 
+  <!--
+    摘掉 WebView2 包的 **WPF** 程序集（Microsoft.Web.WebView2.Wpf.dll）这件事
+    放在仓库根的 `Directory.Build.targets` 里做 —— 本仓库是 WinForms 宿主，
+    WPF 那份用不上；而且 App 项目会通过 NuGet 的**传递性包流**拿到同一个包，
+    只在单个 csproj 里摘是摘不干净的（App 照样报同一个冲突）。
+    详细说明见 Directory.Build.targets。
+  -->
+
   <ItemGroup>
     <!--
       依赖方向（AGENTS.md）：

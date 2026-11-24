@@ -1,0 +1,49 @@
+<Project>
+
+  <!--
+    摘掉 WebView2 包里的 **WPF** 程序集（Microsoft.Web.WebView2.Wpf.dll）。
+
+    为什么：WebView2 的 NuGet 包同时提供 WinForms 与 WPF 两套控件。本仓库是
+    **WinForms 宿主**（VoiceMikonCSharp.WebView 用 Microsoft.Web.WebView2.WinForms），
+    WPF 那份一行都用不到。
+
+    可它不是"无害的多余文件"：NuGet 给 net10.0-windows 会同时解析到两个目录 ——
+      lib_manual/netcoreapp3.0/Microsoft.Web.WebView2.Wpf.dll
+      lib_manual/net5.0-windows10.0.17763.0/Microsoft.Web.WebView2.Wpf.dll
+    后者引用 WindowsBase 5.0.0.0，而 .NET 10 ref pack 里的 WindowsBase 是
+    4.0.0.0 —— 程序集解析撞车，编译输出 MSB3277 警告：
+
+      warning MSB3277: 发现无法解析的"WindowsBase"的不同版本之间存在冲突。
+
+    摘掉之后：警告消失，输出目录里也不再有一份 87 KB 的死 DLL。
+
+    为什么放在**仓库根**而不是某个 csproj：App 项目自己并没有引用这个包，
+    它是通过 NuGet 的传递性包流（ProjectReference → 包的传递）拿到同一份资产的 ——
+    只在 WebView 项目里摘，App 照样报同一个冲突。
+
+    ⚠ 别改成 PackageReference 的 ExcludeAssets="compile"：
+      那会把 Core / WinForms 一起摘掉，编译直接失败（类型找不到）。
+      要摘的只是这一个文件，所以只能从 @(Reference) / @(RuntimeCopyLocalItems)
+      里按**文件名**过滤。
+  -->
+  <Target Name="RemoveWebView2WpfAssembly" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <!--
+        NuGet 把包的编译资产加进来时，item 的 Include 是**完整路径**
+        （.../lib_manual/net5.0-windows10.0.17763.0/Microsoft.Web.WebView2.Wpf.dll），
+        所以按简单名 Remove 匹配不到 —— 得先按文件名筛出来再 Remove。
+      -->
+      <_WebView2WpfRef Include="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+      <Reference Remove="@(_WebView2WpfRef)" />
+
+      <!--
+        还要堵住**运行时**资产：编译引用摘了，运行时资产照样会把 Wpf.dll
+        复制到输出目录，再顺着 ProjectReference 流到 App 项目去 ——
+        那边照样报同一个冲突（还多一份 87 KB 的死 DLL）。
+      -->
+      <_WebView2WpfRuntime Include="@(RuntimeCopyLocalItems)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+      <RuntimeCopyLocalItems Remove="@(_WebView2WpfRuntime)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

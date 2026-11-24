@@ -262,8 +262,19 @@ public sealed class TrayIcon : IDisposable
         {
             AddIcon();
 
-            while (NativeMethods.PeekMessage(out NativeMethods.MSG msg, IntPtr.Zero, 0, 0, NativeMethods.PM_REMOVE))
+            // 真正的阻塞式消息循环：GetMessage 在队列为空时挂起等，直到有消息或 WM_QUIT。
+            // ⚠ 不能用 PeekMessage 轮询：那样只是把当前队列抽干就跳出 try，
+            //   finally 立刻 RemoveIcon + DestroyWindow、线程结束 —— 托盘图标从来没出现过。
+            while (true)
             {
+                int result = NativeMethods.GetMessageW(out NativeMethods.MSG msg, IntPtr.Zero, 0, 0);
+                if (result <= 0)
+                {
+                    // 0 = 取到 WM_QUIT（HandleMessage 收到 WmShutdown 时 PostQuitMessage 投递的）；
+                    // -1 = 出错。两种情况都退出循环，不能死循环。
+                    break;
+                }
+
                 NativeMethods.TranslateMessage(ref msg);
                 NativeMethods.DispatchMessage(ref msg);
             }

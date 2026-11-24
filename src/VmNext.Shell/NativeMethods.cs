@@ -791,6 +791,26 @@ public static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
 
+    /// <summary>
+    /// 取一条消息（**阻塞式**消息循环用）：队列为空时挂起等，直到有消息到达。
+    ///
+    /// <para>返回值：
+    /// <list type="bullet">
+    /// <item><b>&gt; 0</b>：取到一条消息，正常处理；</item>
+    /// <item><b>0</b>：取到了 WM_QUIT —— 消息循环该结束了；</item>
+    /// <item><b>-1</b>：出错（用 GetLastError 查原因），同样要退出循环，不能死循环。</item>
+    /// </list></para>
+    ///
+    /// <para>⚠ 轮询式（PeekMessage）只适合"抽干队列就退出"的场合；
+    /// 要让窗口消息常驻，必须用这个阻塞版本，否则线程一退出窗口就没了。</para>
+    /// </summary>
+    /// <param name="lpMsg">取到的消息。</param>
+    /// <param name="hWnd">取哪个窗口的消息；传 IntPtr.Zero = 本线程所有窗口的消息。</param>
+    /// <param name="wMsgFilterMin">消息号下界（含）；0 = 不设下界。</param>
+    /// <param name="wMsgFilterMax">消息号上界（含）；0 = 不设上界。</param>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int GetMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
     /// <summary>把键盘消息翻译成字符消息。</summary>
     [DllImport("user32.dll")]
     public static extern bool TranslateMessage(ref MSG lpMsg);

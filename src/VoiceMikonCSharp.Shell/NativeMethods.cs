@@ -74,6 +74,9 @@ public static class NativeMethods
     /// <summary>SWP_NOSIZE (0x1)：不改变窗口大小。</summary>
     public const uint SWP_NOSIZE = 0x0001;
 
+    /// <summary>SWP_NOMOVE (0x2)：不改变窗口位置。</summary>
+    public const uint SWP_NOMOVE = 0x0002;
+
     /// <summary>SWP_NOZORDER (0x4)：不改变 Z 序。</summary>
     public const uint SWP_NOZORDER = 0x0004;
 
@@ -203,6 +206,30 @@ public static class NativeMethods
             ? unchecked((int)GetWindowLongPtr64(hWnd, GWL_EXSTYLE).ToInt64())
             : GetWindowLong32(hWnd, GWL_EXSTYLE);
 
+    /// <summary>GWL_STYLE：GetWindowLong/SetWindowLong 用来读写"窗口样式"的索引。</summary>
+    public const int GWL_STYLE = -16;
+
+    /// <summary>WS_CAPTION (0x00C00000)：标题栏。</summary>
+    public const int WS_CAPTION = 0x00C00000;
+
+    /// <summary>WS_THICKFRAME (0x00040000)：可调整大小的边框。</summary>
+    public const int WS_THICKFRAME = 0x00040000;
+
+    /// <summary>WS_BORDER (0x00800000)：单线边框。</summary>
+    public const int WS_BORDER = 0x00800000;
+
+    /// <summary>WS_DLGFRAME (0x00400000)：对话框边框。</summary>
+    public const int WS_DLGFRAME = 0x00400000;
+
+    /// <summary>WS_POPUP (0x80000000)：弹出窗口（无标题栏、无边框）。</summary>
+    public const int WS_POPUP = unchecked((int)0x80000000);
+
+    /// <summary>读取窗口的窗口样式（GWL_STYLE）。</summary>
+    public static int GetWindowStyle(IntPtr hWnd)
+        => IntPtr.Size == 8
+            ? unchecked((int)GetWindowLongPtr64(hWnd, GWL_STYLE).ToInt64())
+            : GetWindowLong32(hWnd, GWL_STYLE);
+
     /// <summary>写入窗口的扩展样式（GWL_EXSTYLE），返回修改前的值；失败返回 0（用 Marshal.GetLastWin32Error 判错）。</summary>
     public static int SetWindowExStyle(IntPtr hWnd, int newStyle)
         => IntPtr.Size == 8
@@ -215,6 +242,68 @@ public static class NativeMethods
         int current = GetWindowExStyle(hWnd);
         return SetWindowExStyle(hWnd, current | bits);
     }
+
+    #endregion
+
+    #region 分层窗口与透明
+
+    /// <summary>LWA_ALPHA (0x2)：整体 alpha 生效（配合 <c>bAlpha</c>）。</summary>
+    public const uint LWA_ALPHA = 0x00000002;
+
+    /// <summary>LWA_COLORKEY (0x1)：颜色键生效（与 <c>crKey</c> 相同的像素完全透明）。</summary>
+    public const uint LWA_COLORKEY = 0x00000001;
+
+    /// <summary>
+    /// 设置分层窗口（<c>WS_EX_LAYERED</c>）的属性。
+    ///
+    /// <para><b>两种用法</b>：
+    /// <list type="bullet">
+    /// <item><c>LWA_COLORKEY</c>：与 <paramref name="crKey"/> 颜色相同的像素**完全透明** ——
+    /// 透明窗口的经典做法（色键）。</item>
+    /// <item><c>LWA_ALPHA</c>：整个窗口按 <paramref name="bAlpha"/>（0..255）半透明。</item>
+    /// </list></para>
+    ///
+    /// <para>⚠ 窗口必须**先**带上 <c>WS_EX_LAYERED</c>，本调用才有效。</para>
+    /// </summary>
+    /// <param name="hWnd">窗口句柄。</param>
+    /// <param name="crKey">颜色键（RGB）。</param>
+    /// <param name="bAlpha">整体 alpha（0 = 全透明，255 = 不透明）。</param>
+    /// <param name="dwFlags"><see cref="LWA_COLORKEY"/> / <see cref="LWA_ALPHA"/>。</param>
+    /// <returns>成功返回 true。</returns>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetLayeredWindowAttributes(
+        IntPtr hWnd, uint crKey, byte bAlpha, uint dwFlags);
+
+    /// <summary>DWM 边距（把 DWM 的边框 / 阴影扩展进客户区）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MARGINS
+    {
+        /// <summary>左边扩展的宽度（物理像素）。</summary>
+        public int cxLeftWidth;
+
+        /// <summary>右边扩展的宽度（物理像素）。</summary>
+        public int cxRightWidth;
+
+        /// <summary>上边扩展的高度（物理像素）。</summary>
+        public int cyTopHeight;
+
+        /// <summary>下边扩展的高度（物理像素）。</summary>
+        public int cyBottomHeight;
+    }
+
+    /// <summary>
+    /// 把 DWM 的边框 / 阴影扩展到客户区（<c>dwmapi.dll</c>）。
+    ///
+    /// <para>传 <c>-1</c> 的四边会让整块客户区变成"玻璃"——
+    /// 这是 Windows 7 时代的 Aero Glass 做法；在 Win10/11 上要配合
+    /// <c>WS_EX_LAYERED</c> 才看得出效果。</para>
+    /// </summary>
+    /// <param name="hWnd">窗口句柄。</param>
+    /// <param name="pMarInset">四边的扩展量（物理像素）。</param>
+    /// <returns>0 = 成功；非 0 是 HRESULT 错误码。</returns>
+    [DllImport("dwmapi.dll", PreserveSig = true)]
+    public static extern int DwmExtendFrameIntoClientArea(IntPtr hWnd, ref MARGINS pMarInset);
 
     #endregion
 
@@ -492,6 +581,12 @@ public static class NativeMethods
 
     /// <summary>SW_HIDE (0)：隐藏窗口。</summary>
     public const int SW_HIDE = 0;
+
+    /// <summary>SW_SHOWNOACTIVATE (4)：显示窗口但**不激活**它（不抢焦点）。</summary>
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    /// <summary>HWND_TOPMOST：<c>SetWindowPos</c> 的"插到置顶组最顶端"句柄。</summary>
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
 
     /// <summary>显示/隐藏窗口。</summary>
     [DllImport("user32.dll", SetLastError = true)]
@@ -879,6 +974,22 @@ public static class NativeMethods
     /// <summary>取系统 DPI（拿不到显示器 DPI 时的兜底）。返回 0 表示取不到。</summary>
     [DllImport("user32.dll")]
     public static extern uint GetDpiForSystem();
+
+    /// <summary>SM_CXSCREEN (0)：屏幕宽度（像素）。</summary>
+    public const int SM_CXSCREEN = 0;
+
+    /// <summary>SM_CYSCREEN (1)：屏幕高度（像素）。</summary>
+    public const int SM_CYSCREEN = 1;
+
+    /// <summary>
+    /// 取系统度量（像素）。
+    ///
+    /// <para>⚠ DPI aware 进程里返回的是**物理像素**（主显示器的大小）。</para>
+    /// </summary>
+    /// <param name="nIndex">度量索引（见 <see cref="SM_CXSCREEN"/> / <see cref="SM_CYSCREEN"/>）。</param>
+    /// <returns>度量值（像素）。</returns>
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
 
     /// <summary>
     /// 取显示器的有效 DPI（shcore.dll，Win8.1+）。
